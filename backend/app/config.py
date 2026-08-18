@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     # Render env var (a fresh env, CI, etc.) would have silently regressed back to the
     # already-known-too-slow qwen model with no warning. Matching the default to the real,
     # working value removes that trap regardless of the env var.
-    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
     # Whisper model used for POST /api/transcribe-audio (see scribe.py's transcribe_audio) --
     # a separate setting from GROQ_MODEL since it's a different model for a different Groq
     # endpoint. MUST be "whisper-large-v3", not "-turbo" or "distil-whisper-large-v3-en":
@@ -57,7 +57,10 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True
 
     class Config:
-        env_file = ".env"
+        env_file = (
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"),
+            ".env"
+        )
 
 settings = Settings()
 # Prefer the developer-tier key (higher rate limits) whenever it's configured; every caller

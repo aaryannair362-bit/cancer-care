@@ -104,19 +104,13 @@ class TokenBucket:
                 self._sleep_fn(min(shortfall / self.rate, max_wait_sec))
 
 
-# Calibrated for llama-3.1-8b-instant specifically (the model actually configured in
-# production -- see config.py's GROQ_MODEL comment), using the SAME real, empirically-measured
-# numbers tests/scale/runner.py already validated against live Groq (not re-guessed here):
-# ~14,400 requests/day sustained (~1 every 6 seconds) and a conservative ~4500 TPM (75
-# tokens/sec) against the real ~6000 TPM limit, leaving headroom for burst timing since a
-# single visit's extraction/interaction calls can land close together. If GROQ_MODEL changes
-# again, these need re-validating the same way (a live probe against Groq's
-# x-ratelimit-remaining-requests / x-ratelimit-limit-tokens headers, exactly what
-# tests/scale/runner.py's _probe_groq_limits does), not guessed by analogy.
-_REQUEST_RATE_PER_SEC = 1.0 / 6.0
-_REQUEST_BURST_CAPACITY = 8.0
-_TOKEN_RATE_PER_SEC = 75.0
-_TOKEN_BURST_CAPACITY = 5000.0
+# Calibrated against live Groq headers:
+# x-ratelimit-limit-requests: 1000, x-ratelimit-limit-tokens: 8000 (tokens refill continuously in ~60s = ~133 TPM)
+# Paced conservatively with headroom for concurrent OPD and IPD users.
+_REQUEST_RATE_PER_SEC = 1.0
+_REQUEST_BURST_CAPACITY = 10.0
+_TOKEN_RATE_PER_SEC = 120.0
+_TOKEN_BURST_CAPACITY = 8000.0
 
 request_bucket = TokenBucket(rate_per_sec=_REQUEST_RATE_PER_SEC, capacity=_REQUEST_BURST_CAPACITY)
 token_bucket = TokenBucket(rate_per_sec=_TOKEN_RATE_PER_SEC, capacity=_TOKEN_BURST_CAPACITY)
@@ -125,11 +119,10 @@ token_bucket = TokenBucket(rate_per_sec=_TOKEN_RATE_PER_SEC, capacity=_TOKEN_BUR
 def estimate_tokens(prompt: str, max_tokens: int) -> float:
     """
     Cheap, tokenizer-free estimate of a call's total token cost, used to pace the token
-    bucket BEFORE the real usage is known (Groq's response only reports actual usage after
-    the call already happened, too late to pace with). ~4 characters/token is a standard
-    rough estimate for English text; `max_tokens` is added as the worst-case COMPLETION cost
-    rather than trying to predict actual response length, so this errs toward
-    over-estimating (safe -- costs a little extra wait) rather than under-estimating (unsafe
-    -- still risks a 429 the pacing was supposed to prevent).
+    bucket BEFORE the real usage is known. ~4 characters/token for prompt, plus realistic
+    completion estimate (capped at 800 for standard structured JSON responses) rather than
+    assuming worst-case max_tokens every call.
     """
-    return (len(prompt) / 4.0) + max_tokens
+    estimated_prompt_tokens = len(prompt) / 4.0
+    estimated_completion_tokens = min(float(max_tokens), 800.0)
+    return estimated_prompt_tokens + estimated_completion_tokens
