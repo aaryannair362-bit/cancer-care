@@ -3,6 +3,164 @@
 Chronological log of test-suite and bug-fix work. See ARCHITECTURE_NOTES.md for the codebase
 map and TEST_NOTES.md for ambiguities/gaps that were deliberately documented rather than fixed.
 
+## 2026-08-25 - CCA security lockdown, OPD voice restoration, financial-precision fix, deployment config
+
+Documentation note: the large HMS expansion (pharmacy/inventory/billing/appointments/nursing
+charting/assessments/MAR/patient documents/TPA routers) and the CCA Cancer Care OS module were
+both built between the 2026-08-03 entry above and this one, with no CHANGELOG entry of their
+own -- this entry starts by closing that gap, then covers this pass's own fixes.
+
+### Critical: CCA Oncology OS had no authentication and no tenant isolation
+
+All 37 endpoints in `backend/app/routers/cca.py` depended only on a DB session -- no
+`get_current_user`, no `organization_id` filtering anywhere in the CCA table set
+(`CCAPatient.organization_id` defaulted to `1` and was never read or filtered on), and
+`POST /api/cca/demo/reset` could wipe the CCA database with no auth check at all. A strictly
+worse recurrence of this codebase's own "most severe finding of the entire engagement" (the
+2026-08-01 user-management cross-tenant bug) -- that one at least required a valid token.
+
+Fixed: every endpoint now requires `Depends(get_current_user)` and resolves/validates the
+target `CCAPatient` against the caller's `organization_id` before touching it (404, not 403, on
+a cross-org patient, matching this codebase's no-enumeration convention).
+`CCAPatient.organization_id` is now a proper `NOT NULL` foreign key (`models_cca.py`);
+`cca_seed.py`'s demo seeder is now org-aware (and MRN-suffixes non-default orgs to avoid
+colliding with org 1's hardcoded demo MRNs). `/demo/reset`, `/demo/simulate-result`, and
+`/demo/advance-clock` are now Admin-only. Hardcoded scripted identities ("Dr. Sarah Varma",
+"Nurse Rekha Menon", ...) stamped into `verified_by`/`recorded_by`/`decided_by`/journey-event
+actor fields regardless of who actually called the endpoint are now the real authenticated
+caller's email. Several endpoints silently defaulted a missing `patient_id` to `1` (a malformed
+request would corrupt patient #1's chart); these now reject with 422. `complete_nurse_intake`
+did bare `float()`/`int()` on request values with no error handling (a non-numeric value raised
+an uncaught 500); now returns a clean 400. `POST /treatment/clearance` defaulted `decision` to
+`"CLEARED"` and `reason` to a canned string on an empty body -- an unreviewed request could
+mark a chemotherapy session administered with a fabricated justification; both fields are now
+required, and the endpoint 422s if the patient has no treatment session to attach the decision
+to (previously silently attached to session id `1` regardless of patient). Both
+`/treatment/clearance`'s and `/care-plans`' write paths are now Doctor/Admin-only
+(`staging/confirm`, `mdt/.../recommendation`, `care-plans` create/update) -- irreversible
+clinical decisions, matching the seriousness of the action.
+
+19 new/updated tests (`tests/integration/test_cca_api_workflow.py`,
+`tests/unit/test_cca_engines.py`), including a dedicated
+`test_cca_endpoints_require_auth_and_are_org_scoped` regression test.
+
+### `cca_engine.py`: AI brief/care-plan generation fabricated specific clinical content
+
+`synthesize_nexus_brief()` substituted specific invented values when real data was missing
+(a fixed `'Invasive Breast Carcinoma, NOS'` diagnosis, a fabricated `'cT2 cN0 cM0 (Provisional
+Stage IIA...)'` stage, an invented `'Hypertension (controlled on Amlodipine 5mg OD)'`
+comorbidity applied to every patient regardless of their real history, and `'Baseline CBC/LFT/
+KFT normal'` asserted with no actual lab data) -- directly contradicting the module's own "zero
+autonomous generation" docstring. `generate_care_plan_prefill()` was worse: it returned one
+fixed, fully-dosed AC-T chemotherapy regimen (real drug names and doses) for every patient
+regardless of diagnosis, staging, or biomarkers, formatted identically to genuine chart data.
+
+Fixed: missing-data sections now say `[NOT_RECORDED]`/`[NOT_STAGED]` explicitly instead of
+inventing plausible text. `generate_care_plan_prefill()` now returns `{"ready": false, ...}`
+with no drug/dose content at all until a real, finalized `MDTDecision` exists for the patient --
+a specific regimen is only ever shown once an actual tumor-board recommendation is on record.
+
+### OPD voice-drafted consultations restored (IPD deliberately left as plain-form, per product decision)
+
+The working tree's `main.py` had dropped `POST /api/scribe`, `GET /api/transcription-provider`,
+`POST /api/transcribe-audio`, and `POST /api/translate` entirely, while `frontend/opd.html` and
+`frontend/js/voice-capture.js` were untouched and still called all four -- every voice-drafted
+OPD consultation was broken (network/404 errors), IPD's own voice endpoints
+(`voice-to-vitals`, `nurse-consult`) had been removed too and were confirmed **not** wanted back.
+Restored the four OPD endpoints from git history (`scribe.py`/`sarvam_transcriber.py` were
+untouched and already fully working, just orphaned with zero callers), adapted to run the
+AI-extracted medications/labs through the same deterministic `drug_matcher`/`lab_test_matcher`
+correction `POST /api/consultations` already applies to manually-entered ones, and gated to
+Doctor-only for consistency with that same endpoint (both write to `Consultation`). 10 tests
+passing (`tests/integration/test_scribe_input_edge_cases.py`,
+`test_opd_scribe_patient_linkage.py`, `test_transcribe_audio_endpoint.py`,
+`test_sarvam_transcription_provider.py`).
+
+### Money stored as `Float` in billing/pharmacy/inventory
+
+`Invoice`/`InvoiceLine`/`Payment`/`Refund`/`BillingClaim`/`Tariff`/`BillingPackage`/`Drug`/
+`DispensingRecord`/`PurchaseOrderLine` all stored money as `Float` -- binary floating-point,
+not exact decimal, a real (if usually small) rounding-drift risk for financial data. Changed
+every money column to `Numeric(12, 2)` and every corresponding Pydantic request field from
+`float` to `Decimal` (`billing.py`, `pharmacy.py`, `inventory.py`) -- the existing
+`round(x, 2)` arithmetic throughout those routers already worked correctly against `Decimal`
+without further changes, since Python's `Decimal` supports the same operators. 5 tests
+re-verified passing (payment/refund balance arithmetic, dispensing totals).
+
+### Frontend: `InventoryManager` login stuck in an infinite redirect loop
+
+`inventory.html`'s `Auth.requirePage(['Pharmacist', 'Admin'])` omitted the `InventoryManager`
+role that `js/api.js`'s own `ROLE_HOME`/`NAV_ITEMS` already routed to this exact page --
+logging in as that role redirected to `/inventory.html`, which then redirected right back to
+`/inventory.html` (its own configured home), forever. Fixed by adding the role to the allowed
+list.
+
+### Frontend: stored-XSS risk and missing authentication in the CCA Oncology OS UI
+
+`cca-app.js` made every one of its ~20 API calls with zero authentication (raw `fetch()`, no
+`Authorization` header) and had no `escapeHtml()`/output-encoding anywhere, unlike every other
+frontend page -- ~15 `innerHTML` sites interpolated patient/document-derived data directly,
+including OCR/LLM-extracted document text (attacker-influenced content from an uploaded file).
+Once the backend now requires authentication (above), this file would have been entirely
+non-functional without a matching frontend fix.
+
+Fixed: `cca_os.html` now loads `js/api.js` and gates itself with `Auth.requirePage(...)`;
+`cca-app.js`'s ~20 raw `fetch()` calls now go through `Api.get`/`Api.post` (authenticated,
+with the existing token-refresh-on-401 handling); every interpolated value in an `innerHTML`
+template is now `escapeHtml()`-wrapped or `Number()`-coerced as appropriate. Also fixed in
+passing: the "Reject" button in the document-verification workspace called a `rejectFact()`
+function that was never defined anywhere in the file (the backend endpoint already existed
+with no caller) -- implemented, mirroring the existing `acceptFact()`.
+
+### Cross-platform OCR (Tesseract path resolution)
+
+`ocr_service.py` fell back to a hardcoded Windows path
+(`C:\Program Files\Tesseract-OCR\tesseract.exe`) when `TESSERACT_CMD` wasn't set -- silently
+non-functional on Render/Linux with no clear error. Added `_resolve_tesseract_cmd()`: explicit
+`TESSERACT_CMD` config, then `shutil.which("tesseract")` (works on any platform where the
+system package is installed and on `PATH`), then the Windows path as a last-resort local-dev
+convenience, then `None` (letting pytesseract raise its own clear `TesseractNotFoundError`
+instead of this silently doing nothing).
+
+### Deployment configuration added (previously none existed in-repo)
+
+Added `Dockerfile` (installs the system `tesseract-ocr` package `pip` cannot install),
+`render.yaml` (Render Blueprint: env var list, health check, Docker runtime), `.env.example`
+(every setting `config.py` reads, documented), and fixed `.gitignore`'s `.env*` pattern, which
+was also silently excluding `.env.example` itself from version control.
+
+### Documentation drift
+
+`README.md`, `SCHEMA.md`, and `QUICKSTART.md` all still described the original, unrelated
+Supabase/voice-agent scaffold this repo started from (`dashboard/`, `voice-agent/`,
+`doctors`/`patients`/`appointments`/`call_logs` tables) -- none of which is wired into
+`backend/app`/`frontend`. Rewritten to describe the system that actually exists;
+`ARCHITECTURE_NOTES.md`'s core-module section corrected where it had also gone stale (drug
+interactions are a static curated table now, not a Groq call; PHI-in-logs via `print()` in
+`scribe.py` was already fixed to `logger.debug`; discharge summaries are deterministic
+templating in `discharge_summary.py`, not `scribe.generate_discharge_summary()`).
+
+## 2026-08-24 - External-record OCR and longitudinal case review
+
+- Added registration-desk upload of PDF, JPEG, PNG, and TIFF patient records (25 MB limit),
+  duplicate detection, tenant isolation, audit logging, and durable database storage of the
+  original bytes, page text, OCR metadata, and conservatively extracted clinical signals.
+- Added embedded-text extraction for digital PDFs and Tesseract OCR for scanned PDF pages and
+  images. Processing failures retain the original file with an explicit `NeedsReview` state.
+- Added a doctor case-summary API combining imported findings with existing consultations,
+  vitals, nursing notes, and procedures. The UI presents the summary beside the authenticated
+  original-document viewer and keeps an explicit source-verification warning.
+- OPD patient lookup now includes standalone-registered patients, supports name/phone/MRN
+  search, accepts appointment deep links, and can launch a consultation directly from case
+  review. A doctor's appointment list exposes the same review-and-consult entry point.
+- Added 8 OCR/document integration tests covering real image OCR, upload/read/summary flow,
+  duplicate rejection, role and tenant boundaries, unsafe content types, and OCR failure
+  recovery.
+- Extended the Insurance/TPA desk with patient search -> complete case review -> original-report
+  viewing -> `Push for Pre-Approval`. TPA access is read-only and tenant-scoped; submitted
+  pre-approval snapshots now freeze imported-report metadata, checksums, OCR status, and
+  extracted clinical findings without duplicating the source-file binary into the snapshot.
+
 ## 2026-08-03 pass: medicine/lab-test name correction + custom-data admin UI, frontend visual
 ## refresh, and a 4-phase OPD/IPD/HeadNurse rebuild matching 3 supplied reference designs
 

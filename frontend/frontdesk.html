@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Front Desk - Aivana HMS</title>
+<link rel="stylesheet" href="/static/css/shared.css" />
+</head>
+<body>
+<div class="app-shell">
+  <div class="topnav" id="topnav"></div>
+  <div class="page">
+    <div class="page-header">
+      <div>
+        <h1>Front Desk</h1>
+        <p>Patient registration, appointment scheduling, and the OPD queue.</p>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab tab--active" data-tab="patients">Patients</div>
+      <div class="tab" data-tab="appointments">Appointments</div>
+      <div class="tab" data-tab="queue">Queue / Tokens</div>
+    </div>
+
+    <!-- Patients -->
+    <div class="tab-panel tab-panel--active" id="panel-patients">
+      <div class="grid grid--2">
+        <div class="card" id="register-card">
+          <div class="card-header"><h3>Register Patient</h3></div>
+          <form id="register-form" class="stack">
+            <div class="form-grid">
+              <div class="field"><label>Full name *</label><input type="text" id="reg-name" required /></div>
+              <div class="field"><label>Gender</label>
+                <select id="reg-gender"><option value="">-</option><option>Male</option><option>Female</option><option>Other</option></select>
+              </div>
+              <div class="field"><label>Age (or DOB)</label><input type="number" id="reg-age" min="0" max="130" /></div>
+              <div class="field"><label>Date of birth</label><input type="date" id="reg-dob" /></div>
+              <div class="field"><label>Phone</label><input type="text" id="reg-phone" /></div>
+              <div class="field"><label>ID proof type</label><input type="text" id="reg-id-type" placeholder="Aadhaar / PAN / ..." /></div>
+              <div class="field"><label>ID proof number</label><input type="text" id="reg-id-number" /></div>
+            </div>
+            <div class="field"><label>Address</label><textarea id="reg-address" rows="2"></textarea></div>
+            <div class="field"><label>Known allergies (comma-separated)</label><input type="text" id="reg-allergies" placeholder="Penicillin, Sulfa..." /></div>
+            <div class="form-actions"><button type="submit" class="btn btn--primary">Register Patient</button></div>
+          </form>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h3>Find Patient</h3></div>
+          <div class="field--row search-bar">
+            <input type="text" id="search-q" placeholder="Search by name, phone, or exact MRN" />
+            <button class="btn btn--secondary" id="search-btn" type="button">Search</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>MRN</th><th>Name</th><th>Age/Gender</th><th>Phone</th><th>Status</th><th>Records</th></tr></thead>
+              <tbody id="search-results"><tr><td colspan="6" class="table-empty">Search to find a patient</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Appointments -->
+    <div class="tab-panel" id="panel-appointments">
+      <div class="grid grid--2">
+        <div class="card" id="schedule-card">
+          <div class="card-header"><h3>Schedule Appointment</h3></div>
+          <form id="schedule-form" class="stack">
+            <div class="form-grid">
+              <div class="field"><label>Patient ID *</label><input type="number" id="appt-patient-id" required /></div>
+              <div class="field"><label>Doctor *</label><select id="appt-doctor" required></select></div>
+              <div class="field"><label>Date &amp; time *</label><input type="datetime-local" id="appt-time" required /></div>
+              <div class="field"><label>Follow-up of consultation (optional)</label><input type="number" id="appt-followup" /></div>
+            </div>
+            <div class="field"><label>Reason</label><input type="text" id="appt-reason" /></div>
+            <div class="form-actions"><button type="submit" class="btn btn--primary">Schedule</button></div>
+          </form>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>Filter</h3></div>
+          <div class="form-grid">
+            <div class="field"><label>Date</label><input type="date" id="appt-filter-date" /></div>
+            <div class="field"><label>Doctor</label><select id="appt-filter-doctor"><option value="">All</option></select></div>
+          </div>
+          <button class="btn btn--secondary" id="appt-refresh-btn" type="button">Refresh</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h3>Today's Appointments</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Time</th><th>Patient</th><th>Doctor</th><th>Reason</th><th>Status</th><th></th></tr></thead>
+            <tbody id="appt-rows"><tr><td colspan="6" class="table-empty">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Queue -->
+    <div class="tab-panel" id="panel-queue">
+      <div class="grid grid--2">
+        <div class="card" id="token-card">
+          <div class="card-header"><h3>Issue Walk-in Token</h3></div>
+          <form id="token-form" class="stack">
+            <div class="form-grid">
+              <div class="field"><label>Patient ID *</label><input type="number" id="token-patient-id" required /></div>
+              <div class="field"><label>Doctor</label><select id="token-doctor"><option value="">Any</option></select></div>
+            </div>
+            <div class="field field--row"><input type="checkbox" id="token-emergency" /><label for="token-emergency">Emergency (queue-jump)</label></div>
+            <div class="form-actions"><button type="submit" class="btn btn--primary">Issue Token</button></div>
+          </form>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>Today's Queue</h3></div>
+          <p class="faint">Emergency tokens are always called first, then in token-number order.</p>
+          <button class="btn btn--secondary" id="queue-refresh-btn" type="button">Refresh</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Token #</th><th>Patient</th><th>Doctor</th><th>Status</th><th>Issued</th><th></th></tr></thead>
+            <tbody id="queue-rows"><tr><td colspan="6" class="table-empty">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="upload-record-modal">
+  <div class="modal__box" style="max-width:680px">
+    <div class="modal__header"><h3>Upload external medical records</h3><button class="modal__close" onclick="closeModal('upload-record-modal')">&times;</button></div>
+    <div class="modal__body stack">
+      <p class="faint" id="upload-patient-label"></p>
+      <input type="hidden" id="upload-patient-id" />
+      <div class="field"><label>Complete report or scan *</label><input id="record-file" type="file" accept="application/pdf,image/jpeg,image/png,image/tiff" /></div>
+      <div class="form-grid">
+        <div class="field"><label>Document type</label><select id="record-type"><option>External medical record</option><option>Discharge summary</option><option>Pathology report</option><option>Radiology report</option><option>Laboratory report</option><option>Prescription</option></select></div>
+        <div class="field"><label>Report date</label><input id="record-date" type="date" /></div>
+      </div>
+      <div class="field"><label>Source hospital / laboratory</label><input id="record-source" placeholder="Hospital or diagnostic centre" /></div>
+      <div id="upload-progress" class="faint">PDF, JPEG, PNG or TIFF, maximum 25 MB. Scanned files may take longer to OCR.</div>
+    </div>
+    <div class="modal__footer"><button class="btn btn--ghost" onclick="closeModal('upload-record-modal')">Cancel</button><button class="btn btn--primary" id="upload-record-btn">Upload and process OCR</button></div>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script>
+const user = Auth.requirePage(['Admin', 'NursingStation', 'Doctor']);
+const canAct = user.role === 'Admin' || user.role === 'NursingStation';
+renderNav('frontdesk');
+
+if (!canAct) {
+  document.getElementById('register-card')?.remove();
+  document.getElementById('schedule-card')?.remove();
+  document.getElementById('token-card')?.remove();
+}
+
+// ---- Tabs ----
+qsa('.tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    qsa('.tab').forEach((t) => t.classList.remove('tab--active'));
+    qsa('.tab-panel').forEach((p) => p.classList.remove('tab-panel--active'));
+    tab.classList.add('tab--active');
+    document.getElementById(`panel-${tab.dataset.tab}`).classList.add('tab-panel--active');
+  });
+});
+
+// ---- Patients ----
+document.getElementById('register-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const payload = {
+    name: qs('#reg-name').value.trim(),
+    gender: qs('#reg-gender').value || null,
+    age: qs('#reg-age').value ? Number(qs('#reg-age').value) : null,
+    date_of_birth: qs('#reg-dob').value || null,
+    phone: qs('#reg-phone').value || null,
+    id_proof_type: qs('#reg-id-type').value || null,
+    id_proof_number: qs('#reg-id-number').value || null,
+    address: qs('#reg-address').value || null,
+    allergies: qs('#reg-allergies').value.split(',').map((s) => s.trim()).filter(Boolean),
+  };
+  try {
+    const patient = await Api.post('/patients/register', payload);
+    toast(`Registered ${patient.name} (${patient.mrn})`, 'success');
+    e.target.reset();
+    qs('#search-q').value = patient.mrn;
+    runSearch();
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+function renderPatientRows(patients) {
+  const tbody = qs('#search-results');
+  if (!patients.length) { tbody.innerHTML = '<tr><td colspan="6" class="table-empty">No patients found</td></tr>'; return; }
+  tbody.innerHTML = patients.map((p) => `
+    <tr>
+      <td class="mono">${escapeHtml(p.mrn || '-')}</td>
+      <td>${escapeHtml(p.name)}<div class="faint">#${p.id}</div></td>
+      <td>${p.age ?? '-'} / ${escapeHtml(p.gender || '-')}</td>
+      <td>${escapeHtml(p.phone || '-')}</td>
+      <td><span class="badge">${escapeHtml(p.status)}</span></td>
+      <td>${canAct ? `<button class="btn btn--secondary btn--small" data-upload-patient="${p.id}" data-patient-name="${escapeHtml(p.name)}">Upload files</button>` : '-'}</td>
+    </tr>`).join('');
+}
+
+qs('#search-results').addEventListener('click', (e) => {
+  const button = e.target.closest('[data-upload-patient]');
+  if (!button) return;
+  qs('#upload-patient-id').value = button.dataset.uploadPatient;
+  qs('#upload-patient-label').textContent = `Patient: ${button.dataset.patientName} (#${button.dataset.uploadPatient})`;
+  qs('#record-file').value = '';
+  qs('#upload-progress').textContent = 'PDF, JPEG, PNG or TIFF, maximum 25 MB. Scanned files may take longer to OCR.';
+  openModal('upload-record-modal');
+});
+
+qs('#upload-record-btn').addEventListener('click', async () => {
+  const file = qs('#record-file').files[0];
+  if (!file) { toast('Choose a report or scan first', 'danger'); return; }
+  const button = qs('#upload-record-btn');
+  const form = new FormData();
+  form.append('file', file);
+  form.append('document_type', qs('#record-type').value);
+  if (qs('#record-date').value) form.append('document_date', qs('#record-date').value);
+  if (qs('#record-source').value.trim()) form.append('source_hospital', qs('#record-source').value.trim());
+  button.disabled = true;
+  qs('#upload-progress').textContent = 'Uploading, extracting text, and building the patient record...';
+  try {
+    const doc = await Api.upload(`/patients/${qs('#upload-patient-id').value}/documents`, form);
+    const message = doc.ocr_status === 'Completed' ? `OCR complete: ${doc.page_count} page(s) stored` : `File stored; OCR needs review: ${doc.ocr_error || 'no readable text'}`;
+    toast(message, doc.ocr_status === 'Completed' ? 'success' : 'danger');
+    closeModal('upload-record-modal');
+  } catch (err) { qs('#upload-progress').textContent = apiErrorMessage(err); toast(apiErrorMessage(err), 'danger'); }
+  finally { button.disabled = false; }
+});
+
+async function runSearch() {
+  const q = qs('#search-q').value.trim();
+  try {
+    const results = await Api.get(`/patients/search${q ? `?q=${encodeURIComponent(q)}` : ''}`);
+    renderPatientRows(results);
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+document.getElementById('search-btn').addEventListener('click', runSearch);
+document.getElementById('search-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); });
+
+// ---- Doctors for pickers ----
+async function loadDoctors() {
+  try {
+    const doctors = await Api.get('/appointments/doctors');
+    const opts = doctors.map((d) => `<option value="${d.id}">${escapeHtml(d.email)}</option>`).join('');
+    const applyOptions = (sel, prefix) => { if (sel) sel.innerHTML = prefix + opts; };
+    applyOptions(qs('#appt-doctor'), '<option value="">Select doctor...</option>');
+    applyOptions(qs('#appt-filter-doctor'), '<option value="">All</option>');
+    applyOptions(qs('#token-doctor'), '<option value="">Any</option>');
+  } catch (err) { /* read-only Doctor role also hits this endpoint fine; ignore for others */ }
+}
+
+// ---- Appointments ----
+document.getElementById('schedule-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const payload = {
+    patient_id: Number(qs('#appt-patient-id').value),
+    doctor_id: Number(qs('#appt-doctor').value),
+    scheduled_at: new Date(qs('#appt-time').value).toISOString(),
+    reason: qs('#appt-reason').value || null,
+    follow_up_of_consultation_id: qs('#appt-followup').value ? Number(qs('#appt-followup').value) : null,
+  };
+  try {
+    await Api.post('/appointments', payload);
+    toast('Appointment scheduled', 'success');
+    e.target.reset();
+    loadAppointments();
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+function appointmentActions(a) {
+  if (user.role === 'Doctor') return `<a class="btn btn--secondary btn--small" href="/opd.html?patient_id=${a.patient_id}">Review case &amp; consult</a>`;
+  if (!canAct) return '';
+  const buttons = [];
+  if (a.status === 'Scheduled') {
+    buttons.push(`<button class="btn btn--secondary btn--small" data-checkin="${a.id}">Check-in</button>`);
+    buttons.push(`<button class="btn btn--ghost btn--small" data-cancel="${a.id}">Cancel</button>`);
+  }
+  return buttons.join(' ');
+}
+
+async function loadAppointments() {
+  const tbody = qs('#appt-rows');
+  tbody.innerHTML = '<tr><td colspan="6" class="table-empty">Loading...</td></tr>';
+  const date = qs('#appt-filter-date').value;
+  const doctorId = qs('#appt-filter-doctor').value;
+  const params = new URLSearchParams();
+  if (date) params.set('on_date', date);
+  if (doctorId) params.set('doctor_id', doctorId);
+  try {
+    const rows = await Api.get(`/appointments${params.toString() ? `?${params}` : ''}`);
+    if (!rows.length) { tbody.innerHTML = '<tr><td colspan="6" class="table-empty">No appointments</td></tr>'; return; }
+    tbody.innerHTML = rows.map((a) => `
+      <tr>
+        <td>${fmtDateTime(a.scheduled_at)}</td>
+        <td>#${a.patient_id}</td>
+        <td>#${a.doctor_id}</td>
+        <td>${escapeHtml(a.reason || '-')}</td>
+        <td><span class="badge${a.status === 'Cancelled' ? ' badge--danger' : ''}">${escapeHtml(a.status)}</span></td>
+        <td>${appointmentActions(a)}</td>
+      </tr>`).join('');
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); tbody.innerHTML = '<tr><td colspan="6" class="table-empty">Failed to load</td></tr>'; }
+}
+
+document.getElementById('appt-refresh-btn').addEventListener('click', loadAppointments);
+document.getElementById('panel-appointments').addEventListener('click', async (e) => {
+  const checkinId = e.target.dataset.checkin;
+  const cancelId = e.target.dataset.cancel;
+  try {
+    if (checkinId) { await Api.post(`/appointments/${checkinId}/check-in`); toast('Checked in, token issued', 'success'); loadAppointments(); loadQueue(); }
+    if (cancelId) { await Api.post(`/appointments/${cancelId}/cancel`); toast('Appointment cancelled', 'success'); loadAppointments(); }
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+// ---- Queue ----
+document.getElementById('token-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const payload = {
+    patient_id: Number(qs('#token-patient-id').value),
+    doctor_id: qs('#token-doctor').value ? Number(qs('#token-doctor').value) : null,
+    is_emergency: qs('#token-emergency').checked,
+  };
+  try {
+    const token = await Api.post('/queue/tokens', payload);
+    toast(`Token #${token.token_number} issued`, 'success');
+    e.target.reset();
+    loadQueue();
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+function queueActions(t) {
+  if (!canAct) return '';
+  const buttons = [];
+  if (t.status === 'Waiting') {
+    buttons.push(`<button class="btn btn--secondary btn--small" data-call="${t.id}">Call</button>`);
+    buttons.push(`<button class="btn btn--ghost btn--small" data-skip="${t.id}">Skip</button>`);
+  }
+  if (t.status === 'InProgress') {
+    buttons.push(`<button class="btn btn--secondary btn--small" data-complete="${t.id}">Complete</button>`);
+  }
+  return buttons.join(' ');
+}
+
+async function loadQueue() {
+  const tbody = qs('#queue-rows');
+  tbody.innerHTML = '<tr><td colspan="6" class="table-empty">Loading...</td></tr>';
+  try {
+    const rows = await Api.get('/queue/tokens');
+    if (!rows.length) { tbody.innerHTML = '<tr><td colspan="6" class="table-empty">No tokens today</td></tr>'; return; }
+    tbody.innerHTML = rows.map((t) => `
+      <tr>
+        <td class="mono">${t.token_number}${t.is_emergency ? ' <span class="badge badge--danger">ER</span>' : ''}</td>
+        <td>#${t.patient_id}</td>
+        <td>${t.doctor_id ? `#${t.doctor_id}` : '-'}</td>
+        <td><span class="badge${t.status === 'Skipped' ? ' badge--muted' : ''}">${escapeHtml(t.status)}</span></td>
+        <td>${fmtDateTime(t.issued_at)}</td>
+        <td>${queueActions(t)}</td>
+      </tr>`).join('');
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); tbody.innerHTML = '<tr><td colspan="6" class="table-empty">Failed to load</td></tr>'; }
+}
+
+document.getElementById('queue-refresh-btn').addEventListener('click', loadQueue);
+document.getElementById('panel-queue').addEventListener('click', async (e) => {
+  const callId = e.target.dataset.call;
+  const skipId = e.target.dataset.skip;
+  const completeId = e.target.dataset.complete;
+  try {
+    if (callId) { await Api.patch(`/queue/tokens/${callId}/call`); loadQueue(); }
+    if (skipId) { await Api.patch(`/queue/tokens/${skipId}/skip`); loadQueue(); }
+    if (completeId) { await Api.patch(`/queue/tokens/${completeId}/complete`); loadQueue(); }
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+// ---- Init ----
+loadDoctors();
+loadAppointments();
+loadQueue();
+</script>
+</body>
+</html>

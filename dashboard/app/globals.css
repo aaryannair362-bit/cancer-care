@@ -1,0 +1,232 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Aivana Oncology OS — design tokens
+ * Source of truth: AIVANA-UI-STYLE-RULES.md
+ * All colors are stored as HSL channels ("H S% L%") so Tailwind can apply
+ * opacity modifiers (e.g. bg-primary/90). Do not add arbitrary values here.
+ */
+
+@layer base {
+  :root {
+    /* Typography families (Inter self-hosted via next/font; Satoshi via @font-face below) */
+    --font-sans: var(--font-inter), 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --font-display: 'Satoshi', var(--font-inter), 'Inter', system-ui, sans-serif;
+
+    /* Radius — restrained, consistent */
+    --radius: 0.75rem;
+
+    /* Brand */
+    --brand-soft: 208 38% 91%;      /* quiet clinical blue */
+    --brand: 207 34% 46%;           /* restrained Aivana blue */
+    --brand-strong: 208 31% 58%;    /* soft interaction blue */
+    --brand-deep: 207 45% 24%;      /* premium navy-blue anchor */
+    --brand-indigo: 224 24% 43%;    /* restrained indigo bridge */
+    --charcoal: 213 35% 14%;        /* deep clinical navy */
+    --highlight: 209 27% 78%;       /* #B7C7D6 */
+
+    /* Surfaces */
+    --surface: 210 30% 98%;         /* cool light surface */
+    --surface-app: 212 27% 95%;     /* dimensional blue-grey canvas */
+    --surface-elevated: 212 25% 91%;/* pale blue-grey */
+    --surface-panel: 212 20% 84%;   /* deeper blue-grey panel */
+    --surface-clinical: 208 39% 90%;/* #DDE7F0 */
+    --input-background: 211 28% 96%;/* quiet form surface */
+
+    /* Text */
+    --supporting: 215 25% 27%;      /* #334155 */
+    --metadata: 215 16% 47%;        /* #64748B */
+    --disabled: 215 20% 65%;        /* #94A3B8 */
+
+    /* Borders */
+    --border: 214 32% 91%;          /* #E2E8F0 */
+    --divider: 206 24% 94%;         /* #EDF1F4 */
+    --border-emphasized: 213 27% 84%;/* #CBD5E1 */
+
+    /* Semantic — solid / subtle bg / strong text */
+    --success: 146 39% 40%;         /* #3F8F62 */
+    --success-subtle: 145 40% 92%;  /* #E1F2E8 */
+    --success-strong: 147 43% 27%;  /* #286443 */
+    --warning: 37 66% 46%;          /* #C58A28 */
+    --warning-subtle: 40 100% 92%;  /* #FFF1D6 */
+    --warning-strong: 37 76% 31%;   /* #8A5D13 */
+    --critical: 0 53% 55%;          /* #C94F4F */
+    --critical-subtle: 0 74% 94%;   /* #FBE4E4 */
+    --critical-strong: 0 46% 40%;   /* #963838 */
+    --information: 210 43% 51%;     /* #4C82B8 */
+    --information-subtle: 209 70% 94%;/* #E3EFFA */
+    --information-strong: 210 48% 37%;/* #315F8D */
+
+    /* AI */
+    --ai: 210 29% 56%;              /* #6F8FAF */
+    --ai-highlight: 208 39% 90%;    /* #DDE7F0 */
+    --ai-panel: 210 40% 96%;        /* #F1F5F9 */
+    --ai-emphasis: 209 27% 65%;     /* #8FA8BF */
+
+    /* Clinical chart colors */
+    --chart-1: 205 26% 60%;         /* Primary        #7F9DB3 */
+    --chart-2: 203 25% 43%;         /* Current         #52758A */
+    --chart-3: 206 23% 65%;         /* Secondary       #91A8BA */
+    --chart-4: 203 29% 78%;         /* Trend           #B8CCD8 */
+    --chart-5: 36 47% 56%;          /* Target/reference #C49B5C */
+    --chart-6: 5 45% 61%;           /* Abnormal/caution #C8756E */
+    --chart-7: 206 15% 36%;         /* Neutral         #4D5D69 */
+
+    /* shadcn/ui core tokens mapped onto Aivana palette */
+    --background: var(--surface-app);
+    --foreground: var(--charcoal);
+    --card: var(--surface);
+    --card-foreground: var(--charcoal);
+    --popover: var(--surface);
+    --popover-foreground: var(--charcoal);
+    --primary: var(--brand);
+    --primary-foreground: 0 0% 100%;
+    --secondary: var(--brand-soft);
+    --secondary-foreground: var(--supporting);
+    --muted: var(--surface-elevated);
+    --muted-foreground: var(--metadata);
+    --accent: var(--brand-soft);
+    --accent-foreground: var(--supporting);
+    --destructive: var(--critical);
+    --destructive-foreground: 0 0% 100%;
+    --input: var(--border);
+    --ring: var(--brand-strong);
+  }
+}
+
+/*
+ * Satoshi (brand / hierarchy). Drop the font files into dashboard/public/fonts/
+ * to activate; until then the stack falls back to Inter automatically.
+ */
+@font-face {
+  font-family: 'Satoshi';
+  src: url('/fonts/Satoshi-Variable.woff2.ttf') format('truetype-variations');
+  font-weight: 500 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background font-sans text-foreground;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-display text-foreground;
+  }
+  p, dd, dt, label {
+    overflow-wrap: break-word;
+  }
+}
+
+@layer components {
+  /* Patient identity is already established by each workflow's context card. */
+  span.text-xs.font-normal.text-metadata {
+    display: none;
+  }
+
+  /* Surface variants */
+  .surface {
+    @apply rounded-lg border border-border bg-surface text-foreground;
+  }
+  .surface-elevated {
+    @apply rounded-lg bg-surface-elevated text-foreground shadow-soft;
+  }
+  .surface-panel {
+    @apply rounded-lg bg-surface-panel text-foreground;
+  }
+  .surface-clinical {
+    @apply rounded-lg border border-border bg-surface-clinical text-foreground;
+  }
+
+  .clinical-surface {
+    @apply rounded-xl border border-divider bg-surface text-foreground shadow-soft-sm;
+  }
+  .elevated-surface {
+    @apply rounded-xl border border-border/70 bg-surface text-foreground shadow-soft;
+  }
+  .supporting-surface {
+    @apply rounded-lg border border-divider bg-input-background text-foreground;
+  }
+  .alert-surface {
+    @apply rounded-lg border border-warning/25 bg-warning-subtle text-warning-strong;
+  }
+  .aivana-gradient {
+    background-image: linear-gradient(135deg, hsl(var(--brand-deep)) 0%, hsl(var(--brand-indigo)) 48%, hsl(var(--brand)) 100%);
+  }
+  .aivana-gradient-soft {
+    background-image: linear-gradient(135deg, hsl(var(--surface)) 0%, hsl(var(--brand-soft)) 55%, hsl(var(--information-subtle)) 100%);
+  }
+  .aivana-selected-surface {
+    background:
+      radial-gradient(circle at 100% 0%, hsl(var(--brand) / 0.14), transparent 9rem),
+      linear-gradient(135deg, hsl(var(--surface) / 0.96) 0%, hsl(var(--brand-soft) / 0.96) 58%, hsl(var(--brand-indigo) / 0.12) 100%);
+    box-shadow:
+      inset 0 1px 0 hsl(0 0% 100% / 0.9),
+      0 8px 22px -14px hsl(var(--brand-deep) / 0.46);
+  }
+  .aivana-ai-surface {
+    background:
+      radial-gradient(circle at 100% 0%, hsl(var(--brand-indigo) / 0.16), transparent 18rem),
+      radial-gradient(circle at 12% 100%, hsl(var(--information-subtle) / 0.75), transparent 15rem),
+      linear-gradient(145deg, hsl(var(--surface)) 0%, hsl(var(--ai-panel)) 58%, hsl(var(--brand-soft) / 0.92) 100%);
+  }
+  .aivana-accent-line {
+    position: relative;
+  }
+  .aivana-accent-line::before {
+    content: '';
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    border-radius: 9999px;
+    background-image: linear-gradient(180deg, hsl(var(--brand)) 0%, hsl(var(--information-strong)) 100%);
+  }
+  .workspace-atmosphere {
+    background:
+      radial-gradient(ellipse at 76% -10%, hsl(var(--brand) / 0.14), transparent 38rem),
+      radial-gradient(ellipse at 4% 58%, hsl(var(--brand-indigo) / 0.08), transparent 34rem),
+      linear-gradient(145deg, hsl(211 30% 96%) 0%, hsl(var(--surface-app)) 46%, hsl(216 28% 92%) 100%);
+  }
+
+  /* Restricted neumorphism — small / focused controls only */
+  .neu {
+    @apply rounded-lg bg-surface shadow-neu;
+  }
+
+  /* AI variants */
+  .ai-panel {
+    @apply rounded-lg border border-ai-highlight bg-ai-panel text-foreground;
+  }
+  .ai-highlight {
+    @apply bg-ai-highlight text-supporting;
+  }
+
+  /* Glassmorphism — temporary / contextual surfaces only (never critical clinical data) */
+  .glass {
+    @apply rounded-lg border border-border/60 bg-surface/70 shadow-soft backdrop-blur-md;
+  }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: hsl(var(--surface-app));
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border-emphasized));
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--metadata));
+}

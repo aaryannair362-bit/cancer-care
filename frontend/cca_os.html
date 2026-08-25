@@ -1,0 +1,1275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AIvana CCA — Comprehensive Cancer Care AI Operating System</title>
+    <!-- Modern Typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-base: #090d16;
+            --bg-surface: #0f172a;
+            --bg-card: #1e293b;
+            --bg-card-hover: #26354a;
+            --border-subtle: #334155;
+            --border-bright: #475569;
+            
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            
+            --brand-primary: #06b6d4;
+            --brand-glow: rgba(6, 182, 212, 0.25);
+            --accent-emerald: #10b981;
+            --accent-amber: #f59e0b;
+            --accent-rose: #f43f5e;
+            --accent-indigo: #6366f1;
+            --accent-violet: #8b5cf6;
+            
+            --pill-ready-bg: rgba(16, 185, 129, 0.15);
+            --pill-ready-text: #34d399;
+            --pill-ready-border: rgba(16, 185, 129, 0.4);
+            
+            --pill-incomplete-bg: rgba(245, 158, 11, 0.15);
+            --pill-incomplete-text: #fbbf24;
+            --pill-incomplete-border: rgba(245, 158, 11, 0.4);
+            
+            --pill-danger-bg: rgba(244, 63, 94, 0.15);
+            --pill-danger-text: #fb7185;
+            --pill-danger-border: rgba(244, 63, 94, 0.4);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg-base);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Top 96px Persistent Patient Header (Section 42 & 44) */
+        #persistent-patient-header {
+            height: 96px;
+            background: linear-gradient(180deg, #0f172a 0%, #090d16 100%);
+            border-bottom: 1px solid var(--border-subtle);
+            padding: 10px 24px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            z-index: 100;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+        }
+
+        .header-row-1 {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .patient-identity {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .patient-avatar {
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 2px solid var(--brand-primary);
+            box-shadow: 0 0 10px var(--brand-glow);
+        }
+
+        .patient-name-box h1 {
+            font-family: 'Outfit', sans-serif;
+            font-size: 18px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .patient-demographics {
+            font-size: 12px;
+            color: var(--text-secondary);
+            display: flex;
+            gap: 12px;
+        }
+
+        .patient-meta-tags {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .badge-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .badge-curative {
+            background: rgba(6, 182, 212, 0.15);
+            color: #22d3ee;
+            border: 1px solid rgba(6, 182, 212, 0.3);
+        }
+
+        .badge-stage {
+            background: rgba(99, 102, 241, 0.15);
+            color: #818cf8;
+            border: 1px solid rgba(99, 102, 241, 0.3);
+        }
+
+        .badge-warning {
+            background: var(--pill-incomplete-bg);
+            color: var(--pill-incomplete-text);
+            border: 1px solid var(--pill-incomplete-border);
+            animation: pulse-slow 2s infinite;
+        }
+
+        @keyframes pulse-slow {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        .header-row-2 {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .engine-pills-cluster {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .engine-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .engine-pill:hover {
+            border-color: var(--border-bright);
+            background: var(--bg-card-hover);
+        }
+
+        .engine-pill.ready {
+            background: var(--pill-ready-bg);
+            color: var(--pill-ready-text);
+            border-color: var(--pill-ready-border);
+        }
+
+        .engine-pill.incomplete {
+            background: var(--pill-incomplete-bg);
+            color: var(--pill-incomplete-text);
+            border-color: var(--pill-incomplete-border);
+        }
+
+        .engine-pill.confirmed {
+            background: rgba(16, 185, 129, 0.25);
+            color: #34d399;
+            border-color: #059669;
+            box-shadow: 0 0 8px rgba(16, 185, 129, 0.3);
+        }
+
+        .engine-pill.danger {
+            background: var(--pill-danger-bg);
+            color: var(--pill-danger-text);
+            border-color: var(--pill-danger-border);
+        }
+
+        .hud-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-hud {
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-bright);
+            color: var(--text-primary);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.2s;
+        }
+
+        .btn-hud:hover {
+            background: var(--brand-primary);
+            color: #041018;
+            border-color: var(--brand-primary);
+            box-shadow: 0 0 12px var(--brand-glow);
+        }
+
+        /* App Body Layout */
+        #app-container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Sidebar Navigation */
+        #sidebar {
+            width: 260px;
+            background: var(--bg-surface);
+            border-right: 1px solid var(--border-subtle);
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            overflow-y: auto;
+        }
+
+        .nav-group-title {
+            padding: 14px 16px 6px;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-muted);
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 9px 16px;
+            margin: 2px 8px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.15s ease;
+            text-decoration: none;
+        }
+
+        .nav-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-primary);
+        }
+
+        .nav-item.active {
+            background: linear-gradient(90deg, rgba(6, 182, 212, 0.2) 0%, rgba(6, 182, 212, 0.05) 100%);
+            color: var(--brand-primary);
+            font-weight: 600;
+            border-left: 3px solid var(--brand-primary);
+        }
+
+        .nav-item .nav-icon {
+            margin-right: 10px;
+            font-size: 15px;
+        }
+
+        .nav-badge {
+            font-size: 10px;
+            padding: 1px 6px;
+            border-radius: 4px;
+            background: var(--bg-card);
+            color: var(--text-muted);
+        }
+
+        /* Main Workspace Stage */
+        #workspace-stage {
+            flex: 1;
+            background: var(--bg-base);
+            overflow-y: auto;
+            padding: 24px;
+            position: relative;
+        }
+
+        .screen-view {
+            display: none;
+            animation: fadeIn 0.25s ease forwards;
+        }
+
+        .screen-view.active {
+            display: block;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Cards & Tiles */
+        .workspace-card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            padding-bottom: 12px;
+        }
+
+        .card-title {
+            font-family: 'Outfit', sans-serif;
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Provenance Links (DSC-03) */
+        .provenance-link {
+            font-size: 11px;
+            color: var(--brand-primary);
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: rgba(6, 182, 212, 0.1);
+            border: 1px solid rgba(6, 182, 212, 0.2);
+            transition: all 0.2s;
+        }
+
+        .provenance-link:hover {
+            background: var(--brand-primary);
+            color: #041018;
+        }
+
+        /* Absence Tokens */
+        .absence-token {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .absence-not-recorded { background: rgba(148, 163, 184, 0.15); color: #94a3b8; }
+        .absence-unknown { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+        .absence-contradicted { background: rgba(244, 63, 94, 0.2); color: #fb7185; border: 1px solid #f43f5e; }
+
+        /* Grid Layouts */
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+        .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+
+        /* Tables */
+        .cca-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        .cca-table th {
+            text-align: left;
+            padding: 10px 14px;
+            background: rgba(255, 255, 255, 0.02);
+            color: var(--text-muted);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .cca-table td {
+            padding: 12px 14px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            color: var(--text-secondary);
+        }
+
+        .cca-table tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+            color: var(--text-primary);
+        }
+
+        /* Buttons */
+        .btn-cca {
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s ease;
+            border: none;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #06b6d4 0%, #0284c7 100%);
+            color: #041018;
+            box-shadow: 0 0 15px var(--brand-glow);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 0 20px rgba(6, 182, 212, 0.4);
+        }
+
+        .btn-emerald {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: #ffffff;
+            box-shadow: 0 0 15px rgba(16, 185, 129, 0.25);
+        }
+
+        .btn-amber {
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+            color: #ffffff;
+        }
+
+        .btn-outline {
+            background: transparent;
+            border: 1px solid var(--border-bright);
+            color: var(--text-primary);
+        }
+
+        .btn-outline:hover {
+            background: rgba(255, 255, 255, 0.05);
+            border-color: var(--text-secondary);
+        }
+
+        /* Slide-over Provenance Drawer */
+        #provenance-drawer {
+            position: fixed;
+            top: 96px;
+            right: -450px;
+            width: 450px;
+            height: calc(100vh - 96px);
+            background: var(--bg-surface);
+            border-left: 1px solid var(--border-subtle);
+            box-shadow: -10px 0 30px rgba(0, 0, 0, 0.5);
+            z-index: 200;
+            transition: right 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            display: flex;
+            flex-direction: column;
+            padding: 24px;
+        }
+
+        #provenance-drawer.open {
+            right: 0;
+        }
+
+        /* Modal Backdrop */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.75);
+            backdrop-filter: blur(4px);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 300;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal-box {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-bright);
+            border-radius: 16px;
+            width: 600px;
+            max-width: 90vw;
+            max-height: 85vh;
+            overflow-y: auto;
+            padding: 28px;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+            animation: modalScale 0.2s ease forwards;
+        }
+
+        @keyframes modalScale {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        /* Floating HUD Demo Controller */
+        #demo-hud-bar {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(15, 23, 42, 0.9);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--brand-primary);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6), 0 0 20px var(--brand-glow);
+            border-radius: 999px;
+            padding: 8px 18px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            z-index: 250;
+        }
+
+        .hud-label {
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--brand-primary);
+        }
+
+        .hud-step-btn {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-primary);
+            padding: 5px 12px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .hud-step-btn:hover {
+            background: var(--brand-primary);
+            color: #041018;
+        }
+
+        /* Responsive */
+        @media (max-width: 1100px) {
+            .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+            #sidebar { width: 200px; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 1. Top 96px Persistent Patient Header (SCR-42 / Section 44) -->
+    <header id="persistent-patient-header">
+        <div class="header-row-1">
+            <div class="patient-identity">
+                <img id="hdr-avatar" src="https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=150&auto=format&fit=crop&q=80" alt="Patient" class="patient-avatar" />
+                <div class="patient-name-box">
+                    <h1>
+                        <span id="hdr-name">Meera S. Nair</span>
+                        <span class="badge-pill" style="background:rgba(245,158,11,0.2);color:#fbbf24;border:1px solid #f59e0b;font-weight:700;">DEMO DATA</span>
+                        <span class="badge-pill badge-curative" id="hdr-journey-state">Under Investigation</span>
+                        <span class="badge-pill badge-stage" id="hdr-stage-pill">Stage IIA (Pending M)</span>
+                        <span class="badge-pill badge-warning" id="hdr-contradiction-pill" onclick="switchTab('verification')">⚠️ CTR-01 Contradiction</span>
+                    </h1>
+                    <div class="patient-demographics">
+                        <span><strong>MRN:</strong> <span id="hdr-mrn">CCA-2026-004417</span></span>
+                        <span>•</span>
+                        <span><strong>Age/Sex:</strong> <span id="hdr-age-sex">58y / Female</span></span>
+                        <span>•</span>
+                        <span><strong>Oncologist:</strong> <span id="hdr-oncologist">Dr. Sarah Varma</span></span>
+                        <span>•</span>
+                        <span><strong>Attender:</strong> Suresh Nair (Husband)</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="patient-meta-tags">
+                <div style="text-align: right; margin-right: 16px;">
+                    <div style="font-size: 13px; font-weight: 700; color: var(--brand-primary);">BSA: <span id="hdr-bsa">1.65</span> m² <span style="font-size: 10px; color: var(--text-muted);">(DuBois)</span></div>
+                    <div style="font-size: 11px; color: var(--text-secondary);">ECOG: <span id="hdr-ecog">1</span> | BP: 130/82 | SpO2: 99%</div>
+                </div>
+                <button class="btn-hud demo-only-control" onclick="triggerSimulateResult()">🔬 Simulate CT Result (cM0)</button>
+                <button class="btn-hud demo-only-control" onclick="triggerFastForward('D+7')">⏩ D+7 (Treatment Day)</button>
+                <button class="btn-hud demo-only-control" onclick="triggerFastForward('D+21')">⏩ D+21 (Response)</button>
+                <button class="btn-hud demo-only-control" style="color: var(--accent-rose);" onclick="resetDemo()">🔄 Reset</button>
+            </div>
+        </div>
+
+        <div class="header-row-2">
+            <div class="engine-pills-cluster">
+                <span class="engine-pill ready" onclick="switchTab('summary')">🔮 SUMMARY <span class="nav-badge" style="background:rgba(16,185,129,0.3);color:#34d399;">LIVE</span></span>
+                <span class="engine-pill ready" onclick="switchTab('journey')">🗺️ JOURNEY <span class="nav-badge" id="hdr-journey-count">8 Events</span></span>
+                <span class="engine-pill incomplete" id="pill-staging-engine" onclick="switchTab('staging')">🎯 STAGING: <span id="pill-staging-text">INCOMPLETE</span></span>
+                <span class="engine-pill danger" id="pill-guideline-engine" onclick="switchTab('nccn')">📖 NCCN: <span id="pill-guideline-text">NOT READY</span></span>
+                <span class="engine-pill ready" onclick="switchTab('nexus')">⚡ NEXUS BRIEF <span class="nav-badge" style="background:rgba(6,182,212,0.3);color:#22d3ee;">13 SEC</span></span>
+                <span class="engine-pill ready" onclick="switchTab('careplan')">🛡️ CARE PLAN <span class="nav-badge" id="hdr-careplan-ver">v1.0</span></span>
+            </div>
+
+            <div style="font-size: 11px; color: var(--text-muted);">
+                AIVANA CCA Oncology OS v4.2026 • Live Session: <span style="color:#10b981;font-weight:600;">Active Guardrails</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- 2. App Container (Sidebar + Main View Stage) -->
+    <div id="app-container">
+        
+        <!-- Left Sidebar Navigation -- populated per-role by renderSidebarForRole() in cca-app.js -->
+        <nav id="sidebar">
+            <div id="sidebar-nav-content">
+                <!-- Populated via JS -->
+            </div>
+
+            <div style="padding: 16px; border-top: 1px solid var(--border-subtle); font-size: 11px; color: var(--text-muted);" id="sidebar-user-line">
+                Logged in as: ...
+            </div>
+        </nav>
+
+        <!-- Main Workspace Stage -->
+        <main id="workspace-stage">
+
+            <!-- SCREEN 1: Command Centre (SCR-02) -->
+            <div id="view-command_centre" class="screen-view active">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">🏥 Multi-Disciplinary Oncology Command Centre</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Real-time clinical queue, multi-specialty triage, and active patient census.</p>
+                    </div>
+                    <button class="btn-cca btn-primary" onclick="loadPatient(1)">👉 Load Meera S. Nair (Demo Patient)</button>
+                </div>
+
+                <div class="grid-4" style="margin-bottom: 20px;">
+                    <div class="workspace-card" style="margin-bottom: 0;">
+                        <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Active Patient Census</div>
+                        <div style="font-size: 28px; font-weight: 700; color: var(--brand-primary); margin-top: 4px;">13</div>
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">1 Primary Demo • 12 Background</div>
+                    </div>
+                    <div class="workspace-card" style="margin-bottom: 0;">
+                        <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Pending Staging Confirmations</div>
+                        <div style="font-size: 28px; font-weight: 700; color: var(--accent-amber); margin-top: 4px;" id="cnt-pending-staging">1</div>
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">Meera S. Nair (Awaiting M0)</div>
+                    </div>
+                    <div class="workspace-card" style="margin-bottom: 0;">
+                        <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">MDT Cases Scheduled</div>
+                        <div style="font-size: 28px; font-weight: 700; color: var(--accent-indigo); margin-top: 4px;">2</div>
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">Breast & Thoracic Boards</div>
+                    </div>
+                    <div class="workspace-card" style="margin-bottom: 0;">
+                        <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Treatment Clearance Today</div>
+                        <div style="font-size: 28px; font-weight: 700; color: var(--accent-emerald); margin-top: 4px;">3</div>
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">Daycare Suite B</div>
+                    </div>
+                </div>
+
+                <div class="workspace-card">
+                    <div class="card-header">
+                        <div class="card-title">Live Clinic Queue & Patient Roster</div>
+                    </div>
+                    <table class="cca-table">
+                        <thead>
+                            <tr>
+                                <th>MRN</th>
+                                <th>Patient Name</th>
+                                <th>Age/Sex</th>
+                                <th>Journey Stage</th>
+                                <th>Primary Team</th>
+                                <th>Staging State</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="census-table-body">
+                            <!-- Populated via JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- SCREEN 1b: Ingested Documents (Front Desk registration / referral upload, and
+                 the general document list every clinical role reads from) -->
+            <div id="view-documents" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">📁 Ingested Documents</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Upload a referral letter or outside record for the active patient -- OCR and AI fact-drafting run automatically; every fact lands PROPOSED for clinician verification.</p>
+                    </div>
+                </div>
+                <div class="workspace-card">
+                    <div class="card-header"><div class="card-title">Upload Document</div></div>
+                    <input type="file" id="doc-upload-input" accept=".pdf,.jpg,.jpeg,.png,.tiff" style="margin-bottom:12px;color:var(--text-primary);" />
+                    <button class="btn-cca btn-primary" onclick="submitDocumentUpload()">⬆️ Upload & Extract</button>
+                    <div id="doc-upload-status" style="font-size:12px;margin-top:10px;"></div>
+                </div>
+                <div class="workspace-card">
+                    <div class="card-header"><div class="card-title">Documents on File</div></div>
+                    <table class="cca-table">
+                        <thead><tr><th>Filename</th><th>Classification</th><th>Confidence</th><th>Facts</th><th>Verified</th><th>Uploaded</th></tr></thead>
+                        <tbody id="documents-list-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- SCREEN 2: Fact Verification Workspace (SCR-07 / WOW 2) -->
+            <div id="view-verification" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">🔍 Clinical Fact Verification & Contradiction Disposition</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">OCR-extracted clinical facts requiring clinician verification. Part of strict Human-In-The-Loop AI governance.</p>
+                    </div>
+                    <button class="btn-cca btn-primary" onclick="bulkAcceptFacts()">✅ Bulk Accept Verified Facts</button>
+                </div>
+
+                <div id="contradiction-banner-container">
+                    <!-- Contradiction Alert Box populated via JS -->
+                </div>
+
+                <div class="grid-2">
+                    <!-- Left: Document Text & OCR Preview -->
+                    <div class="workspace-card">
+                        <div class="card-header">
+                            <div class="card-title">📄 Ingested Document OCR Viewer</div>
+                            <select id="doc-picker-select" onchange="loadDocExtractions(this.value)" style="background:var(--bg-card);color:var(--text-primary);padding:4px 8px;border-radius:6px;border:1px solid var(--border-subtle);">
+                                <!-- Populated dynamically -->
+                            </select>
+                        </div>
+                        <pre id="doc-ocr-display" style="background:#040711;padding:16px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#94a3b8;white-space:pre-wrap;height:450px;overflow-y:auto;border:1px solid var(--border-subtle);"></pre>
+                    </div>
+
+                    <!-- Right: Extracted Facts Card Deck -->
+                    <div class="workspace-card">
+                        <div class="card-header">
+                            <div class="card-title">Candidate Facts for Verification</div>
+                            <span id="fact-count-tag" class="nav-badge">0 Facts</span>
+                        </div>
+                        <div id="facts-list-container" style="height:450px;overflow-y:auto;display:flex;flex-direction:column;gap:12px;">
+                            <!-- Fact cards -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SCREEN 3: Patient 360 Summary (SCR-10 / WOW 1) -->
+            <div id="view-summary" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">🔮 Patient 360 Contextual Clinical Summary</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Context-aware synthesis with explicit absence tokens (NOT_RECORDED, UNKNOWN, PENDING_REVIEW, CONTRADICTED).</p>
+                    </div>
+                    <div style="display:flex;gap:8px;">
+                        <button class="btn-cca btn-outline" onclick="loadContextualSummary('initial_consult')">Initial Consult</button>
+                        <button class="btn-cca btn-outline" onclick="loadContextualSummary('staging')">Staging Review</button>
+                        <button class="btn-cca btn-outline" onclick="loadContextualSummary('mdt')">MDT Tumor Board</button>
+                        <button class="btn-cca btn-outline" onclick="loadContextualSummary('treatment_day')">Treatment Day</button>
+                    </div>
+                </div>
+
+                <div class="grid-2" id="summary-blocks-grid">
+                    <!-- Blocks populated via JS -->
+                </div>
+            </div>
+
+            <!-- SCREEN 4: AJCC Staging Workspace (SCR-17 / WOW 3) -->
+            <div id="view-staging" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">🎯 AJCC 8th Edition Staging Workspace</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Evidence-driven staging readiness engine with mandatory clinician confirmation gate (staging.confirm).</p>
+                    </div>
+                    <div id="staging-action-button-slot">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+
+                <div id="staging-readiness-banner" style="margin-bottom: 20px;">
+                    <!-- Readiness state banner -->
+                </div>
+
+                <div class="grid-3" style="margin-bottom: 20px;">
+                    <!-- T Card -->
+                    <div class="workspace-card">
+                        <div class="card-header">
+                            <div class="card-title">T-Category (Primary Tumor)</div>
+                            <span class="badge-pill badge-curative">cT2 (2.8 cm)</span>
+                        </div>
+                        <div style="font-size: 13px; color: var(--text-secondary);">
+                            <strong>Verified Evidence:</strong> 2.8 x 2.2 cm hypoechoic spiculated mass in Right Breast 10 o'clock position (BIRADS 4C).
+                        </div>
+                        <div style="margin-top: 12px;">
+                            <span class="provenance-link" onclick="openProvenanceDrawer(2)">📄 Source: usg_breast_report.pdf (p.1)</span>
+                        </div>
+                    </div>
+
+                    <!-- N Card -->
+                    <div class="workspace-card">
+                        <div class="card-header">
+                            <div class="card-title">N-Category (Regional Nodes)</div>
+                            <span class="badge-pill badge-curative">cN0 (Negative)</span>
+                        </div>
+                        <div style="font-size: 13px; color: var(--text-secondary);">
+                            <strong>Verified Evidence:</strong> Bilateral axillary lymph nodes normal cortical thickness, no pathologic enlargement.
+                        </div>
+                        <div style="margin-top: 12px;">
+                            <span class="provenance-link" onclick="openProvenanceDrawer(3)">📄 Source: core_biopsy_histopath.pdf (p.1)</span>
+                        </div>
+                    </div>
+
+                    <!-- M Card -->
+                    <div class="workspace-card" id="staging-m-card">
+                        <div class="card-header">
+                            <div class="card-title">M-Category (Distant Metastasis)</div>
+                            <span class="badge-pill badge-warning" id="m-category-badge">cM_UNKNOWN</span>
+                        </div>
+                        <div style="font-size: 13px; color: var(--text-secondary);" id="m-category-text">
+                            <strong>Missing Input:</strong> Contrast-enhanced CT Chest + Abdomen or PET-CT required to confirm absence of distant metastasis.
+                        </div>
+                        <div style="margin-top: 12px;" id="m-category-action">
+                            <button class="btn-cca btn-primary" style="font-size:11px;padding:4px 10px;" onclick="triggerSimulateResult()">🔬 Ingest CECT CAP Result</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Histology & Biomarker Panel -->
+                <div class="workspace-card">
+                    <div class="card-header">
+                        <div class="card-title">Pathology & Receptor Confirmation Profile</div>
+                    </div>
+                    <div class="grid-4">
+                        <div style="background:var(--bg-card);padding:12px;border-radius:8px;">
+                            <div style="font-size:11px;color:var(--text-muted);">HISTOLOGY</div>
+                            <div style="font-size:13px;font-weight:600;margin-top:4px;">Invasive Ductal Carcinoma</div>
+                        </div>
+                        <div style="background:var(--bg-card);padding:12px;border-radius:8px;">
+                            <div style="font-size:11px;color:var(--text-muted);">ESTROGEN RECEPTOR (ER)</div>
+                            <div style="font-size:13px;font-weight:600;color:#34d399;margin-top:4px;">Positive (80%, Allred 8/8)</div>
+                        </div>
+                        <div style="background:var(--bg-card);padding:12px;border-radius:8px;">
+                            <div style="font-size:11px;color:var(--text-muted);">PROGESTERONE RECEPTOR (PR)</div>
+                            <div style="font-size:13px;font-weight:600;color:#34d399;margin-top:4px;">Positive (65%, Allred 7/8)</div>
+                        </div>
+                        <div style="background:var(--bg-card);padding:12px;border-radius:8px;">
+                            <div style="font-size:11px;color:var(--text-muted);">HER2/NEU ONCOPROTEIN</div>
+                            <div style="font-size:13px;font-weight:600;color:#60a5fa;margin-top:4px;">Negative (Score 1+)</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SCREEN 5: NCCN Guideline Context (SCR-19 / WOW 4) -->
+            <div id="view-nccn" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">📜 NCCN Clinical Practice Guidelines in Oncology (NCCN Guidelines®)</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Automated pathway alignment. Gated strictly behind Clinician-Confirmed Staging (Rule G-5).</p>
+                    </div>
+                    <span class="badge-pill badge-curative" id="nccn-status-badge">PATHWAY READY</span>
+                </div>
+
+                <div id="nccn-content-container">
+                    <!-- Loaded via JS -->
+                </div>
+            </div>
+
+            <!-- SCREEN 6: NEXUS Clinical Brief (SCR-20/21 / WOW 5) -->
+            <div id="view-nexus" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">⚡ NEXUS 13-Section Clinical Brief Synthesizer</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Comprehensive 13-section clinical brief synthesized purely from verified facts. Zero autonomous decisions.</p>
+                    </div>
+                    <button class="btn-cca btn-primary" onclick="openMDTSubmitModal()">👥 1-Click Send to Tumor Board (MDT)</button>
+                </div>
+
+                <div id="nexus-brief-container" style="display: flex; flex-direction: column; gap: 16px;">
+                    <!-- 13 sections populated via JS -->
+                </div>
+            </div>
+
+            <!-- SCREEN 7: MDT Board Session (SCR-22 / WOW 6) -->
+            <div id="view-mdt" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">👥 Multidisciplinary Tumor Board (MDT) Workspace</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Multidisciplinary case presentation, consensus discussion, and formal recommendation formulation.</p>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <label style="font-size:12px;color:var(--brand-primary);font-weight:600;display:flex;align-items:center;gap:6px;background:rgba(6,182,212,0.1);padding:5px 12px;border-radius:999px;border:1px solid rgba(6,182,212,0.3);cursor:pointer;">
+                            <input type="checkbox" id="mdt-anon-toggle" onchange="toggleMDTAnonymization(this.checked)">
+                            <span>🔒 Anonymous Presentation (Hide Identity)</span>
+                        </label>
+                        <button class="btn-cca btn-outline" onclick="copyMDTExternalLink()">🔗 External Consultant Link</button>
+                        <button class="btn-cca btn-emerald" onclick="recordMDTConsensus()">✍️ Record Consensus</button>
+                    </div>
+                </div>
+
+                <div class="grid-2">
+                    <div class="workspace-card">
+                        <div class="card-header">
+                            <div class="card-title">Case Package & Clinical Question</div>
+                        </div>
+                        <div style="background:#040711;padding:16px;border-radius:8px;font-size:13px;color:var(--text-primary);line-height:1.6;">
+                            <strong>Clinical Question:</strong> Should patient Meera S. Nair (58/F, HR+/HER2- cT2 cN0 cM0 Stage IIA) undergo upfront neoadjuvant chemotherapy (Dose-dense AC-T) to facilitate breast-conserving surgery or proceed with upfront lumpectomy + SLNB?
+                        </div>
+                        <div style="margin-top:16px;">
+                            <h4 style="font-size:12px;color:var(--text-muted);text-transform:uppercase;margin-bottom:8px;">Tumor Board Attendee Roster:</h4>
+                            <div style="display:flex;flex-wrap:wrap;gap:8px;">
+                                <span class="badge-pill" style="background:rgba(255,255,255,0.05);">Dr. Sarah Varma (Medical Oncology)</span>
+                                <span class="badge-pill" style="background:rgba(255,255,255,0.05);">Dr. Anand Nair (Surgical Oncology - Chair)</span>
+                                <span class="badge-pill" style="background:rgba(255,255,255,0.05);">Dr. Priya Menon (Radiation Oncology)</span>
+                                <span class="badge-pill" style="background:rgba(255,255,255,0.05);">Dr. Rajesh Iyer (Oncopathology)</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="workspace-card">
+                        <div class="card-header">
+                            <div class="card-title">MDT Recommendation & Modality Direction</div>
+                        </div>
+                        <div id="mdt-decision-display" style="background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3);padding:16px;border-radius:8px;">
+                            <h3 style="font-size:14px;color:#34d399;margin-bottom:6px;">Tumor Board Recommendation:</h3>
+                            <p style="font-size:13px;color:var(--text-primary);line-height:1.5;">
+                                <strong>Consensus:</strong> Upfront Neoadjuvant Chemotherapy with Dose-dense AC (Doxorubicin + Cyclophosphamide q2w x 4) followed by Paclitaxel (q2w x 4) with G-CSF support. Post-chemotherapy Breast Conserving Surgery (Lumpectomy) + Sentinel Lymph Node Biopsy.
+                            </p>
+                            <div style="margin-top:12px;font-size:11px;color:var(--text-muted);">
+                                Recorded by: <strong>Dr. Anand Nair (MDT Chair)</strong> • Consensus Unanimous
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SCREEN 8: Live Care Plan (SCR-23 / WOW 7) -->
+            <div id="view-careplan" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">🛡️ Live Care Plan Hub (Version <span id="careplan-ver-text">1.0</span>)</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Continuous multidisciplinary plan. Amendments strictly require a documented change_reason (Rule E-36).</p>
+                    </div>
+                    <button class="btn-cca btn-primary" onclick="openCarePlanAmendModal()">✏️ Amend Care Plan (New Version)</button>
+                </div>
+
+                <div class="workspace-card">
+                    <div class="card-header">
+                        <div class="card-title">Treatment Sequencing & Regimen Protocols</div>
+                    </div>
+                    <div class="grid-3">
+                        <div style="background:var(--bg-card);padding:16px;border-radius:8px;border-left:3px solid var(--brand-primary);">
+                            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">1. Systemic Therapy (Neoadjuvant)</div>
+                            <div style="font-size:14px;font-weight:700;margin-top:6px;color:var(--text-primary);">Dose-dense AC-T</div>
+                            <p style="font-size:12px;color:var(--text-secondary);margin-top:4px;">AC q2w × 4 cycles followed by Paclitaxel q2w × 4 cycles + Pegfilgrastim 6mg support.</p>
+                        </div>
+                        <div style="background:var(--bg-card);padding:16px;border-radius:8px;border-left:3px solid var(--accent-emerald);">
+                            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">2. Surgical Therapy</div>
+                            <div style="font-size:14px;font-weight:700;margin-top:6px;color:var(--text-primary);">Lumpectomy + SLNB</div>
+                            <p style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Breast-conserving surgery planned 4–6 weeks post-chemo completion.</p>
+                        </div>
+                        <div style="background:var(--bg-card);padding:16px;border-radius:8px;border-left:3px solid var(--accent-indigo);">
+                            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">3. Radiotherapy & Endocrine</div>
+                            <div style="font-size:14px;font-weight:700;margin-top:6px;color:var(--text-primary);">Adjuvant WBRT + AI</div>
+                            <p style="font-size:12px;color:var(--text-secondary);margin-top:4px;">40.05 Gy in 15 fractions followed by Letrozole 2.5mg OD for 5–10 years.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SCREEN 9: Treatment-Day Assessment (SCR-24 / WOW 8) -->
+            <div id="view-treatment_day" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">💉 Daycare Chemotherapy Clearance Cockpit (Cycle 1 / Day 1)</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Pre-cycle organ toxicity evaluation and 5 structured clearance exits.</p>
+                    </div>
+                    <button class="btn-cca btn-emerald" onclick="openClearanceModal()">🎯 Decide Treatment Clearance</button>
+                </div>
+
+                <div class="grid-2" style="margin-bottom: 20px;">
+                    <!-- Lab Parameters -->
+                    <div class="workspace-card">
+                        <div class="card-header">
+                            <div class="card-title">Pre-Chemotherapy Lab Tolerability Check</div>
+                        </div>
+                        <table class="cca-table">
+                            <thead>
+                                <tr><th>Parameter</th><th>Result</th><th>Baseline</th><th>Status</th></tr>
+                            </thead>
+                            <tbody>
+                                <tr><td>Hemoglobin</td><td>11.8 g/dL</td><td>11.8 g/dL</td><td><span class="badge-pill badge-curative">Normal</span></td></tr>
+                                <tr><td>Absolute Neutrophils (ANC)</td><td>4,200 /µL</td><td>4,400 /µL</td><td><span class="badge-pill badge-curative">Normal</span></td></tr>
+                                <tr><td>Platelet Count</td><td>220,000 /µL</td><td>220,000 /µL</td><td><span class="badge-pill badge-curative">Normal</span></td></tr>
+                                <tr><td>Serum Creatinine</td><td>0.9 mg/dL</td><td>0.9 mg/dL</td><td><span class="badge-pill badge-curative">Normal</span></td></tr>
+                                <tr><td>Total Bilirubin</td><td>0.8 mg/dL</td><td>0.8 mg/dL</td><td><span class="badge-pill badge-curative">Normal</span></td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Toxicity Check (CTCAE) -->
+                    <div class="workspace-card">
+                        <div class="card-header">
+                            <div class="card-title">CTCAE v5.0 Toxicity Assessment</div>
+                            <button class="btn-cca btn-outline" style="font-size:11px;" onclick="openToxicityModal()">+ Record Toxicity</button>
+                        </div>
+                        <div id="toxicity-items-container">
+                            <div style="background:var(--bg-card);padding:12px;border-radius:8px;margin-bottom:8px;">
+                                <div style="display:flex;justify-content:space-between;align-items:center;">
+                                    <strong>Peripheral Sensory Neuropathy</strong>
+                                    <span class="badge-pill badge-curative">Grade 0 (Baseline)</span>
+                                </div>
+                                <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">No numbness or tingling prior to paclitaxel exposure.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SCREEN 10: Follow-Up & RECIST Response (SCR-25 / WOW 9) -->
+            <div id="view-response" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">📈 Longitudinal Response Assessment (RECIST 1.1)</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Quantified measurement of tumor burden reduction during interim restaging.</p>
+                    </div>
+                    <button class="btn-cca btn-emerald" onclick="recordResponse()">🎯 Confirm Partial Response (PR)</button>
+                </div>
+
+                <div class="grid-2">
+                    <div class="workspace-card">
+                        <div class="card-header">
+                            <div class="card-title">Target Lesion Tracking Table</div>
+                        </div>
+                        <table class="cca-table">
+                            <thead>
+                                <tr><th>Lesion Site</th><th>Baseline (D-0)</th><th>Interim (D+21)</th><th>% Change</th><th>RECIST 1.1</th></tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>Right Breast 10 o'clock Mass</td>
+                                    <td>2.8 cm</td>
+                                    <td>1.2 cm</td>
+                                    <td style="color:#34d399;font-weight:700;">- 57.1%</td>
+                                    <td><span class="badge-pill badge-curative">PR (Partial Response)</span></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="workspace-card">
+                        <div class="card-header">
+                            <div class="card-title">Waterfall Plot & Imaging Correlation</div>
+                        </div>
+                        <div style="background:#040711;padding:24px;border-radius:8px;text-align:center;">
+                            <div style="font-size:42px;font-weight:800;color:#10b981;">- 57.1%</div>
+                            <div style="font-size:14px;color:var(--text-secondary);margin-top:4px;">Target Lesion Diameter Reduction</div>
+                            <p style="font-size:12px;color:var(--text-muted);margin-top:12px;">Qualified for Pathological Complete Response (pCR) trajectory under Dose-dense AC-T neoadjuvant therapy.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SCREEN 11: Timeline Journey (SCR-42) -->
+            <div id="view-journey" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">🗺️ Longitudinal Patient Journey Timeline</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Immutable chronological audit trail of all clinical decisions, AI extractions, and verification milestones.</p>
+                    </div>
+                </div>
+                <div id="journey-timeline-container" style="display:flex;flex-direction:column;gap:16px;">
+                    <!-- Timeline items -->
+                </div>
+            </div>
+
+            <!-- SCREEN 12: Imaging Worklist / Coordination (Radiologist / Radiology Coordinator) -->
+            <div id="view-imaging" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">🩻 Imaging Worklist</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Radiology orders across the census -- schedule, track preparation, and draft/finalize reports.</p>
+                    </div>
+                </div>
+                <div class="workspace-card">
+                    <table class="cca-table">
+                        <thead><tr><th>Patient</th><th>MRN</th><th>Study</th><th>Priority</th><th>Status</th><th>Scheduled</th><th>Preparation</th><th></th></tr></thead>
+                        <tbody id="imaging-worklist-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- SCREEN 13: Pathology Worklist (Pathologist) -->
+            <div id="view-pathology" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">🔬 Pathology Worklist</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Specimen review and structured pathology reporting.</p>
+                    </div>
+                </div>
+                <div class="workspace-card">
+                    <table class="cca-table">
+                        <thead><tr><th>Patient</th><th>MRN</th><th>Specimen</th><th>Priority</th><th>Status</th><th></th></tr></thead>
+                        <tbody id="pathology-worklist-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- SCREEN 14: Molecular Diagnostics (Pathologist) -->
+            <div id="view-molecular" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">🧬 Molecular Diagnostics</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Biomarker/molecular test tracking for the active patient.</p>
+                    </div>
+                    <button class="btn-cca btn-primary" onclick="openOrderMolecularTestModal()">+ Order Test</button>
+                </div>
+                <div class="workspace-card">
+                    <table class="cca-table">
+                        <thead><tr><th>Marker</th><th>Method</th><th>Result</th><th>Status</th><th>Confirmatory Req'd</th><th></th></tr></thead>
+                        <tbody id="molecular-tests-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- SCREEN 15: Lab / Phlebotomy Worklist -->
+            <div id="view-lab" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">🧪 Lab / Phlebotomy Worklist</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Specimen collection, rejection/recollection, and result entry.</p>
+                    </div>
+                </div>
+                <div class="workspace-card">
+                    <table class="cca-table">
+                        <thead><tr><th>Patient</th><th>MRN</th><th>Test</th><th>Priority</th><th>Status</th><th>Collected</th><th></th></tr></thead>
+                        <tbody id="lab-worklist-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- SCREEN 16: MDT Coordinator -->
+            <div id="view-mdt_coordinator" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">👥 MDT Referral Queue & Scheduling</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Operational management -- case readiness, board scheduling, participants. Does not author clinical recommendations.</p>
+                    </div>
+                </div>
+                <div class="workspace-card">
+                    <table class="cca-table">
+                        <thead><tr><th>Patient</th><th>MRN</th><th>Question</th><th>Status</th><th>Board Date</th><th>Readiness</th><th></th></tr></thead>
+                        <tbody id="mdt-coordinator-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- SCREEN 17: External MDT Specialist Assigned Cases -->
+            <div id="view-external_mdt" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">👥 Assigned MDT Cases</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Only cases explicitly shared with your account. Your opinion is separately attributable and does not by itself finalize the MDT decision.</p>
+                    </div>
+                </div>
+                <div id="assigned-cases-container" style="display:flex;flex-direction:column;gap:16px;"></div>
+            </div>
+
+            <!-- SCREEN 18: Financial Counselling & Estimates -->
+            <div id="view-financial" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">💳 Financial Counselling & Estimates</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Read-only clinical context; counsellor cannot edit diagnosis, stage, or treatment plan.</p>
+                    </div>
+                    <button class="btn-cca btn-primary" onclick="openCreateFinancialCaseModal()">+ Refer Patient</button>
+                </div>
+                <div class="workspace-card">
+                    <table class="cca-table">
+                        <thead><tr><th>Patient</th><th>MRN</th><th>Counselling</th><th>Estimate</th><th>Payer Route</th><th>Clearance</th><th></th></tr></thead>
+                        <tbody id="financial-queue-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- SCREEN 19: Care Coordination (Patient Liaison) -->
+            <div id="view-coordination" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">🧭 Care Coordination</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Contact status, appointment navigation, and drop-off-risk barrier tracking.</p>
+                    </div>
+                    <button class="btn-cca btn-primary" onclick="openCreateCoordinationCaseModal()">+ Open Coordination Case</button>
+                </div>
+                <div class="workspace-card">
+                    <table class="cca-table">
+                        <thead><tr><th>Patient</th><th>MRN</th><th>Contact Status</th><th>Barriers</th><th>Next Action</th><th></th></tr></thead>
+                        <tbody id="coordination-queue-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- SCREEN 20: Admin Operations Dashboard -->
+            <div id="view-admin_ops" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">📊 Operations Dashboard</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Operational metrics only -- not a clinical decision dashboard. Users & Roles remain in the main Admin console.</p>
+                    </div>
+                    <a class="btn-cca btn-outline" href="/admin.html">👤 Users & Roles (Admin Console)</a>
+                </div>
+                <div class="grid-4" id="admin-ops-metrics" style="margin-bottom: 20px;"></div>
+                <div class="workspace-card">
+                    <div class="card-header"><div class="card-title">Audit & Activity</div></div>
+                    <table class="cca-table">
+                        <thead><tr><th>Time</th><th>Patient</th><th>Actor</th><th>Category</th><th>Event</th></tr></thead>
+                        <tbody id="admin-audit-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- 3. Slide-Over 2-Click View Source Provenance Drawer (DSC-03) -->
+    <div id="provenance-drawer">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+            <h3 style="font-family:'Outfit',sans-serif;font-size:16px;color:var(--brand-primary);">🔍 2-Click Document Provenance</h3>
+            <button onclick="closeProvenanceDrawer()" style="background:transparent;border:none;color:var(--text-secondary);font-size:20px;cursor:pointer;">&times;</button>
+        </div>
+        <div id="provenance-details-slot" style="flex:1;overflow-y:auto;">
+            <!-- Provenance Content -->
+        </div>
+    </div>
+
+    <!-- 4. Modals Container -->
+    <div id="app-modal-overlay" class="modal-overlay">
+        <div class="modal-box" id="app-modal-box">
+            <!-- Modal Body injected via JS -->
+        </div>
+    </div>
+
+    <!-- 5. Floating HUD Demo Controller (SCR-27) -- Admin-only, see renderSidebarForRole() -->
+    <div id="demo-hud-bar" class="demo-only-control">
+        <span class="hud-label">⚡ DEMO HUD</span>
+        <button class="hud-step-btn" onclick="triggerSimulateResult()">1. Ingest CT Result (cM0)</button>
+        <button class="hud-step-btn" onclick="openStagingConfirmModal()">2. Confirm AJCC Stage</button>
+        <button class="hud-step-btn" onclick="openMDTSubmitModal()">3. Submit to MDT</button>
+        <button class="hud-step-btn" onclick="triggerFastForward('D+7')">4. D+7 Chemotherapy</button>
+        <button class="hud-step-btn" onclick="triggerFastForward('D+21')">5. D+21 RECIST 1.1</button>
+    </div>
+
+    <!-- JS Application Logic -->
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/cca-app.js"></script>
+</body>
+</html>

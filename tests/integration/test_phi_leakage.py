@@ -1,45 +1,9 @@
 """
-PHI/secret leakage checks: error responses returned to the client must never echo raw
-transcript content or plaintext passwords back, even when something fails downstream.
-ARCHITECTURE_NOTES.md already flags that scribe.py prints full transcripts to stdout on
-every call (an operational logging concern, not fixed here since operators may rely on those
-prints for debugging) -- these tests are narrower: they check the HTTP response body itself,
-which is what would show up in browser devtools, API gateways, or a support ticket screenshot.
+PHI/secret leakage checks: error responses returned to the client must never echo plaintext
+passwords back, even when something fails downstream -- what would show up in browser
+devtools, API gateways, or a support ticket screenshot.
 """
 import pytest
-
-
-SECRET_TRANSCRIPT_MARKER = "PATIENT_SECRET_MARKER_Neha_Patil_HIV_status_XYZ123"
-
-
-@pytest.fixture
-def doctor(make_user):
-    return make_user(email="doctor@phi-test.com", role="Doctor")
-
-
-def test_scribe_500_error_does_not_echo_transcript_content(client, doctor, auth_headers, monkeypatch):
-    """
-    If the Groq call raises unexpectedly (not caught by scribe.py's own safety net -- e.g. a
-    bug in a future refactor), main.py's except-block returns f"Error: {str(e)}". This must
-    not, even incidentally, include the raw transcript text in the response body.
-    """
-    import app.main as app_main
-
-    def _boom(*args, **kwargs):
-        raise RuntimeError("simulated downstream failure")
-
-    monkeypatch.setattr(app_main.scribe, "scribe_transcript", _boom)
-
-    transcript = f"Doctor: {SECRET_TRANSCRIPT_MARKER} patient reports symptoms in detail here today"
-    resp = client.post("/api/scribe", json={"transcript": transcript}, headers=auth_headers(doctor))
-    assert resp.status_code == 500
-    assert SECRET_TRANSCRIPT_MARKER not in resp.text
-
-
-def test_scribe_400_validation_error_does_not_echo_transcript(client, doctor, auth_headers):
-    resp = client.post("/api/scribe", json={"transcript": "short"}, headers=auth_headers(doctor))
-    assert resp.status_code == 400
-    assert "short" not in resp.text.lower() or resp.json()["detail"] == "Transcript too short"
 
 
 def test_login_failure_response_never_contains_submitted_password(client, make_user):

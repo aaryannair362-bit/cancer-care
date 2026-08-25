@@ -12,29 +12,48 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import create_engine, func
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 import os
 from .config import settings
+from .database import engine, SessionLocal, get_db
 from .models import (
     Base, User, Organization, Consultation, PasswordHistory, Patient, NurseAssignment, Vital,
     Task, NursingNote, DischargeSummary, Ward, NurseShift,
     Drug, DrugBatch, DispensingRecord, ControlledDrugRegisterEntry,
+    ProcedureRecord, PreAuthorizationRequest, PatientDocument, DemoCC,
 )
 from .auth import (
     get_current_user, get_password_hash, verify_password,
     validate_password_complexity, create_access_token, create_refresh_token,
-    decode_token, log_audit, is_admin, is_head_nurse, is_nursing_station, is_nurse, is_pharmacist
+    decode_token, log_audit, is_admin, is_head_nurse, is_nursing_station, is_nurse, is_pharmacist,
+    is_tpa, is_billing_staff,
 )
-from .scribe import scribe
 from . import drug_matcher
 from . import lab_test_matcher
+from . import discharge_summary
 from . import sarvam_transcriber
+from .scribe import scribe
 from .migrations import run_additive_migrations
 from .tasks_engine import (
     generate_tasks_from_consultation, get_active_medications,
-    compute_admission_day, check_drug_interactions,
+    compute_admission_day, check_drug_interactions, check_allergy_conflicts,
 )
+from .routers.pharmacy import router as pharmacy_router
+from .routers.inventory import router as inventory_router
+from .routers.billing import router as billing_router
+from .routers.patients import router as patients_router
+from .routers.appointments import router as appointments_router
+from .routers.nursing_charting import router as nursing_charting_router
+from .routers.procedures import router as procedures_router
+from .routers.nursing_assessments import router as nursing_assessments_router
+from .routers.mar import router as mar_router
+from .routers.patient_documents import router as patient_documents_router
+from .routers import cca
+from .routers import cca_diagnostics
+from .routers import cca_coordination
+from .cca_seed import seed_cca_database
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,17 +61,8 @@ logger = logging.getLogger(__name__)
 # docs if this ever needs bumping, don't just raise it blindly.
 MAX_AUDIO_UPLOAD_BYTES = 25 * 1024 * 1024
 
-engine = create_engine(settings.DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base.metadata.create_all(bind=engine)
 run_additive_migrations(engine)
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 # Simple in-memory per-IP sliding-window rate limiter for auth endpoints. Single-process only
 # (this app deploys as one long-lived Render process with no Docker/CI/IaC in the repo, see
@@ -75,6 +85,19 @@ def _enforce_rate_limit(request: Request, bucket: str, limit: int, window_second
     _rate_limit_hits[key] = hits
 
 app = FastAPI(title="AIVANA Hospital System")
+app.include_router(pharmacy_router)
+app.include_router(inventory_router)
+app.include_router(billing_router)
+app.include_router(patients_router)
+app.include_router(appointments_router)
+app.include_router(nursing_charting_router)
+app.include_router(procedures_router)
+app.include_router(nursing_assessments_router)
+app.include_router(mar_router)
+app.include_router(patient_documents_router)
+app.include_router(cca.router)
+app.include_router(cca_diagnostics.router)
+app.include_router(cca_coordination.router)
 
 @app.exception_handler(json.JSONDecodeError)
 async def json_decode_error_handler(request: Request, exc: json.JSONDecodeError):
@@ -126,13 +149,12 @@ def is_doctor(user: dict) -> bool:
 
 def _coerce_number(value, integer=False):
     """
-    Best-effort coercion of a (typically LLM voice-extracted) value into a number, or None if
-    it can't reasonably be read as one. Groq's JSON extraction is not schema-enforced, so a
-    vital field can come back as a string ("seventy"), a list, or other junk instead of a
-    number -- passed straight into an Integer/Float DB column, a list crashes the insert
-    outright (sqlite3.ProgrammingError / a Postgres type error) and a non-numeric string
-    silently corrupts later numeric comparisons (e.g. the abnormal-vital check's
-    `heart_rate > 100`, which would raise TypeError comparing str > int). Never raises.
+    Best-effort coercion of a form-submitted value into a number, or None if it can't
+    reasonably be read as one -- a client can still submit a string, empty value, or other
+    junk instead of a number, and this must never let that crash the insert
+    (sqlite3.ProgrammingError / a Postgres type error) or silently corrupt later numeric
+    comparisons (e.g. the abnormal-vital check's `heart_rate > 100`, which would raise
+    TypeError comparing str > int). Never raises.
     """
     if value is None or isinstance(value, bool):
         return None
@@ -149,34 +171,285 @@ def _coerce_number(value, integer=False):
         return int(num) if integer else num
     return None
 
-def create_default_user():
-    db = SessionLocal()
+def seed_demo_logins(db: Session):
+    """Auto-seed demo_cc table and corresponding active Users in users table.
+    
+    Guarantees that on fresh deploy or startup:
+    - admin@aivana.com (password: Demo@123456)
+    - All role logins ending with @aivana.com (password: Password@2026!)
+    are created in both demo_cc table and User table with status='Active'.
+    """
     try:
-        if db.query(User).count() == 0:
-            org = Organization(name="Default Hospital")
+        # 1. Ensure default Organization exists
+        org = db.query(Organization).first()
+        if not org:
+            org = Organization(name="AIvana Cancer Care Hospital", device_limit=50)
             db.add(org)
             db.flush()
-            password_hash = get_password_hash("Demo@123456")
+
+        # 2. Complete matrix of demo credentials
+        demo_accounts = [
+            {
+                "role": "Admin",
+                "email": "admin@aivana.com",
+                "password": "Demo@123456",
+                "portal_name": "Hospital Admin",
+                "target_url": "/admin.html",
+                "description": "Full administrative access & system configuration",
+            },
+            {
+                "role": "Doctor",
+                "email": "doctor@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "OPD Doctor",
+                "target_url": "/opd.html",
+                "description": "OPD consultation wizard & AI voice scribing",
+            },
+            {
+                "role": "HeadNurse",
+                "email": "headnurse@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "Head Nurse Oversight",
+                "target_url": "/headnurse.html",
+                "description": "Ward KPI dashboard, shift scheduler & reports",
+            },
+            {
+                "role": "Nurse",
+                "email": "nurse@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "Inpatient Wards",
+                "target_url": "/ipd.html",
+                "description": "IPD bedside care, vitals charting & nursing notes",
+            },
+            {
+                "role": "NursingStation",
+                "email": "frontdesk@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "Front Desk & Reception",
+                "target_url": "/frontdesk.html",
+                "description": "Patient registration, token queue & appointments",
+            },
+            {
+                "role": "Pharmacist",
+                "email": "pharmacy@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "Pharmacy",
+                "target_url": "/pharmacy.html",
+                "description": "Formulary, batch FEFO dispensing & narcotics register",
+            },
+            {
+                "role": "InventoryManager",
+                "email": "inventory@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "Inventory & Procurement",
+                "target_url": "/inventory.html",
+                "description": "PR/PO procurement, GRN receiving & stock transfers",
+            },
+            {
+                "role": "Billing",
+                "email": "billing@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "Billing & Cashier",
+                "target_url": "/billing.html",
+                "description": "POS billing, itemized invoices & receipt printing",
+            },
+            {
+                "role": "TPA",
+                "email": "tpa@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "TPA Insurance Desk",
+                "target_url": "/tpa.html",
+                "description": "Insurance pre-authorization & corporate claims",
+            },
+            {
+                "role": "CCAMedicalOncologist",
+                "email": "oncologist@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Medical Oncologist)",
+                "target_url": "/cca_os.html",
+                "description": "Staging (AJCC), NCCN guideline readiness & chemo regimens",
+            },
+            {
+                "role": "CCANurseNavigator",
+                "email": "navigator@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Nurse Navigator)",
+                "target_url": "/cca_os.html",
+                "description": "Patient oncology journey, cycle clearances & toxicity logs",
+            },
+            {
+                "role": "CCAMDTCoordinator",
+                "email": "mdtcoord@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (MDT Coordinator)",
+                "target_url": "/cca_os.html",
+                "description": "Multidisciplinary tumor board scheduling & case discussion",
+            },
+            {
+                "role": "CCASurgicalOncologist",
+                "email": "surgeon@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Surgical Oncologist)",
+                "target_url": "/cca_os.html",
+                "description": "Surgical resection notes & MDT panel input",
+            },
+            {
+                "role": "CCARadiationOncologist",
+                "email": "radonc@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Radiation Oncologist)",
+                "target_url": "/cca_os.html",
+                "description": "Radiation therapy plans & fractional treatment logs",
+            },
+            {
+                "role": "CCARadiologist",
+                "email": "radiologist@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Radiologist)",
+                "target_url": "/cca_os.html",
+                "description": "Imaging review, lesion measurements & RECIST response",
+            },
+            {
+                "role": "CCAPathologist",
+                "email": "pathologist@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Pathologist)",
+                "target_url": "/cca_os.html",
+                "description": "Histopathology, immunohistochemistry & biomarker sign-offs",
+            },
+            {
+                "role": "CCAPatientLiaison",
+                "email": "liaison@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Patient Liaison)",
+                "target_url": "/cca_os.html",
+                "description": "Patient communication, counseling & portal access",
+            },
+            {
+                "role": "CCAFinancialCounsellor",
+                "email": "counsellor@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Financial Counsellor)",
+                "target_url": "/cca_os.html",
+                "description": "Cancer treatment estimates, government schemes & insurance",
+            },
+        ]
+
+        # 3. Populate demo_cc table and User table
+        for item in demo_accounts:
+            # Sync demo_cc table
+            demo_entry = db.query(DemoCC).filter(DemoCC.email == item["email"]).first()
+            if not demo_entry:
+                demo_entry = DemoCC(
+                    role=item["role"],
+                    email=item["email"],
+                    password=item["password"],
+                    portal_name=item["portal_name"],
+                    target_url=item["target_url"],
+                    description=item["description"],
+                )
+                db.add(demo_entry)
+            else:
+                demo_entry.role = item["role"]
+                demo_entry.password = item["password"]
+                demo_entry.portal_name = item["portal_name"]
+                demo_entry.target_url = item["target_url"]
+                demo_entry.description = item["description"]
+
+            # Sync active User table for login authentication
+            pwd_hash = get_password_hash(item["password"])
+            user_entry = db.query(User).filter(User.email == item["email"]).first()
+            if not user_entry:
+                user_entry = User(
+                    email=item["email"],
+                    password_hash=pwd_hash,
+                    role=item["role"],
+                    organization_id=org.id,
+                    status="Active",
+                    must_change_password=False,
+                )
+                db.add(user_entry)
+                db.flush()
+                db.add(PasswordHistory(user_id=user_entry.id, password_hash=pwd_hash))
+            else:
+                user_entry.password_hash = pwd_hash
+                user_entry.role = item["role"]
+                user_entry.organization_id = org.id
+                user_entry.status = "Active"
+                user_entry.must_change_password = False
+
+        db.commit()
+        logger.info("Demo logins (demo_cc table + active users) seeded successfully.")
+    except Exception as e:
+        logger.error("Error seeding demo logins: %s", e)
+        db.rollback()
+
+
+def create_default_user():
+    """Fallback admin seed from environment variables if present."""
+    db = SessionLocal()
+    try:
+        if db.query(User).count() == 0 and settings.ADMIN_EMAIL and settings.ADMIN_PASSWORD:
+            email = settings.ADMIN_EMAIL
+            password = settings.ADMIN_PASSWORD
+            org_name = settings.ADMIN_ORG_NAME
+            org = Organization(name=org_name)
+            db.add(org)
+            db.flush()
+            password_hash = get_password_hash(password)
             user = User(
-                email="demo@aivana.com",
+                email=email,
                 password_hash=password_hash,
                 role="Admin",
                 organization_id=org.id,
-                status="Active"
+                status="Active",
+                must_change_password=False,
             )
             db.add(user)
             db.flush()
             history = PasswordHistory(user_id=user.id, password_hash=password_hash)
             db.add(history)
             db.commit()
+            logger.info("Default admin user created: %s (org: %s)", email, org_name)
     except Exception as e:
         logger.error("Error creating default user: %s", e)
     finally:
         db.close()
 
+
 @app.on_event("startup")
 def startup():
     create_default_user()
+    db = SessionLocal()
+    try:
+        seed_demo_logins(db)
+        seed_cca_database(db, force_reset=False)
+    except Exception as e:
+        logger.error("Error seeding data on startup: %s", e)
+    finally:
+        db.close()
+
+
+@app.get("/api/demo-logins")
+def get_demo_logins(db: Session = Depends(get_db)):
+    """Public read-only directory of demo logins stored in demo_cc table."""
+    records = db.query(DemoCC).order_by(DemoCC.id).all()
+    return {
+        "logins": [
+            {
+                "id": r.id,
+                "role": r.role,
+                "email": r.email,
+                "password": r.password,
+                "portal_name": r.portal_name,
+                "target_url": r.target_url,
+                "description": r.description,
+            }
+            for r in records
+        ]
+    }
+
+
 
 @app.post("/api/auth/register")
 async def register(request: Request, db: Session = Depends(get_db)):
@@ -420,6 +693,18 @@ async def admin_create_user(
 
 @app.post("/api/scribe")
 async def scribe_transcript(request: Request, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Voice-driven OPD consultation drafting: turns a raw doctor-patient transcript into a
+    structured prescription draft via scribe.py's Groq extraction, and persists it immediately
+    as a Consultation row (the doctor reviews/edits the draft in the UI, then
+    PATCH /api/consultations/{id}/finalize -- unchanged, see that endpoint -- saves their final
+    reviewed version). Restored per explicit product decision: OPD keeps voice/AI drafting,
+    IPD does not -- see ARCHITECTURE_NOTES.md/CHANGELOG.md for why IPD's equivalent voice
+    endpoints (voice-to-vitals, nurse-consult) were deliberately not restored alongside this one.
+    Doctor-only, matching POST /api/consultations -- both endpoints write to the same table.
+    """
+    if not is_doctor(current_user):
+        raise HTTPException(403, "Only doctors can create consultations")
     try:
         body = await request.json()
         transcript = body.get("transcript")
@@ -439,14 +724,19 @@ async def scribe_transcript(request: Request, current_user: dict = Depends(get_c
                 raise HTTPException(404, "Patient not found")
         start_time = time.time()
         # Off the event loop: scribe.scribe_transcript makes a blocking `requests` call to
-        # Groq (now with retry-with-backoff on 429, verified live -- worst case several
-        # retries at up to 20s each). Called inline inside an `async def` handler, that
-        # blocks THIS SINGLE event loop for its entire duration -- which means one doctor's
-        # slow/rate-limited consultation freezes the app for every other concurrent user on
-        # every endpoint, not just this one. run_in_threadpool moves the blocking call off
-        # the loop so other requests keep being served while this one waits on Groq.
+        # Groq (rate-limited/paced by rate_limiter.py, with retry-with-backoff on 429). Called
+        # inline inside an `async def` handler, that blocks THIS SINGLE event loop for its
+        # entire duration -- which means one doctor's slow/rate-limited consultation freezes
+        # the app for every other concurrent user on every endpoint, not just this one.
+        # run_in_threadpool moves the blocking call off the loop so other requests keep being
+        # served while this one waits on Groq.
         result = await run_in_threadpool(scribe.scribe_transcript, transcript)
         latency = time.time() - start_time
+        # Same deterministic fuzzy-correction pass POST /api/consultations applies to
+        # manually-entered names -- an AI-extracted drug/lab name deserves the same safety net.
+        medications = drug_matcher.correct_medication_names(result.get("medications", []) or [])
+        lab_tests = result.get("labTests", []) or []
+        lab_tests = lab_test_matcher.correct_lab_test_names(lab_tests) if lab_tests and isinstance(lab_tests[0], str) else lab_tests
         consultation = Consultation(
             case_id=f"{datetime.utcnow().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}",
             patient_name=linked_patient.name if linked_patient else "Patient",
@@ -459,9 +749,10 @@ async def scribe_transcript(request: Request, current_user: dict = Depends(get_c
             hpi=result.get("hpi", ""),
             primary_diagnosis=result.get("primaryDiagnosis", ""),
             differential_diagnosis=result.get("differentialDiagnosis", ""),
-            medications=result.get("medications", []),
-            lab_tests=result.get("labTests", []),
+            medications=medications,
+            lab_tests=lab_tests,
             advice=result.get("advice", ""),
+            visit_type="OPD",
             raw_transcript=transcript,
             gemini_latency=latency,
             input_tokens=len(transcript)//4,
@@ -474,6 +765,8 @@ async def scribe_transcript(request: Request, current_user: dict = Depends(get_c
         tasks = generate_tasks_from_consultation(db, consultation, current_user["id"])
         log_audit(db, current_user.get("id"), current_user.get("email"), current_user.get("organization_id"),
                   "scribe", "api/scribe", "Success")
+        result["medications"] = medications
+        result["labTests"] = lab_tests
         result["id"] = consultation.id
         result["case_id"] = consultation.case_id
         result["tasks_created"] = len(tasks)
@@ -486,9 +779,9 @@ async def scribe_transcript(request: Request, current_user: dict = Depends(get_c
     except json.JSONDecodeError:
         raise HTTPException(400, "Request body must be valid JSON")
     except Exception as e:
-        # Don't echo str(e) back to the client (main.py's other handlers already follow this
-        # pattern) -- an exception raised while processing a transcript can easily embed
-        # PHI-derived content, and this response goes straight to the caller, not just a log.
+        # Don't echo str(e) back to the client -- an exception raised while processing a
+        # transcript can easily embed PHI-derived content, and this response goes straight to
+        # the caller, not just a log.
         logger.error("Scribe error: %s", e)
         raise HTTPException(500, "Internal server error")
 
@@ -496,13 +789,11 @@ async def scribe_transcript(request: Request, current_user: dict = Depends(get_c
 async def get_transcription_provider(current_user: dict = Depends(get_current_user)):
     """
     Lets the frontend decide, at recording-start time, which of the two incompatible
-    recording strategies voice-capture.js needs to use: "whisper" (default) records one
-    continuous blob, uploaded once at stop(); "sarvam" (opt-in via settings.
+    recording strategies voice-capture.js needs to use: "whisper" records one continuous
+    blob, uploaded once at stop(); "sarvam" (the current default, see config.py's
     TRANSCRIPTION_PROVIDER) must instead restart MediaRecorder on a rolling ~25s cadence,
-    because Sarvam's REST API enforces a hard 30-second-per-request cap (verified live -- see
-    sarvam_transcriber.py's module docstring). Reading this from settings rather than baking a
-    provider into the frontend keeps the provider swap an env var toggle (see config.py's
-    TRANSCRIPTION_PROVIDER comment), not a frontend code change.
+    because Sarvam's REST API enforces a hard 30-second-per-request cap (see
+    sarvam_transcriber.py's module docstring).
     """
     return {"provider": settings.TRANSCRIPTION_PROVIDER}
 
@@ -518,20 +809,18 @@ async def transcribe_audio_endpoint(
     request: Request, audio: list[UploadFile] = File(...), current_user: dict = Depends(get_current_user)
 ):
     """
-    Server-side speech-to-text for all 4 voice-input flows (OPD consult, IPD nursing note,
-    IPD ward round, HeadNurse nursing note) -- replaces the browser's built-in
-    SpeechRecognition, which mis-transcribes Hindi/Hinglish speech into English-phonetic
-    nonsense (verified live: an actual drug name came out as unrelated English words).
-    Stateless -- no DB/patient/org involvement, same shape as /api/clinical-helper -- so no
-    role gate beyond authentication, matching /api/scribe.
+    Server-side speech-to-text for the OPD voice-consultation flow -- replaces the browser's
+    built-in SpeechRecognition, which mis-transcribes Hindi/Hinglish speech into
+    English-phonetic nonsense. Stateless -- no DB/patient/org involvement -- so no role gate
+    beyond authentication, matching /api/scribe.
 
     `audio` is a LIST (voice-capture.js sends one or more files under the same "audio" form
     field) to support the provider="sarvam" path, which uploads several <=30s chunks instead
     of one continuous recording (see get_transcription_provider's docstring for why). The
-    default "whisper" provider only ever receives exactly one file per the frontend's own
-    unmodified recording behavior in that mode, and this deliberately still only reads
-    audio[0] for that path -- so switching TRANSCRIPTION_PROVIDER back to "whisper" can never
-    accidentally pick up multiple files it doesn't know how to handle.
+    "whisper" provider only ever receives exactly one file per the frontend's own recording
+    behavior in that mode, and this deliberately still only reads audio[0] for that path -- so
+    switching TRANSCRIPTION_PROVIDER back to "whisper" can never accidentally pick up multiple
+    files it doesn't know how to handle.
     """
     if len(audio) > MAX_AUDIO_CHUNKS:
         raise HTTPException(413, "Too many audio chunks in one request")
@@ -577,34 +866,6 @@ async def transcribe_audio_endpoint(
         logger.error("Audio transcription error: %s", e)
         raise HTTPException(502, "Transcription failed")
 
-@app.post("/api/test-scribe")
-async def test_scribe(request: Request):
-    body = await request.json()
-    transcript = body.get("transcript")
-    if not transcript:
-        return {"error": "No transcript"}
-    try:
-        result = await run_in_threadpool(scribe.scribe_transcript, transcript)
-        return {"result": result}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/api/clinical-helper")
-async def clinical_helper(request: Request, current_user: dict = Depends(get_current_user)):
-    try:
-        body = await request.json()
-        current_draft = body.get("current_draft")
-        query = body.get("query", "")
-        if not current_draft:
-            raise HTTPException(400, "Current draft required")
-        return {"advice": await run_in_threadpool(scribe.clinical_helper, current_draft, query)}
-    except HTTPException:
-        raise
-    except json.JSONDecodeError:
-        raise HTTPException(400, "Request body must be valid JSON")
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
 @app.post("/api/translate")
 async def translate_prescription(request: Request, current_user: dict = Depends(get_current_user)):
     try:
@@ -629,6 +890,97 @@ async def translate_prescription(request: Request, current_user: dict = Depends(
     except Exception as e:
         raise HTTPException(500, str(e))
 
+@app.post("/api/consultations")
+async def create_consultation(request: Request, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Plain structured-form OPD consultation entry -- the doctor types/selects each field
+    directly (no voice input, no AI drafting). Replaces the former POST /api/scribe, which
+    turned a voice transcript into a structured draft via an external LLM; this codebase no
+    longer has any AI/voice dependency anywhere (see CHANGELOG.md). Medication and lab-test
+    names are still corrected against the bundled reference datasets (drug_matcher.py/
+    lab_test_matcher.py) -- that's deterministic fuzzy string matching, not AI, and remains
+    useful for catching typos in manually-entered names.
+    """
+    if not is_doctor(current_user):
+        raise HTTPException(403, "Only doctors can create consultations")
+    body = await request.json()
+    patient_id = body.get("patient_id")
+    chief_complaint = (body.get("chief_complaint") or "").strip()
+    if not chief_complaint:
+        raise HTTPException(400, "chief_complaint is required")
+
+    linked_patient = None
+    if patient_id:
+        # An OPD walk-in is allowed to use an arbitrary patient_id that doesn't correspond to
+        # any real IPD Patient row (tracks a walk-in across visits without requiring admission
+        # -- intentional, see TEST_NOTES.md). What must NOT be allowed is patient_id resolving
+        # to a REAL Patient row belonging to a different organization.
+        linked_patient = db.query(Patient).filter(Patient.id == patient_id).first()
+        if linked_patient and linked_patient.organization_id != current_user.get("organization_id"):
+            raise HTTPException(404, "Patient not found")
+
+    medications = body.get("medications") or []
+    lab_tests = body.get("lab_tests") or []
+    if not isinstance(medications, list) or not isinstance(lab_tests, list):
+        raise HTTPException(400, "medications and lab_tests must be lists")
+    medications = drug_matcher.correct_medication_names(medications)
+    lab_tests = lab_test_matcher.correct_lab_test_names(lab_tests) if lab_tests and isinstance(lab_tests[0], str) else lab_tests
+
+    # Follow-up Consultation (Clinical Workflows): an optional explicit link to the earlier
+    # consultation this one is following up on, distinct from just sharing a patient_id.
+    follow_up_of_id = body.get("follow_up_of_id")
+    if follow_up_of_id is not None:
+        prior = db.query(Consultation).filter(
+            Consultation.id == follow_up_of_id, Consultation.organization_id == current_user.get("organization_id")
+        ).first()
+        if not prior:
+            raise HTTPException(404, "follow_up_of_id does not reference a consultation in this organization")
+
+    consultation = Consultation(
+        case_id=f"{datetime.utcnow().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}",
+        patient_name=linked_patient.name if linked_patient else (body.get("patient_name") or "Patient"),
+        patient_age=str(linked_patient.age) if linked_patient and linked_patient.age is not None else str(body.get("patient_age") or ""),
+        patient_gender=linked_patient.gender if linked_patient else (body.get("patient_gender") or ""),
+        patient_id=patient_id,
+        organization_id=current_user.get("organization_id"),
+        user_id=current_user.get("id"),
+        chief_complaint=chief_complaint,
+        hpi=body.get("hpi", ""),
+        objective_findings=body.get("objective_findings", ""),
+        primary_diagnosis=body.get("primary_diagnosis", ""),
+        differential_diagnosis=body.get("differential_diagnosis", ""),
+        medications=medications,
+        lab_tests=lab_tests,
+        advice=body.get("advice", ""),
+        visit_type="OPD",
+        follow_up_of_id=follow_up_of_id,
+    )
+    db.add(consultation)
+    db.commit()
+    db.refresh(consultation)
+
+    allergy_warnings = []
+    if linked_patient and linked_patient.allergies:
+        allergy_warnings = check_allergy_conflicts(linked_patient.allergies, medications)
+        if allergy_warnings:
+            consultation.allergy_warnings = allergy_warnings
+            db.commit()
+
+    tasks = generate_tasks_from_consultation(db, consultation, current_user["id"])
+    log_audit(db, current_user.get("id"), current_user.get("email"), current_user.get("organization_id"),
+              "create_consultation", f"consultations/{consultation.id}", "Success")
+    return {
+        "id": consultation.id, "case_id": consultation.case_id, "tasks_created": len(tasks),
+        "patient_name": consultation.patient_name, "patient_age": consultation.patient_age,
+        "patient_gender": consultation.patient_gender, "chief_complaint": consultation.chief_complaint,
+        "hpi": consultation.hpi, "objective_findings": consultation.objective_findings,
+        "primary_diagnosis": consultation.primary_diagnosis,
+        "differential_diagnosis": consultation.differential_diagnosis,
+        "medications": consultation.medications, "lab_tests": consultation.lab_tests,
+        "advice": consultation.advice, "follow_up_of_id": consultation.follow_up_of_id,
+        "allergy_warnings": allergy_warnings,
+    }
+
 MAX_CONSULTATIONS_LIMIT = 200
 
 @app.get("/api/consultations")
@@ -648,19 +1000,14 @@ def get_consultations(
         {"id": c.id, "case_id": c.case_id, "created_at": c.created_at.isoformat(),
          "patient_name": c.patient_name, "chief_complaint": c.chief_complaint,
          "primary_diagnosis": c.primary_diagnosis,
-         "medications_count": len(c.medications or []), "gemini_latency": c.gemini_latency,
-         "total_tokens": c.total_tokens, "patient_id": c.patient_id,
+         "medications_count": len(c.medications or []), "patient_id": c.patient_id,
          "finalized": c.finalized_at is not None} for c in cons]}
 
 @app.get("/api/consultations/analytics")
 def get_consultation_analytics(days: int = 30, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     """
-    Real per-doctor operational metrics (consultation volume, AI latency, token usage) over a
-    trailing window -- computed from Consultation columns already populated by every real
-    POST /api/scribe call, nothing fabricated. Deliberately no "success rate": a failed Groq call
-    never commits a Consultation row today (see scribe.py), so that figure isn't derivable from
-    what's actually persisted. Deliberately no model/provider name in the response -- callers
-    that want AI availability use the existing GET /api/health (groq_available only).
+    Real per-doctor consultation volume over a trailing window -- computed from Consultation
+    rows, nothing fabricated.
 
     NOTE: this route MUST be registered before GET /api/consultations/{consultation_id} --
     FastAPI matches routes in registration order, and {consultation_id}: int would otherwise
@@ -676,32 +1023,14 @@ def get_consultation_analytics(days: int = 30, current_user: dict = Depends(get_
         Consultation.created_at >= since,
     ).all()
 
-    per_day = defaultdict(lambda: {"count": 0, "latency_sum": 0.0, "latency_n": 0, "tokens_sum": 0, "tokens_n": 0})
+    per_day = defaultdict(int)
     for c in rows:
-        bucket = per_day[c.created_at.date().isoformat()]
-        bucket["count"] += 1
-        if c.gemini_latency is not None:
-            bucket["latency_sum"] += c.gemini_latency
-            bucket["latency_n"] += 1
-        if c.total_tokens is not None:
-            bucket["tokens_sum"] += c.total_tokens
-            bucket["tokens_n"] += 1
-
-    days_sorted = sorted(per_day.items())
-    latencies = [c.gemini_latency for c in rows if c.gemini_latency is not None]
-    tokens = [c.total_tokens for c in rows if c.total_tokens is not None]
+        per_day[c.created_at.date().isoformat()] += 1
 
     return {
         "period_days": days,
         "total_consultations": len(rows),
-        "avg_latency": round(sum(latencies) / len(latencies), 3) if latencies else None,
-        "avg_tokens": round(sum(tokens) / len(tokens), 1) if tokens else None,
-        "consultations_per_day": [{"date": d, "count": b["count"]} for d, b in days_sorted],
-        "latency_trend": [
-            {"date": d, "avg_latency": round(b["latency_sum"] / b["latency_n"], 3) if b["latency_n"] else None}
-            for d, b in days_sorted
-        ],
-        "token_usage_trend": [{"date": d, "total_tokens": b["tokens_sum"]} for d, b in days_sorted],
+        "consultations_per_day": [{"date": d, "count": n} for d, n in sorted(per_day.items())],
     }
 
 @app.get("/api/consultations/{consultation_id}")
@@ -709,15 +1038,21 @@ def get_consultation(consultation_id: int, current_user: dict = Depends(get_curr
     c = db.query(Consultation).filter(Consultation.id == consultation_id, Consultation.user_id == current_user.get("id")).first()
     if not c:
         raise HTTPException(404, "Not found")
+    follow_ups = db.query(Consultation.id, Consultation.case_id, Consultation.created_at).filter(
+        Consultation.follow_up_of_id == c.id
+    ).all()
     return {
         "id": c.id, "case_id": c.case_id, "patient_name": c.patient_name, "patient_age": c.patient_age,
         "patient_gender": c.patient_gender, "chief_complaint": c.chief_complaint, "hpi": c.hpi,
+        "objective_findings": c.objective_findings,
         "primary_diagnosis": c.primary_diagnosis, "differential_diagnosis": c.differential_diagnosis,
         "medications": c.medications, "lab_tests": c.lab_tests, "advice": c.advice,
-        "raw_transcript": c.raw_transcript, "created_at": c.created_at.isoformat(),
-        "gemini_latency": c.gemini_latency, "total_tokens": c.total_tokens,
+        "created_at": c.created_at.isoformat(),
         "patient_id": c.patient_id, "visit_type": c.visit_type, "admission_day": c.admission_day,
-        "interaction_warnings": c.interaction_warnings, "finalized": c.finalized_at is not None
+        "interaction_warnings": c.interaction_warnings, "allergy_warnings": c.allergy_warnings,
+        "finalized": c.finalized_at is not None,
+        "follow_up_of_id": c.follow_up_of_id,
+        "follow_ups": [{"id": f.id, "case_id": f.case_id, "created_at": f.created_at.isoformat()} for f in follow_ups],
     }
 
 @app.patch("/api/consultations/{consultation_id}/finalize")
@@ -746,7 +1081,7 @@ async def finalize_consultation(
 
     data = await request.json()
     field_map = {
-        "chiefComplaint": "chief_complaint", "hpi": "hpi",
+        "chiefComplaint": "chief_complaint", "hpi": "hpi", "objectiveFindings": "objective_findings",
         "primaryDiagnosis": "primary_diagnosis", "differentialDiagnosis": "differential_diagnosis",
         "advice": "advice",
     }
@@ -763,11 +1098,17 @@ async def finalize_consultation(
     db.refresh(consultation)
 
     interaction_warnings = []
+    allergy_warnings = []
     if consultation.patient_id:
         active_meds = get_active_medications(db, consultation.patient_id)
         drug_names = [m.get("drugName") for m in active_meds if isinstance(m, dict) and m.get("drugName")]
         interaction_warnings = await run_in_threadpool(check_drug_interactions, drug_names)
         consultation.interaction_warnings = interaction_warnings
+
+        patient = db.query(Patient).filter(Patient.id == consultation.patient_id).first()
+        if patient and patient.allergies:
+            allergy_warnings = check_allergy_conflicts(patient.allergies, consultation.medications or [])
+        consultation.allergy_warnings = allergy_warnings
         db.commit()
 
     tasks = generate_tasks_from_consultation(db, consultation, current_user["id"])
@@ -778,6 +1119,7 @@ async def finalize_consultation(
     return {
         "message": "Consultation finalized", "id": consultation.id,
         "tasks_created": len(tasks), "interaction_warnings": interaction_warnings,
+        "allergy_warnings": allergy_warnings,
     }
 
 @app.get("/api/patients/{patient_id}/details")
@@ -800,12 +1142,20 @@ def get_patient_details(
         ).first()
         if not assignment:
             raise HTTPException(403, "Not assigned to this patient")
-    elif not (is_head_nurse(current_user) or is_nursing_station(current_user) or is_doctor(current_user)):
+    # TPA gets the same org-wide read access as Doctor/HeadNurse/NursingStation (no per-patient
+    # assignment check, unlike Nurse) -- see PreAuthorizationRequest in models.py: a TPA reviewer
+    # needs to open any patient's full record to submit it for pre-authorization.
+    elif not (is_head_nurse(current_user) or is_nursing_station(current_user) or is_doctor(current_user) or is_tpa(current_user)):
         raise HTTPException(403, "Permission denied")
     vitals = db.query(Vital).filter(Vital.patient_id == patient_id).order_by(Vital.recorded_at.desc()).all()
     tasks = db.query(Task).filter(Task.patient_id == patient_id).order_by(Task.created_at.desc()).all()
     consultations = db.query(Consultation).filter(Consultation.patient_id == patient_id).order_by(Consultation.created_at.desc()).all()
     nursing_notes = db.query(NursingNote).filter(NursingNote.patient_id == patient_id).order_by(NursingNote.created_at.desc()).all()
+    procedures = db.query(ProcedureRecord).filter(ProcedureRecord.patient_id == patient_id).order_by(ProcedureRecord.performed_at.desc()).all()
+    imported_documents = db.query(PatientDocument).filter(
+        PatientDocument.patient_id == patient_id,
+        PatientDocument.organization_id == current_user.get("organization_id"),
+    ).order_by(PatientDocument.document_date, PatientDocument.uploaded_at).all()
 
     active_assignment = db.query(NurseAssignment).filter(
         NurseAssignment.patient_id == patient_id, NurseAssignment.status == "Active"
@@ -831,6 +1181,8 @@ def get_patient_details(
             "bed": patient.bed,
             "diagnosis": patient.diagnosis,
             "status": patient.status,
+            "admission_type": patient.admission_type,
+            "allergies": patient.allergies,
             "admission_date": patient.admission_date.isoformat() if patient.admission_date else None,
             "assigned_nurse": assigned_nurse,
         },
@@ -866,6 +1218,7 @@ def get_patient_details(
             "created_at": c.created_at.isoformat(),
             "chief_complaint": c.chief_complaint,
             "hpi": c.hpi,
+            "objective_findings": c.objective_findings,
             "primary_diagnosis": c.primary_diagnosis,
             "differential_diagnosis": c.differential_diagnosis,
             "medications": c.medications,
@@ -874,7 +1227,8 @@ def get_patient_details(
             "raw_transcript": c.raw_transcript,
             "visit_type": c.visit_type,
             "admission_day": c.admission_day,
-            "interaction_warnings": c.interaction_warnings
+            "interaction_warnings": c.interaction_warnings,
+            "allergy_warnings": c.allergy_warnings,
         } for c in consultations],
         "nursing_notes": [{
             "id": n.id,
@@ -883,8 +1237,149 @@ def get_patient_details(
             "voice_transcript": n.voice_transcript,
             "nurse_id": n.nurse_id,
             "nurse_email": nurse_emails.get(n.nurse_id)
-        } for n in nursing_notes]
+        } for n in nursing_notes],
+        "procedures": [{
+            "id": p.id, "procedure_name": p.procedure_name, "notes": p.notes,
+            "performed_at": p.performed_at.isoformat() if p.performed_at else None,
+        } for p in procedures],
+        "imported_records": [{
+            "id": d.id, "filename": d.filename, "document_type": d.document_type,
+            "document_date": d.document_date.isoformat() if d.document_date else None,
+            "source_hospital": d.source_hospital, "ocr_status": d.ocr_status,
+            "page_count": d.page_count, "extracted_data": d.extracted_data or {},
+            "sha256": d.sha256,
+        } for d in imported_documents],
     }
+
+@app.post("/api/pre-authorizations")
+async def create_pre_authorization(request: Request, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    TPA-only: submits a point-in-time snapshot of a patient's full record for insurance
+    pre-authorization (see PreAuthorizationRequest in models.py -- the pre-authorization step of
+    the 8-step Insurance/TPA claims pipeline deliberately left out of BillingClaim's scope).
+    Reuses the same tables get_patient_details reads rather than trusting a client-supplied
+    payload, so the snapshot reflects what the TPA actually just viewed, not whatever the request
+    body claims.
+    """
+    if not is_tpa(current_user):
+        raise HTTPException(403, "Only TPA can submit pre-authorization requests")
+    body = await request.json()
+    patient_id = body.get("patient_id")
+    if not patient_id:
+        raise HTTPException(400, "patient_id is required")
+    patient = db.query(Patient).filter(
+        Patient.id == patient_id, Patient.organization_id == current_user.get("organization_id")
+    ).first()
+    if not patient:
+        raise HTTPException(404, "Patient not found")
+
+    consultations = db.query(Consultation).filter(Consultation.patient_id == patient_id).order_by(Consultation.created_at.desc()).all()
+    procedures = db.query(ProcedureRecord).filter(ProcedureRecord.patient_id == patient_id).order_by(ProcedureRecord.performed_at.desc()).all()
+    imported_documents = db.query(PatientDocument).filter(
+        PatientDocument.patient_id == patient_id,
+        PatientDocument.organization_id == current_user.get("organization_id"),
+    ).order_by(PatientDocument.document_date, PatientDocument.uploaded_at).all()
+
+    snapshot = {
+        "patient": {
+            "id": patient.id, "mrn": patient.mrn, "name": patient.name, "age": patient.age, "gender": patient.gender,
+            "phone": patient.phone, "diagnosis": patient.diagnosis, "status": patient.status,
+            "admission_type": patient.admission_type, "ward": patient.ward, "bed": patient.bed,
+            "allergies": patient.allergies,
+            "admission_date": patient.admission_date.isoformat() if patient.admission_date else None,
+        },
+        "consultations": [{
+            "id": c.id, "created_at": c.created_at.isoformat() if c.created_at else None, "visit_type": c.visit_type,
+            "chief_complaint": c.chief_complaint, "primary_diagnosis": c.primary_diagnosis,
+            "differential_diagnosis": c.differential_diagnosis, "medications": c.medications,
+            "lab_tests": c.lab_tests, "advice": c.advice,
+        } for c in consultations],
+        "procedures": [{
+            "id": p.id, "procedure_name": p.procedure_name, "notes": p.notes,
+            "performed_at": p.performed_at.isoformat() if p.performed_at else None,
+        } for p in procedures],
+        "imported_records": [{
+            "id": d.id, "filename": d.filename, "document_type": d.document_type,
+            "document_date": d.document_date.isoformat() if d.document_date else None,
+            "source_hospital": d.source_hospital, "ocr_status": d.ocr_status,
+            "page_count": d.page_count, "extracted_data": d.extracted_data or {},
+            "sha256": d.sha256,
+        } for d in imported_documents],
+    }
+
+    pre_auth = PreAuthorizationRequest(
+        organization_id=current_user.get("organization_id"), patient_id=patient_id,
+        requested_by=current_user["id"], status="Submitted", clinical_snapshot=snapshot,
+    )
+    db.add(pre_auth)
+    db.commit()
+    db.refresh(pre_auth)
+    log_audit(db, current_user["id"], current_user["email"], current_user.get("organization_id"),
+              "submit_pre_authorization", f"pre_authorizations/{pre_auth.id}", "Success", f"patient {patient_id}")
+    return {
+        "id": pre_auth.id, "patient_id": pre_auth.patient_id, "status": pre_auth.status,
+        "submitted_at": pre_auth.submitted_at.isoformat() if pre_auth.submitted_at else None,
+    }
+
+@app.get("/api/pre-authorizations")
+def list_pre_authorizations(
+    patient_id: Optional[int] = None,
+    current_user: dict = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """
+    TPA sees their own submissions; Admin and Billing staff see every submission in the org --
+    Billing needs this to check a patient's pre-authorization status before attaching one to an
+    Insurance claim (routers/billing.py.create_claim), which is the interlink point where a
+    TPA's "everything comes up fine" surfaces on the billing side. `patient_id` narrows to one
+    patient's history, which is how billing.html looks this up per-invoice.
+    """
+    if not (is_tpa(current_user) or is_admin(current_user) or is_billing_staff(current_user)):
+        raise HTTPException(403, "Permission denied")
+    query = db.query(PreAuthorizationRequest).filter(
+        PreAuthorizationRequest.organization_id == current_user.get("organization_id")
+    )
+    if patient_id is not None:
+        query = query.filter(PreAuthorizationRequest.patient_id == patient_id)
+    if is_tpa(current_user):
+        query = query.filter(PreAuthorizationRequest.requested_by == current_user["id"])
+    rows = query.order_by(PreAuthorizationRequest.submitted_at.desc()).limit(100).all()
+    patient_ids = {r.patient_id for r in rows}
+    patient_names = {p.id: p.name for p in db.query(Patient).filter(Patient.id.in_(patient_ids)).all()} if patient_ids else {}
+    return [{
+        "id": r.id, "patient_id": r.patient_id, "patient_name": patient_names.get(r.patient_id, "-"),
+        "status": r.status, "submitted_at": r.submitted_at.isoformat() if r.submitted_at else None,
+    } for r in rows]
+
+@app.patch("/api/pre-authorizations/{pre_auth_id}/status")
+async def update_pre_authorization_status(
+    pre_auth_id: int, request: Request,
+    current_user: dict = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    """
+    TPA-only, same free-standing status-update shape as billing.py's update_claim_status. This
+    is the missing piece that lets a TPA actually resolve a submission to "Approved" -- the real
+    8-step pipeline's verification/approval-tracking steps are a future review page (not built
+    here), but until it exists the TPA marking their own outcome is the only way "everything
+    comes up fine" can happen at all, and it's what routers/billing.py.create_claim checks for
+    before letting a claim reference a pre-authorization.
+    """
+    if not is_tpa(current_user):
+        raise HTTPException(403, "Only TPA can update a pre-authorization's status")
+    body = await request.json()
+    status_value = body.get("status")
+    if status_value not in ("Submitted", "Approved", "Rejected"):
+        raise HTTPException(400, "status must be Submitted, Approved, or Rejected")
+    pre_auth = db.query(PreAuthorizationRequest).filter(
+        PreAuthorizationRequest.id == pre_auth_id,
+        PreAuthorizationRequest.organization_id == current_user.get("organization_id"),
+    ).first()
+    if not pre_auth:
+        raise HTTPException(404, "Pre-authorization request not found")
+    pre_auth.status = status_value
+    db.commit()
+    log_audit(db, current_user["id"], current_user["email"], current_user.get("organization_id"),
+              "update_pre_authorization_status", f"pre_authorization_requests/{pre_auth_id}", "Success", f"status={status_value}")
+    return {"id": pre_auth.id, "status": pre_auth.status}
 
 @app.put("/api/patients/{patient_id}")
 async def update_patient(
@@ -908,6 +1403,10 @@ async def update_patient(
         patient.bed = body["bed"]
     if "diagnosis" in body:
         patient.diagnosis = body["diagnosis"]
+    if "allergies" in body:
+        if body["allergies"] is not None and not isinstance(body["allergies"], list):
+            raise HTTPException(400, "allergies must be a list of strings")
+        patient.allergies = body["allergies"]
     if "status" in body:
         patient.status = body["status"]
         if body["status"] != "Active":
@@ -945,12 +1444,13 @@ def generate_discharge_summary(
     db: Session = Depends(get_db)
 ):
     """
-    Generates (via AI) and persists a discharge summary from the patient's full IPD record --
-    vitals trend, nursing notes, tasks, and any linked OPD consultations. A real, common
-    hospital-operations pain point: writing a discharge summary by hand from a paper/EMR chart
-    is slow and error-prone; this assembles the same underlying data this system already
-    captures into a first draft a clinician reviews and can regenerate as new data comes in.
-    Does not require the patient to already be marked Discharged -- can be drafted in advance.
+    Generates (via deterministic templating, no AI) and persists a discharge summary from the
+    patient's full IPD record -- vitals trend, nursing notes, tasks, and any linked OPD
+    consultations. A real, common hospital-operations pain point: writing a discharge summary
+    by hand from a paper/EMR chart is slow and error-prone; this assembles the same underlying
+    data this system already captures into a first draft a clinician reviews and can regenerate
+    as new data comes in. Does not require the patient to already be marked Discharged -- can
+    be drafted in advance.
     """
     if not (is_head_nurse(current_user) or is_nursing_station(current_user) or is_doctor(current_user)):
         raise HTTPException(403, "Only head nurse, nursing station, or doctor can generate a discharge summary")
@@ -987,7 +1487,7 @@ def generate_discharge_summary(
         } for c in consultations],
     }
 
-    result = scribe.generate_discharge_summary(context)
+    result = discharge_summary.generate_discharge_summary(context)
     fields = ("admissionSummary", "hospitalCourse", "dischargeDiagnosis", "followUpInstructions", "conditionAtDischarge")
     if all(not str(result.get(f) or "").strip() for f in fields) and not result.get("medicationsAtDischarge"):
         raise HTTPException(422, "Could not generate a discharge summary from the available record. Please try again.")
@@ -1047,7 +1547,6 @@ async def create_nursing_note(
 ):
     body = await request.json()
     patient_id = body.get("patient_id")
-    voice_text = body.get("voice_text")
     if not patient_id:
         raise HTTPException(400, "patient_id required")
     if not (is_nurse(current_user) or is_head_nurse(current_user)):
@@ -1066,35 +1565,20 @@ async def create_nursing_note(
         ).first()
         if not assignment:
             raise HTTPException(403, "Not assigned to this patient")
-    structured_note = {}
-    if voice_text:
-        prompt = f"""You are a nurse writing a nursing note for a patient.
-        Given the following voice transcription, produce a structured nursing note in SOAP format:
-        Subjective (patient's symptoms/complaints), Objective (observations/vitals), Assessment (nurse's clinical impression), Plan (next steps).
-        Return as JSON with keys: subjective, objective, assessment, plan.
-        Voice transcript: "{voice_text}"
-        """
-        structured_note = await run_in_threadpool(scribe._generate_json, prompt, None, 0.3)
-        if not structured_note:
-            structured_note = {"subjective": "", "objective": "", "assessment": "", "plan": ""}
-    else:
-        structured_note = {
-            "subjective": body.get("subjective", ""),
-            "objective": body.get("objective", ""),
-            "assessment": body.get("assessment", ""),
-            "plan": body.get("plan", "")
-        }
+    structured_note = {
+        "subjective": body.get("subjective", ""),
+        "objective": body.get("objective", ""),
+        "assessment": body.get("assessment", ""),
+        "plan": body.get("plan", "")
+    }
     soap_fields = ("subjective", "objective", "assessment", "plan")
     if all(not str(structured_note.get(f) or "").strip() for f in soap_fields):
-        detail = ("Could not extract a nursing note from the voice input. Please try again or enter it manually."
-                   if voice_text else "At least one of subjective/objective/assessment/plan is required.")
-        raise HTTPException(422, detail)
+        raise HTTPException(422, "At least one of subjective/objective/assessment/plan is required.")
     note_text = f"Subjective: {structured_note.get('subjective', '')}\nObjective: {structured_note.get('objective', '')}\nAssessment: {structured_note.get('assessment', '')}\nPlan: {structured_note.get('plan', '')}"
     nursing_note = NursingNote(
         patient_id=patient_id,
         nurse_id=current_user["id"],
         notes=note_text,
-        voice_transcript=voice_text
     )
     db.add(nursing_note)
     db.commit()
@@ -1110,21 +1594,21 @@ async def create_ipd_round(
 ):
     """
     A doctor's daily ward-round consultation for an admitted patient -- the IPD counterpart
-    to POST /api/scribe. Same voice-transcript-in, structured-draft-out extraction, but
-    tagged to the admission (visit_type/admission_day), checked for drug interactions
-    against everything the patient is already on (not just today's new medicines), and
-    feeding the same auto-task pipeline so the nurse sees the round's orders without anyone
-    having to hand-create a task.
+    to POST /api/consultations. Plain structured-form entry (no voice/AI, see that endpoint's
+    docstring), tagged to the admission (visit_type/admission_day), checked for drug
+    interactions against everything the patient is already on (not just today's new
+    medicines), and feeding the same auto-task pipeline so the nurse sees the round's orders
+    without anyone having to hand-create a task.
     """
     if not is_doctor(current_user):
         raise HTTPException(403, "Only a doctor can record a ward round")
     body = await request.json()
-    transcript = body.get("transcript")
     patient_id = body.get("patient_id")
-    if not isinstance(transcript, str) or len(transcript.strip()) < 10:
-        raise HTTPException(400, "Transcript too short")
+    chief_complaint = (body.get("chief_complaint") or "").strip()
     if not patient_id:
         raise HTTPException(400, "patient_id is required")
+    if not chief_complaint:
+        raise HTTPException(400, "chief_complaint is required")
     patient = db.query(Patient).filter(
         Patient.id == patient_id,
         Patient.organization_id == current_user.get("organization_id"),
@@ -1133,11 +1617,14 @@ async def create_ipd_round(
     if not patient:
         raise HTTPException(404, "Active patient not found")
 
-    start_time = time.time()
-    result = await run_in_threadpool(scribe.scribe_transcript, transcript)
-    latency = time.time() - start_time
-    admission_day = compute_admission_day(patient)
+    medications = body.get("medications") or []
+    lab_tests = body.get("lab_tests") or []
+    if not isinstance(medications, list) or not isinstance(lab_tests, list):
+        raise HTTPException(400, "medications and lab_tests must be lists")
+    medications = drug_matcher.correct_medication_names(medications)
+    lab_tests = lab_test_matcher.correct_lab_test_names(lab_tests) if lab_tests and isinstance(lab_tests[0], str) else lab_tests
 
+    admission_day = compute_admission_day(patient)
     consultation = Consultation(
         case_id=f"{datetime.utcnow().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}",
         patient_name=patient.name,
@@ -1146,18 +1633,14 @@ async def create_ipd_round(
         patient_id=patient.id,
         organization_id=current_user.get("organization_id"),
         user_id=current_user.get("id"),
-        chief_complaint=result.get("chiefComplaint", ""),
-        hpi=result.get("hpi", ""),
-        primary_diagnosis=result.get("primaryDiagnosis", ""),
-        differential_diagnosis=result.get("differentialDiagnosis", ""),
-        medications=result.get("medications", []),
-        lab_tests=result.get("labTests", []),
-        advice=result.get("advice", ""),
-        raw_transcript=transcript,
-        gemini_latency=latency,
-        input_tokens=len(transcript)//4,
-        output_tokens=len(str(result))//4,
-        total_tokens=(len(transcript)//4)+(len(str(result))//4),
+        chief_complaint=chief_complaint,
+        hpi=body.get("hpi", ""),
+        objective_findings=body.get("objective_findings", ""),
+        primary_diagnosis=body.get("primary_diagnosis", ""),
+        differential_diagnosis=body.get("differential_diagnosis", ""),
+        medications=medications,
+        lab_tests=lab_tests,
+        advice=body.get("advice", ""),
         visit_type="IPD_ROUND",
         admission_day=admission_day,
     )
@@ -1169,6 +1652,8 @@ async def create_ipd_round(
     drug_names = [m.get("drugName") for m in active_meds if isinstance(m, dict) and m.get("drugName")]
     interaction_warnings = await run_in_threadpool(check_drug_interactions, drug_names)
     consultation.interaction_warnings = interaction_warnings
+    allergy_warnings = check_allergy_conflicts(patient.allergies, medications) if patient.allergies else []
+    consultation.allergy_warnings = allergy_warnings
     db.commit()
 
     tasks = generate_tasks_from_consultation(db, consultation, current_user["id"])
@@ -1176,13 +1661,17 @@ async def create_ipd_round(
     log_audit(db, current_user["id"], current_user["email"], current_user.get("organization_id"),
               "ipd_round", f"patients/{patient_id}", "Success")
 
-    result["id"] = consultation.id
-    result["case_id"] = consultation.case_id
-    result["admission_day"] = admission_day
-    result["interaction_warnings"] = interaction_warnings
-    result["tasks_created"] = len(tasks)
-    result["active_medications"] = active_meds
-    return result
+    return {
+        "id": consultation.id, "case_id": consultation.case_id, "admission_day": admission_day,
+        "interaction_warnings": interaction_warnings, "allergy_warnings": allergy_warnings,
+        "tasks_created": len(tasks),
+        "active_medications": active_meds, "chief_complaint": consultation.chief_complaint,
+        "hpi": consultation.hpi, "objective_findings": consultation.objective_findings,
+        "primary_diagnosis": consultation.primary_diagnosis,
+        "differential_diagnosis": consultation.differential_diagnosis,
+        "medications": consultation.medications, "lab_tests": consultation.lab_tests,
+        "advice": consultation.advice,
+    }
 
 def _resolve_ipd_patients_for_role(current_user: dict, db: Session) -> list:
     """The role-based patient-visibility rule GET /api/ipd/patients and GET /api/ipd/alerts
@@ -1271,6 +1760,8 @@ def _build_ipd_roster(db: Session, patients: list) -> list:
             "bed": p.bed,
             "diagnosis": p.diagnosis,
             "status": p.status,
+            "admission_type": p.admission_type,
+            "allergies": p.allergies,
             "assigned_nurse": assigned_nurse,
             "latest_vital": {
                 "bp": f"{latest_vital.bp_systolic}/{latest_vital.bp_diastolic}" if latest_vital else None,
@@ -1440,6 +1931,12 @@ async def create_ipd_patient(request: Request, current_user: dict = Depends(get_
     confirm_duplicate = bool(data.get("confirm_duplicate"))
     if not name or not ward:
         raise HTTPException(400, "name and ward are required")
+    admission_type = data.get("admission_type") or "IPD"
+    if admission_type not in ("IPD", "DayCare"):
+        raise HTTPException(400, "admission_type must be 'IPD' or 'DayCare'")
+    allergies = data.get("allergies")
+    if allergies is not None and not isinstance(allergies, list):
+        raise HTTPException(400, "allergies must be a list of strings")
     org_id = current_user.get("organization_id")
 
     if age is not None:
@@ -1481,14 +1978,16 @@ async def create_ipd_patient(request: Request, current_user: dict = Depends(get_
         ward=ward,
         bed=data.get("bed"),
         diagnosis=data.get("diagnosis"),
+        admission_type=admission_type,
+        allergies=allergies,
         organization_id=current_user.get("organization_id"),
         created_by=current_user["id"]
     )
     db.add(patient)
     db.commit()
     log_audit(db, current_user["id"], current_user["email"], current_user.get("organization_id"),
-              "admit_patient", f"patients/{patient.id}", "Success")
-    return {"id": patient.id, "message": "Patient admitted"}
+              "admit_patient", f"patients/{patient.id}", "Success", f"admission_type={admission_type}")
+    return {"id": patient.id, "message": "Patient admitted", "admission_type": admission_type}
 
 @app.post("/api/ipd/assign")
 async def assign_patient(request: Request, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1754,29 +2253,18 @@ async def record_vital(request: Request, current_user: dict = Depends(get_curren
         ).first()
         if not assignment:
             raise HTTPException(403, "Not assigned to this patient")
-    voice_text = data.get("voice_text")
-    if voice_text:
-        prompt = f"""Extract vital signs from the following nurse's voice note and return as JSON:
-        "{voice_text}"
-        Return JSON with fields: bp_systolic, bp_diastolic, heart_rate, temperature, oxygen_sat, respiratory_rate, notes.
-        """
-        vital_data = await run_in_threadpool(scribe._generate_json, prompt, None, 0.3)
-    else:
-        vital_data = data
     coerced = {
-        "bp_systolic": _coerce_number(vital_data.get("bp_systolic"), integer=True),
-        "bp_diastolic": _coerce_number(vital_data.get("bp_diastolic"), integer=True),
-        "heart_rate": _coerce_number(vital_data.get("heart_rate"), integer=True),
-        "temperature": _coerce_number(vital_data.get("temperature")),
-        "oxygen_sat": _coerce_number(vital_data.get("oxygen_sat"), integer=True),
-        "respiratory_rate": _coerce_number(vital_data.get("respiratory_rate"), integer=True),
+        "bp_systolic": _coerce_number(data.get("bp_systolic"), integer=True),
+        "bp_diastolic": _coerce_number(data.get("bp_diastolic"), integer=True),
+        "heart_rate": _coerce_number(data.get("heart_rate"), integer=True),
+        "temperature": _coerce_number(data.get("temperature")),
+        "oxygen_sat": _coerce_number(data.get("oxygen_sat"), integer=True),
+        "respiratory_rate": _coerce_number(data.get("respiratory_rate"), integer=True),
     }
-    notes_value = vital_data.get("notes", data.get("notes", ""))
+    notes_value = data.get("notes", "")
     notes_value = notes_value if isinstance(notes_value, str) else ("" if notes_value is None else str(notes_value))
     if all(v is None for v in coerced.values()) and not notes_value.strip():
-        detail = ("Could not extract any vital signs from the voice note. Please try again or enter values manually."
-                   if voice_text else "At least one vital sign or a note is required.")
-        raise HTTPException(422, detail)
+        raise HTTPException(422, "At least one vital sign or a note is required.")
     vital = Vital(
         patient_id=patient_id,
         nurse_id=current_user["id"],
@@ -1993,73 +2481,6 @@ def get_tasks(patient_id: int, current_user: dict = Depends(get_current_user), d
         "is_overdue": bool(t.due_date and t.status != "Completed" and t.due_date < now)
     } for t in tasks]
 
-@app.post("/api/ipd/voice-to-vitals")
-async def voice_to_vitals(request: Request, current_user: dict = Depends(get_current_user)):
-    if not (is_nurse(current_user) or is_head_nurse(current_user)):
-        raise HTTPException(403, "Only nurses and head nurses can use voice-to-vitals extraction")
-    data = await request.json()
-    voice_text = data.get("voice_text")
-    if not voice_text:
-        raise HTTPException(400, "voice_text required")
-    prompt = f"""Extract vital signs from the following nurse's voice note and return as JSON:
-    "{voice_text}"
-    Return JSON with fields: bp_systolic, bp_diastolic, heart_rate, temperature, oxygen_sat, respiratory_rate, notes.
-    """
-    result = await run_in_threadpool(scribe._generate_json, prompt, None, 0.3)
-    return result
-
-@app.post("/api/ipd/nurse-consult")
-async def nurse_consult(request: Request, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    data = await request.json()
-    patient_id = data.get("patient_id")
-    voice_text = data.get("voice_text")
-    if not patient_id or not voice_text:
-        raise HTTPException(400, "patient_id and voice_text required")
-    if not (is_nurse(current_user) or is_head_nurse(current_user)):
-        raise HTTPException(403, "Only nurses and head nurses can perform consultation")
-    patient = db.query(Patient).filter(
-        Patient.id == patient_id,
-        Patient.organization_id == current_user.get("organization_id")
-    ).first()
-    if not patient:
-        raise HTTPException(404, "Patient not found")
-    if is_nurse(current_user):
-        assignment = db.query(NurseAssignment).filter(
-            NurseAssignment.patient_id == patient_id,
-            NurseAssignment.nurse_id == current_user["id"],
-            NurseAssignment.status == "Active"
-        ).first()
-        if not assignment:
-            raise HTTPException(403, "Not assigned to this patient")
-    prompt = f"""You are a nurse documenting a patient consultation. Extract the following from the voice transcription:
-- Vitals: any vital signs mentioned (e.g., BP, heart rate, temperature, oxygen saturation, weight, pain score). Return as a list of objects with keys: parameter, value, unit. If unit is not mentioned, use empty string.
-- Labs: any lab test results mentioned (e.g., Hb, WBC, platelets). Return as a list of objects with keys: test, result.
-- Nursing Note: a structured note in SOAP format (Subjective, Objective, Assessment, Plan). Return as an object with keys: subjective, objective, assessment, plan. If any part is missing, use empty string.
-
-Voice: "{voice_text}"
-
-Return pure JSON with keys: vitals, labs, nursing_note.
-Example:
-{{
-  "vitals": [{{"parameter": "BP", "value": "120/80", "unit": "mmHg"}}, {{"parameter": "HR", "value": "72", "unit": "bpm"}}],
-  "labs": [{{"test": "Hb", "result": "12.5"}}, {{"test": "WBC", "result": "8000"}}],
-  "nursing_note": {{"subjective": "Patient reports headache", "objective": "Vitals stable", "assessment": "Mild dehydration", "plan": "Monitor fluids"}}
-}}"""
-    result = await run_in_threadpool(scribe._generate_json, prompt, None, 0.3)
-    if not result:
-        result = {"vitals": [], "labs": [], "nursing_note": {}}
-    nursing_data = result.get("nursing_note", {}) or {}
-    # Same drug/lab-name normalization scribe_transcript applies to OPD/round prescriptions --
-    # a nurse's spoken "CBC" or "Widal" shouldn't come back misspelled either.
-    labs = lab_test_matcher.correct_lab_test_entries(result.get("labs", []), key="test")
-    # NOTE: this endpoint is a preview/extraction step only -- it must NOT write to the
-    # database. The frontend flow is mic -> Process (this endpoint) -> nurse reviews/edits ->
-    # Save (POST /api/ipd/vitals + POST /api/nursing-notes persist the reviewed data). This
-    # endpoint used to insert a Vital per extracted item and a NursingNote immediately, before
-    # any review -- so every consult left a raw, unreviewed, un-deletable duplicate in the
-    # chart even if the nurse edited the draft (or discarded it) before Save. See CHANGELOG.md.
-    return {"message": "Extracted for review", "vitals": result.get("vitals", []), "labs": labs, "nursing_note": nursing_data}
-
 @app.post("/api/drug-interactions")
 async def drug_interactions(request: Request, current_user: dict = Depends(get_current_user)):
     body = await request.json()
@@ -2069,10 +2490,6 @@ async def drug_interactions(request: Request, current_user: dict = Depends(get_c
     drug_names = [m.get("drugName", "") for m in medications if m.get("drugName")]
     if not drug_names:
         return {"interactions": [], "message": "No valid drug names provided."}
-    # See tasks_engine.check_drug_interactions for why this must ask the LLM for a
-    # {"interactions": [...]} object rather than a bare array (scribe._generate_json's
-    # contract is dict-only -- a bare-array prompt silently made this endpoint always
-    # report "no interactions found" regardless of input).
     interactions = await run_in_threadpool(check_drug_interactions, drug_names)
     return {"interactions": interactions}
 
@@ -2178,12 +2595,20 @@ def delete_custom_lab_test(entry_id: int, current_user: dict = Depends(get_curre
 
 @app.get("/api/health")
 def health():
-    return {
-        "status": "healthy",
-        "groq_available": scribe.is_available(),
-        "groq_model": scribe.model
-    }
+    return {"status": "healthy"}
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+@app.delete("/api/admin/patients/{patient_id}")
+def admin_delete_patient(patient_id: int, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not is_admin(current_user):
+        raise HTTPException(403, "Only Admin can delete patients")
+    patient = db.query(Patient).filter(Patient.id == patient_id, Patient.organization_id == current_user.get("organization_id")).first()
+    if not patient:
+        raise HTTPException(404, "Patient not found")
+    patient.status = "Deleted"
+    db.commit()
+    log_audit(db, current_user["id"], current_user["email"], current_user.get("organization_id"), "soft_delete_patient", f"patients/{patient_id}", "Success", f"patient {patient_id}")
+    return {"status": "success", "message": "Patient soft deleted"}

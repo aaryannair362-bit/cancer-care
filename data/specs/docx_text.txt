@@ -1,0 +1,611 @@
+ONCOLOGY DIGITAL CARE PLATFORM
+Master Functional, Data Governance, AI Governance & Solution Requirements
+Cancer Care Hospital | EMR + Clinical Intelligence + MDT + Governance
+Prepared from the supplied workflows and requirements | 22 August 2026
+Executive positionThis is not only an EMR implementation. It is an integrated oncology care platform with four layers:1) transactional EMR/HMIS, 2) clinical data/interoperability, 3) AI/ML clinical intelligence, and4) Data Governance + AI Governance. Governance must be designed into every workflow from day one.
+1. Executive Summary & Design Principles
+The supplied requirements cover the patient journey from registration through intake, consultation, investigations, diagnosis, staging, treatment planning, MDT/tumor-board review, treatment, financial counselling and follow-up. The AI requirements add document intelligence, voice/conversation processing, clinical summarization, structured extraction, clinical decision support and oncology intelligence.
+The EMR is the system of record; AI is an intelligence/decision-support layer.
+Patient identity is mastered through an MPI. AI may detect possible duplicates but must not autonomously merge records.
+Every AI-derived clinical fact must retain source, timestamp, model/version, status and human verification.
+High-risk clinical AI must be human-in-the-loop.
+Use deterministic rules for deterministic calculations and hard safety constraints; use LLMs for language-heavy tasks.
+Interoperability, consent, privacy, audit and provenance are architectural requirements, not later enhancements.
+Every AI capability needs an intended use, risk classification, validation criteria, owner, monitoring plan and rollback path.
+Clinical safety is more important than automation percentage.
+2. What the Client Is Actually Asking For
+Layer
+Purpose
+Examples
+Core EMR/HMIS
+System of record
+Registration, encounters, orders, medication, billing, appointments
+Clinical workflow
+Digitize care
+Nurse intake, doctor EMR, lab, radiology, MDT
+Clinical data platform
+Trusted longitudinal record
+Patient 360, timeline, documents, terminology
+AI platform
+Augment clinicians
+OCR, NLP, ASR, LLM/RAG, ML, CDS
+Data Governance
+Trust/protect/manage data
+Consent, quality, lineage, access, retention
+AI Governance
+Control AI risk
+Validation, registry, monitoring, human oversight
+2.1 End-to-end patient journey
+Registration / ABHA → MPI / duplicate check → consent → scheduling/check-in/queue→ Nurse Intake → documents/vitals/history/medications/risk scores→ Doctor EMR → examination/diagnosis/orders/staging/treatment intent→ Lab / Pathology / Radiology → results + documents + imaging→ MDT / Tumor Board → decision → treatment plan→ Treatment → financial counselling → follow-up → longitudinal patient journey
+3. Target Solution Architecture
+USER CHANNELSPatient | Nurse | Doctor | Billing | Radiology | Lab | MDT | Admin                         ↓APPLICATION LAYEREMR | Scheduling | Queue | Billing | Forms | MDT                         ↓INTEGRATION LAYERABDM | FHIR/HL7 | LIS | RIS/PACS | DICOM | Pharmacy | External Labs                         ↓CLINICAL DATA PLATFORMMPI | Patient 360 | Timeline | Documents | Labs | Pathology | Treatments                         ↓==================== DATA GOVERNANCE ====================Identity | Consent | Privacy | Quality | Lineage | AccessClassification | Retention | Terminology | Audit | Sharing                         ↓AI GATEWAYPHI minimization | Authorization | Model routing | Output validation | Logging                         ↓AI PLATFORMOCR/Document AI | ASR | NLP | RAG | LLM | ML | Rules                         ↓===================== AI GOVERNANCE =====================Risk | Model Registry | Validation | Bias | ExplainabilityHuman Oversight | Monitoring | Incidents | Rollback | Retirement                         ↓CLINICIAN / AUTHORIZED USER → FINAL APPROVED EMR RECORD
+3.1 AI Gateway requirements
+All production AI requests pass through a controlled gateway.
+Authorize the user/application and enforce purpose-based access.
+Minimize/mask unnecessary PII/PHI before model calls where appropriate.
+Route only to approved models and versions.
+Validate structured outputs and attach provenance.
+Log AI usage and support model kill-switch/rollback.
+Never allow application teams to call an unregistered production model directly.
+4. Functional Requirements
+4.1 Registration, MPI & Patient Identity
+Create a unique hospital patient identity and Master Patient Index.
+Support ABHA/ABDM linkage where applicable and consented.
+Capture demographics, contact, photo and three-level referral-doctor hierarchy.
+Detect duplicates using deterministic + probabilistic matching.
+Potential duplicates go to an authorized reviewer; no autonomous merge.
+Maintain merge/unmerge history and audit.
+Digital consent must capture purpose, version, timestamp, status and withdrawal.
+Scheduling, check-in, queue and location transitions must be linked to the encounter.
+4.2 Nurse EMR / Intake
+Upload/classify previous documents.
+Capture vitals; calculate BMI and BSA deterministically.
+Pain, fall-risk, ECOG and Karnofsky scoring.
+Medication reconciliation and allergies/adverse reactions.
+Structured oncology history: family, hormonal, reproductive and social history.
+Patient longitudinal journey view.
+Dynamic branching forms with validation, required fields and versioning.
+Form Builder must have draft, review, publish, retire and audit states.
+4.3 Doctor EMR / OPD
+Physical examination and structured clinical documentation.
+Schematic/body annotation and clinical image upload.
+DICOM/PACS viewer integration.
+Scanned document review and AI summary.
+Voice dictation and conversation-to-clinical-note.
+ICD, ICD-O and SNOMED CT support through a governed terminology service.
+Clinician-approved medication/order templates.
+TNM staging assistant using structured findings + biomarkers + versioned rules.
+Treatment intent and clinician-approved care plan.
+Visit summary and next appointment.
+4.4 Laboratory
+Physician order/external prescription intake.
+Billing/payment status integration.
+Patient/sample movement tracking.
+Partner-lab handoff and status.
+Electronic result integration where available.
+PDF ingestion where necessary, with AI extraction + provenance + human verification.
+Result completion status and reconciliation dashboard.
+4.5 Radiology
+Investigation order, scheduling and payment workflow.
+Consent and patient arrival.
+RIS/PACS/DICOM integration.
+Study/report linkage to correct patient and encounter.
+Consultant review and final report.
+Any imaging AI must be separately validated and governed.
+4.6 Conversion / Financial Counselling
+Financial counselling record.
+Drug and treatment estimates from governed pricing data.
+Deterministic estimate calculations.
+Fundraising-letter drafting from approved templates.
+Assistance tracking.
+LLM must never invent prices, doses, coverage or eligibility.
+4.7 MDT / Tumor Board
+Internal/virtual tumor-board scheduling.
+External consultant access with case-level authorization.
+Anonymous/minimum-necessary patient presentation.
+Multi-user comments with author/timestamp.
+Electronic approval and attendance.
+Decision mapped to patient/encounter.
+Follow-up task creation and tracking.
+AI case brief, discussion capture and action extraction subject to governance.
+5. Clinical AI / ML Requirements
+Use case
+Technology
+Risk
+Control
+Document intelligence
+OCR + layout + clinical NLP
+Medium
+Source links; human verification
+Clinical summarization
+LLM/RAG
+Medium
+Evidence + clinician review
+Ambient documentation
+ASR + diarization + NLP/LLM
+Medium
+Consent + clinician sign-off
+Medication reconciliation
+NLP/entity matching + rules
+High
+Clinician confirmation
+Terminology mapping
+NLP + terminology service
+Medium
+Approved mappings/versioning
+TNM staging
+Extraction + deterministic rules
+High
+Oncologist approval + guideline version
+Clinical decision support
+Rules + approved retrieval + AI explanation
+High
+Clinical validation + human decision
+Patient 360
+Timeline/event extraction + summary
+Medium
+Provenance/conflict visibility
+MDT assistant
+Case brief + transcription + decision extraction
+High
+MDT approval
+Predictive ML
+Validated ML after sufficient history
+High
+Clinical validation + monitoring
+5.1 Document AI
+PDF/Image → classification → OCR/layout → clinical NLP → entities/relations→ terminology normalization → confidence/provenance → human verification → EMR
+5.2 Conversation-to-clinical-note
+Consented audio → ASR → speaker diarization → clinical NLP/LLM→ SOAP + oncology fields → source-linked draft → doctor edits/accepts → signed note
+5.3 TNM staging
+Pathology + imaging + clinical data + biomarkers→ AI extracts T/N/M inputs→ validation/completeness check→ deterministic versioned staging engine→ proposed stage + evidence→ oncologist verification→ official EMR status
+Critical ruleDo not implement 'LLM determines cancer stage'. The LLM may extract/organize evidence; the final stage should come from a versioned staging engine/ruleset and be clinician-verified.
+5.4 Clinical Decision Support
+Hard safety rules should be deterministic.
+Approved hospital protocols/guidelines must live in a versioned knowledge repository.
+RAG should retrieve approved evidence; the LLM should not be treated as the knowledge source.
+Display evidence and guideline version.
+Require clinician action for high-risk outputs.
+Log recommendation, clinician action and override reason.
+6. Data Governance Framework
+Domain
+What must be governed
+Examples
+Ownership
+Accountable business/clinical owner
+Patient, diagnosis, medication, pathology
+Stewardship
+Operational quality ownership
+Nursing, oncology, lab, radiology
+Master data
+Canonical identities/reference data
+MPI, provider, facility, drug
+Quality
+Completeness, validity, consistency, timeliness, uniqueness
+Diagnosis, staging, biomarker
+Lineage
+Origin + transformations
+Pathology → AI extraction → EMR
+Consent
+Purpose, scope, sharing, withdrawal
+ABHA, voice, AI, research
+Access
+Least privilege / purpose
+Doctor, nurse, billing, external consultant
+Classification
+Sensitivity and handling
+Clinical, financial, genetic, audio
+Retention
+Lifecycle by data type
+Audio vs clinical record vs audit
+Interoperability
+Standards and contracts
+FHIR/HL7, DICOM, ABDM
+Audit
+Who viewed/changed/shared
+Clinical and AI actions
+AI datasets
+Separation of care/research use
+De-identification, approval, registry
+6.1 Data classification
+Class
+Examples
+Controls
+Public
+Website content
+Standard security
+Internal
+Operations
+Authenticated access
+Confidential
+Business/employee data
+Restricted access + encryption
+Restricted
+Patient clinical records
+Strong access + audit + encryption
+Highly Restricted
+Cancer pathology, biomarkers, genetics, audio, AI assessments
+Minimum-necessary access + enhanced audit + explicit purpose controls
+6.2 Consent model
+Consent is a structured record, not only a signature image.
+Capture purpose, data category, recipient/use, version, timestamp, status and withdrawal.
+Separate treatment, data sharing, voice recording, AI processing, research and other purposes where required.
+Enforce consent at data-sharing/integration points.
+Retain evidence of consent and withdrawal.
+6.3 Provenance
+Clinical fact → source system → source document/record → page/time where possible→ transformation/extraction → model/rule version → confidence/quality→ human verification → final EMR status
+7. AI Governance Framework
+7.1 AI lifecycle
+Use-case intake → intended use → risk classification → data assessment→ model selection/development → validation → clinical acceptance→ controlled deployment → monitoring → incident/change management→ revalidation → retirement
+7.2 Risk levels
+Level
+Examples
+Minimum governance
+L1 Administrative
+Scheduling summaries, drafting
+QA + access controls
+L2 Documentation
+Transcription, summaries, extraction
+Consent/policy + source + clinician review
+L3 Clinical decision support
+Staging proposal, drug alerts, guideline support
+Clinical validation + human approval + monitoring
+L4 Diagnostic/treatment AI
+Cancer detection, treatment/prognosis
+Formal clinical validation + intended-use/regulatory assessment + continuous safety monitoring
+7.3 Model registry
+Unique model ID/version, purpose, owner, vendor/base model and intended use.
+Training/validation data description and evaluation metrics.
+Known limitations, prohibited uses and approval status.
+Deployment environment, dependencies, prompt/template version where relevant.
+Rollback version and retirement date/review date.
+7.4 AI output controls
+Clearly label AI-generated content.
+Separate AI suggestions from clinician-verified facts.
+Attach source evidence to clinical summaries/RAG outputs.
+Use structured schemas for clinical extraction.
+Do not equate model confidence with clinical certainty.
+Allow accept/edit/reject/report-error.
+Track override reasons for high-risk use cases.
+7.5 Monitoring
+Area
+Metrics
+Action
+Quality
+Precision/recall, factuality, correction rate
+Investigate/revalidate
+Safety
+Critical false positives/negatives, incidents
+Escalate/disable if needed
+Human oversight
+Accept/edit/reject rate
+Review workflow/model
+Bias
+Performance across relevant subgroups
+Governance review
+Drift
+Input/output distribution change
+Revalidate
+Knowledge
+Guideline version/expiry
+Update knowledge base
+Operations
+Latency, uptime, failures
+Engineering remediation
+8. Security, Privacy & Clinical Safety
+Strong staff authentication and privileged-access controls.
+RBAC plus case/purpose-level authorization where required.
+External consultants see only assigned/approved cases.
+Encryption in transit and at rest.
+Central secrets/key management.
+Separate development/test/production.
+Do not use real patient data in development unless explicitly governed.
+Audit sensitive record access and clinically significant changes.
+Maintain backup/disaster recovery and manual fallback.
+AI incident response must be able to disable unsafe models/features.
+8.1 AI incident workflow
+Incident → severity classification → protect patient → disable/contain if needed→ clinical review → root cause → corrective action → revalidation→ controlled release → close incident → update governance records
+9. Interoperability & Healthcare Standards
+Area
+Recommended approach
+Key point
+Clinical exchange
+HL7 FHIR
+Use governed hospital profiles/implementation guide
+Legacy integration
+HL7 v2/vendor APIs
+Use an integration engine
+Imaging
+DICOM/DICOMweb
+PACS/RIS integration; do not treat imaging as ordinary PDFs
+ABDM
+ABDM ecosystem interfaces
+Implement applicable consent and health-information exchange flows
+Terminology
+ICD/ICD-O/SNOMED CT + local value sets
+Version and govern mappings
+Identity
+MPI + ABHA linkage
+Hospital ID remains canonical internally
+Audit/provenance
+Application audit + provenance
+Trace clinical and AI transformations
+FHIR is designed for healthcare information exchange and includes resources relevant to clinical, diagnostic, workflow, financial, security/privacy and clinical-reasoning use cases. DICOM is the international standard for medical images and related information.
+10. Core Data Model
+Entity
+Core information
+Patient
+Hospital ID, ABHA linkage if applicable, demographics, consent refs
+Encounter
+Patient, provider, location, type, time, status
+Practitioner
+Identity, role, specialty, organization
+Appointment
+Patient, service, resource, location, status
+Document
+Type, source, date, author, storage ref, hash
+Observation
+Code, value, unit, reference range, source
+DiagnosticReport
+Order, result, performer, status, report
+ImagingStudy
+Accession, modality, study UID, PACS reference
+Condition
+Diagnosis, code, status, onset, evidence
+Medication
+Drug, dose, route, frequency, source, status
+Procedure
+Type, date, performer, status
+CarePlan
+Goals, activities, owner, status
+MDTCase
+Board, participants, case, discussion, decision, actions
+AIArtifact
+Context, model/version, inputs, output, status, verification
+Consent
+Purpose, scope, version, timestamp, status, withdrawal
+AuditEvent
+Actor, action, object, timestamp, outcome
+10.1 AI artifact metadata
+AI artifact ID and patient/encounter context.
+Source record/document references.
+Model and version; knowledge-base version where applicable.
+Generation timestamp.
+Draft/accepted/edited/rejected status.
+Reviewer and verification timestamp.
+Quality/confidence indicator only if validated.
+Incident reference if the artifact is later challenged.
+11. MDT / Tumor Board Intelligence
+11.1 Before MDT
+Patient record → AI case assembly → diagnosis/histology → TNM/biomarkers→ imaging/pathology summary → treatment history → current status→ clinical question → missing-information flags → MDT brief
+11.2 During MDT
+Optional transcription under approved consent/policy.
+Capture discussion and candidate decisions.
+Extract investigations, treatment decisions and action items.
+AI output remains draft until MDT approval.
+11.3 After MDT
+Create approved MDT decision record.
+Link decision to patient/encounter.
+Create owner/due-date tasks.
+Update treatment-plan workflow.
+Notify authorized users.
+Maintain approval and audit history.
+12. Non-Functional Requirements
+Area
+Requirement
+Availability
+Define SLA for core EMR; AI must fail gracefully
+Performance
+Define response-time targets for transactions and AI separately
+Scalability
+Scale patients, documents, imaging, audio and concurrent users
+Security
+IAM, encryption, secrets, vulnerability management, audit, secure SDLC
+Privacy
+Data minimization, purpose limitation, consent and controlled sharing
+Auditability
+Trace significant create/view/change/share and AI approval actions
+Interoperability
+Standards-based APIs; avoid hard-coded point-to-point integrations
+Resilience
+Backup, DR, high availability where required, manual fallback
+Observability
+Application, integration, data and AI monitoring
+Maintainability
+Version forms, terminology, rules, prompts, models and APIs
+Localization
+India-specific workflows, language, date/time and policy requirements
+13. Implementation Roadmap
+Phase
+Focus
+Deliverables
+0
+Discovery + governance
+Process maps, data inventory, RACI, consent, risk model, architecture, standards
+1
+Core EMR
+MPI, registration, scheduling, queue, nurse, doctor, documents, medication, diagnosis, billing
+2
+Interoperability
+ABDM, lab, radiology, PACS/DICOM, terminology, integration engine
+3
+AI documentation
+Document AI, OCR, extraction, summarization, ASR, conversation-to-note
+4
+Oncology intelligence
+Patient 360, biomarkers, TNM assistant, treatment intent, care-plan assistance
+5
+MDT intelligence
+AI brief, meeting intelligence, decisions, action tracking
+6
+Predictive AI
+Risk models after sufficient data + clinical validation
+Do not start with predictive AI.
+Build identity, data quality and interoperability before advanced clinical AI.
+Deploy documentation AI before higher-risk diagnostic/treatment AI.
+Build Patient 360 before advanced CDS.
+Treat TNM/CDS as governed clinical products, not chatbot features.
+14. Operating Model & RACI
+Workstream
+Accountable
+Responsible
+Governance/Review
+MPI
+Registration/Clinical Ops
+IT + Data
+Data Governance
+Clinical data definitions
+Clinical owner
+Data steward
+Data Governance
+Consent
+Hospital governance
+IT
+Privacy/Legal
+AI use-case approval
+Clinical AI Board
+AI Lead
+Risk/Privacy
+Model validation
+Clinical AI Board
+AI/ML + QA
+Clinical SME
+TNM engine
+Oncology
+AI/ML + Engineering
+Clinical Safety
+CDS
+Clinical owner
+AI/ML
+AI Governance
+AI incidents
+Clinical AI Board
+AI/ML + IT
+Risk/Security
+14.1 Committees
+Data Governance Council: clinical owners, data stewards, IT, privacy/security and operations.
+Clinical AI Governance Board: clinical leadership, AI/ML, clinical informatics, privacy/security, risk/legal and affected specialties.
+Architecture Review Board: enterprise architecture, integration, data, security and application owners.
+Change Control Board: production changes to workflows, forms, terminology, rules and models.
+15. KPIs & Acceptance Criteria
+Area
+KPI / validation
+MPI
+Duplicate rate, false merge rate, unresolved duplicate age
+Data quality
+Completeness/validity of diagnosis, staging, biomarkers, medication
+Document AI
+Precision/recall + clinician correction rate on representative gold set
+ASR
+WER + clinical terminology accuracy on local accents/specialties
+Summary
+Factuality, omission rate, clinician acceptance/edit rate
+TNM
+Agreement with expert oncologist staging on validation set
+CDS
+Alert precision, override rate, critical misses
+MDT
+Preparation time and decision/action capture completeness
+AI safety
+Critical incidents, near misses, rollback events
+Privacy
+Unauthorized access and consent exceptions
+Availability
+SLA compliance
+Adoption
+Active users, workflow completion, time saved
+16. Major Risks & Mitigations
+Risk
+Severity
+Mitigation
+Wrong patient association
+Critical
+MPI, identity checks, reviewer-controlled merges, provenance
+LLM hallucination
+High
+RAG, source links, structured output, human review
+Incorrect TNM
+Critical
+Deterministic versioned engine + oncologist approval
+Medication error
+Critical
+Rules + terminology + clinician verification
+Data leakage
+Critical
+Minimization, encryption, IAM, AI Gateway, vendor controls
+Poor source data
+High
+Data quality program + stewardship + validation
+Outdated guideline
+High
+Versioned repository + owner + review/expiry
+Model drift
+High
+Monitoring + drift detection + revalidation
+Over-automation
+High
+Manual fallback + explicit decision boundaries
+Vendor lock-in
+Medium/High
+API abstraction + portable data + standards
+Integration failure
+High
+Integration engine + queues + reconciliation
+Regulatory misclassification
+High
+Intended-use assessment + legal/regulatory review
+17. Decisions Required from Hospital
+Confirm Phase-1 patient journey and exact scope.
+Confirm MPI ownership and who can merge/unmerge records.
+Confirm ABDM participation and required HIP/HIU/HFR/HPR interfaces.
+Confirm consent policy for consultation recording and MDT recording.
+Confirm approved clinical guidelines and versions for CDS/care planning.
+Confirm oncology staging scope, AJCC edition/version and cancer types.
+Confirm terminology versions/licensing for ICD-O and SNOMED CT as applicable.
+Confirm LIS/RIS/PACS vendors and integration capabilities.
+Identify any AI use case intended to diagnose, detect, predict or recommend treatment; this determines risk and possible regulatory obligations.
+Confirm cloud/model-provider policy and whether external AI APIs may receive PHI.
+Define retention for audio, transcripts, AI drafts and final clinical records.
+Approve Clinical AI Governance Board and clinical owners.
+Define downtime/manual fallback requirements.
+Define pilot departments, gold-standard datasets and clinical validation owners.
+18. Recommended Final Requirement Structure
+A. Core EMR
+Registration, MPI, scheduling, queue, nurse EMR, doctor EMR, medication, diagnosis, orders, billing, care plan, follow-up.
+B. Oncology
+ICD/ICD-O/SNOMED CT, biomarkers, TNM, treatment intent, oncology history, patient journey, MDT.
+C. Integration
+ABDM, FHIR/HL7, LIS, RIS/PACS, DICOM, pharmacy, payment, external lab.
+D. Clinical AI
+Document AI, NLP, ASR, summarization, patient 360, TNM assistant, CDS, MDT assistant.
+E. Data Governance
+Ownership, stewardship, classification, quality, lineage, consent, access, retention, audit, AI dataset governance.
+F. AI Governance
+Use-case inventory, risk classification, model registry, validation, human oversight, monitoring, bias, incidents, rollback, retirement.
+G. Security & Privacy
+IAM, encryption, secrets, segmentation, audit, privacy-by-design, secure SDLC, vendor governance.
+H. Operations
+Monitoring, SLA, DR, release/change management, support and clinical safety.
+19. Reference Standards & Current Sources
+The following official sources were checked for the current baseline. They are reference points; hospital legal/privacy/clinical/regulatory review remains required.
+Source
+Why it matters
+MeitY — DPDP Rules 2025
+Current Indian digital personal-data rules and enforcement materials
+ABDM / NHA
+ABHA, health-information exchange, consent-based ecosystem and health-data policy
+WHO — Ethics & Governance of AI for Health
+Human oversight, safety, accountability, transparency, equity and responsible AI
+WHO — LMM guidance
+Governance considerations for generative/multimodal AI in health
+HL7 FHIR
+Healthcare information exchange and structured clinical resources
+DICOM
+Medical imaging and related information interoperability
+CDSCO — Medical Device Software guidance (2025 draft)
+Relevant when intended use may make software a medical device
+Official references: https://www.meity.gov.in/ | https://abdm.gov.in/ | https://www.who.int/publications/i/item/9789240029200 | https://www.who.int/publications/i/item/9789240084759 | https://hl7.org/fhir/overview.html | https://www.dicomstandard.org/current/ | https://cdsco.gov.in/
+Regulatory note
+This is a solution-architecture and governance blueprint, not legal advice or a regulatory determination. Whether a particular AI capability is regulated as medical-device software depends on its intended use, claims, functionality and applicable law. Diagnostic, treatment, prognostic and other high-risk clinical AI should undergo formal clinical, privacy, security and regulatory review before production.
+20. Final Architecture Principle
+The rule that should govern the entire programThe hospital's EMR and approved clinical sources remain the system of record. AI may extract, summarize, retrieve, flag, calculate or propose; high-risk clinical decisions remain under authorized human control. Data Governance makes the data trustworthy, protected and traceable. AI Governance makes the AI controlled, validated, monitored and accountable.

@@ -8,8 +8,6 @@ that can see nurse workload.
 """
 import pytest
 
-from tests.conftest import mock_groq_json
-
 
 @pytest.fixture
 def head_nurse(make_user):
@@ -159,9 +157,9 @@ def test_headnurse_manages_multiple_patients_across_multiple_nurses_simultaneous
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("action", [
-    "record_vital", "get_vitals", "get_tasks", "create_note", "get_details", "nurse_consult",
+    "record_vital", "get_vitals", "get_tasks", "create_note", "get_details",
 ])
-def test_headnurse_never_needs_an_explicit_assignment(client, head_nurse, auth_headers, monkeypatch, action):
+def test_headnurse_never_needs_an_explicit_assignment(client, head_nurse, auth_headers, action):
     h = auth_headers(head_nurse)
     pid = client.post("/api/ipd/patients", json={"name": "No Assignment Needed", "ward": "General", "bed": "X1"}, headers=h).json()["id"]
     # Deliberately never assign any nurse -- HeadNurse must still have full access.
@@ -175,9 +173,6 @@ def test_headnurse_never_needs_an_explicit_assignment(client, head_nurse, auth_h
         resp = client.post("/api/nursing-notes", json={"patient_id": pid, "subjective": "ok", "objective": "", "assessment": "", "plan": ""}, headers=h)
     elif action == "get_details":
         resp = client.get(f"/api/patients/{pid}/details", headers=h)
-    elif action == "nurse_consult":
-        mock_groq_json(monkeypatch, {"vitals": [], "labs": [], "nursing_note": {}})
-        resp = client.post("/api/ipd/nurse-consult", json={"patient_id": pid, "voice_text": "patient stable"}, headers=h)
     assert resp.status_code == 200, f"{action}: HeadNurse should never be blocked by the assignment check, got {resp.status_code}"
 
 

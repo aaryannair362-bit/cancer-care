@@ -109,3 +109,94 @@ def is_admin(user: dict) -> bool:
 
 def is_pharmacist(user: dict) -> bool:
     return user.get("role") == "Pharmacist"
+
+def is_billing_staff(user: dict) -> bool:
+    return user.get("role") == "Billing"
+
+def is_tpa(user: dict) -> bool:
+    return user.get("role") == "TPA"
+
+def is_inventory_manager(user: dict) -> bool:
+    return user.get("role") == "InventoryManager"
+
+def is_doctor(user: dict) -> bool:
+    return user.get("role") == "Doctor"
+
+# --- CCA Cancer Care OS role-screen-spec personas -----------------------------------------
+# 15 distinct roles named in the role-screen specifications (updates/documentation/*.pdf).
+# Deliberately separate from the general HMS role vocabulary above (Doctor/Nurse/...) rather
+# than overloaded onto it: "Nurse Navigator" and "Infusion Nurse" are both nurse-like but
+# distinct CCA personas from the IPD ward "Nurse" role, and conflating them would make a role
+# check ambiguous about which screen set a user should see. Admin/Operations reuses the
+# existing Admin role (is_admin) rather than adding a 15th -- a real hospital Admin account is
+# expected to also want CCA operational visibility, not a separate login.
+CCA_ROLES = (
+    "CCAFrontDesk", "CCANurseNavigator", "CCAMedicalOncologist", "CCASurgicalOncologist",
+    "CCARadiationOncologist", "CCARadiologist", "CCARadiologyCoordinator", "CCAPathologist",
+    "CCALabPhlebotomy", "CCAInfusionNurse", "CCAMDTCoordinator", "CCAExternalMDTSpecialist",
+    "CCAPatientLiaison", "CCAFinancialCounsellor",
+)
+
+
+def is_cca_front_desk(user: dict) -> bool:
+    return user.get("role") == "CCAFrontDesk"
+
+
+def is_cca_nurse_navigator(user: dict) -> bool:
+    return user.get("role") == "CCANurseNavigator"
+
+
+def is_cca_medical_oncologist(user: dict) -> bool:
+    return user.get("role") == "CCAMedicalOncologist"
+
+
+def is_cca_surgical_oncologist(user: dict) -> bool:
+    return user.get("role") == "CCASurgicalOncologist"
+
+
+def is_cca_radiation_oncologist(user: dict) -> bool:
+    return user.get("role") == "CCARadiationOncologist"
+
+
+def is_cca_oncologist(user: dict) -> bool:
+    """Any of the three treating-oncologist personas -- used for permissions shared across
+    all three (e.g. Consultation, NEXUS, Guideline Pathway, Staging, MDT read/contribute)."""
+    return user.get("role") in (
+        "CCAMedicalOncologist", "CCASurgicalOncologist", "CCARadiationOncologist",
+    )
+
+
+def is_cca_radiologist(user: dict) -> bool:
+    return user.get("role") == "CCARadiologist"
+
+
+def is_cca_radiology_coordinator(user: dict) -> bool:
+    return user.get("role") == "CCARadiologyCoordinator"
+
+
+def is_cca_pathologist(user: dict) -> bool:
+    return user.get("role") == "CCAPathologist"
+
+
+def is_cca_lab_phlebotomy(user: dict) -> bool:
+    return user.get("role") == "CCALabPhlebotomy"
+
+
+def is_cca_infusion_nurse(user: dict) -> bool:
+    return user.get("role") == "CCAInfusionNurse"
+
+
+def is_cca_mdt_coordinator(user: dict) -> bool:
+    return user.get("role") == "CCAMDTCoordinator"
+
+
+def is_cca_external_mdt_specialist(user: dict) -> bool:
+    return user.get("role") == "CCAExternalMDTSpecialist"
+
+
+def is_cca_patient_liaison(user: dict) -> bool:
+    return user.get("role") == "CCAPatientLiaison"
+
+
+def is_cca_financial_counsellor(user: dict) -> bool:
+    return user.get("role") == "CCAFinancialCounsellor"

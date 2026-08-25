@@ -48,7 +48,6 @@ def test_small_clinic_full_day_single_ward_single_nurse(client, small_clinic, au
 def test_small_clinic_doctor_and_ipd_share_one_org(client, small_clinic, auth_headers):
     """A small clinic's doctor sees OPD walk-ins AND the same organization's IPD ward exists --
     confirms both workflows coexist correctly within one small organization."""
-    from tests.conftest import mock_groq_json
     doctor = small_clinic["doctor"]
     hn = auth_headers(small_clinic["head_nurse"])
 
@@ -145,13 +144,10 @@ def test_multi_specialty_hospital_headnurse_workload_balancing_across_wards(clie
     assert all(workload[n.id] == 4 for n in nurses)
 
 
-def test_multi_specialty_hospital_multiple_doctors_each_have_private_opd_practice(client, multi_specialty_hospital, auth_headers, monkeypatch):
-    from tests.conftest import mock_groq_json
+def test_multi_specialty_hospital_multiple_doctors_each_have_private_opd_practice(client, multi_specialty_hospital, auth_headers):
     doctors = multi_specialty_hospital["doctors"][:3]
     for i, doc in enumerate(doctors):
-        mock_groq_json(monkeypatch, {"chiefComplaint": f"Complaint from doctor {i}'s patient", "hpi": "", "primaryDiagnosis": "",
-                                      "differentialDiagnosis": "", "medications": [], "advice": "", "labTests": []})
-        client.post("/api/scribe", json={"transcript": f"Consultation transcript for doctor {i}, detailed enough to pass validation"},
+        client.post("/api/consultations", json={"chief_complaint": f"Complaint from doctor {i}'s patient"},
                     headers=auth_headers(doc))
     for i, doc in enumerate(doctors):
         consultations = client.get("/api/consultations", headers=auth_headers(doc)).json()["consultations"]

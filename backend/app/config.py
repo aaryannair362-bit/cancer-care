@@ -55,6 +55,20 @@ class Settings(BaseSettings):
     # Disabled in tests (tests/conftest.py, tests/scale/runner.py) -- many legitimate tests
     # fire dozens of auth calls from the same test-client "IP" in well under a minute.
     RATE_LIMIT_ENABLED: bool = True
+    MAX_PATIENT_DOCUMENT_MB: int = 25
+    # EasyOCR language codes (comma-separated, e.g. "en,hi"), NOT Tesseract's "eng"-style codes
+    # -- see ocr_service.py's module docstring for why OCR moved off Tesseract, and
+    # https://www.jaided.ai/easyocr for the supported-language list.
+    OCR_LANGUAGES: str = os.getenv("OCR_LANGUAGES", "en")
+    # Read by main.py's create_default_user() to auto-seed the first Admin account on a fresh
+    # deploy (empty DB). Declared here so settings.ADMIN_EMAIL doesn't raise AttributeError --
+    # it previously did on every single startup (caught by that function's broad except, so the
+    # app kept running, but the auto-seed silently never ran even when these were set in the
+    # environment). Blank by default: leaving them unset skips the seed and requires registering
+    # the first Admin manually via POST /api/auth/register instead.
+    ADMIN_EMAIL: str = os.getenv("ADMIN_EMAIL", "")
+    ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
+    ADMIN_ORG_NAME: str = os.getenv("ADMIN_ORG_NAME", "Default Organization")
 
     class Config:
         env_file = (

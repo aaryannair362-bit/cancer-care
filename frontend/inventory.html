@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Inventory - Aivana HMS</title>
+<link rel="stylesheet" href="/static/css/shared.css" />
+<style>
+  .po-line-row, .receive-line-row { display: grid; grid-template-columns: 2fr 1fr 1fr auto; gap: 8px; align-items: center; }
+</style>
+</head>
+<body>
+<div class="app-shell">
+  <div class="topnav" id="topnav"></div>
+  <div class="page">
+    <div class="page-header"><div><h1>Inventory &amp; Stores</h1><p>Vendors, procurement chain, and stock transfers.</p></div></div>
+
+    <div class="tabs">
+      <div class="tab tab--active" data-tab="vendors">Vendors</div>
+      <div class="tab" data-tab="requests">Purchase Requests</div>
+      <div class="tab" data-tab="orders">Purchase Orders</div>
+      <div class="tab" data-tab="transfers">Stock Transfers</div>
+    </div>
+
+    <!-- Vendors -->
+    <div class="tab-panel tab-panel--active" id="panel-vendors">
+      <div class="grid grid--2">
+        <div class="card">
+          <div class="card-header"><h3>Add Vendor</h3></div>
+          <form id="vendor-form" class="stack">
+            <div class="form-grid">
+              <div class="field"><label>Name *</label><input type="text" id="ven-name" required /></div>
+              <div class="field"><label>Contact person</label><input type="text" id="ven-contact" /></div>
+              <div class="field"><label>Phone</label><input type="text" id="ven-phone" /></div>
+              <div class="field"><label>Email</label><input type="email" id="ven-email" /></div>
+              <div class="field"><label>GSTIN</label><input type="text" id="ven-gstin" /></div>
+            </div>
+            <div class="field"><label>Address</label><textarea id="ven-address" rows="2"></textarea></div>
+            <div class="form-actions"><button type="submit" class="btn btn--primary">Add Vendor</button></div>
+          </form>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>Vendors</h3></div>
+          <div class="table-wrap"><table><thead><tr><th>Name</th><th>Contact</th><th>Status</th><th></th></tr></thead><tbody id="vendor-rows"><tr><td colspan="4" class="table-empty">Loading...</td></tr></tbody></table></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Purchase Requests -->
+    <div class="tab-panel" id="panel-requests">
+      <div class="grid grid--2">
+        <div class="card">
+          <div class="card-header"><h3>New Request</h3></div>
+          <form id="pr-form" class="stack">
+            <div class="form-grid">
+              <div class="field"><label>Drug *</label><select id="pr-drug" required></select></div>
+              <div class="field"><label>Quantity *</label><input type="number" min="1" id="pr-qty" required /></div>
+            </div>
+            <div class="field"><label>Notes</label><textarea id="pr-notes" rows="2"></textarea></div>
+            <div class="form-actions"><button type="submit" class="btn btn--primary">Request</button></div>
+          </form>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>Requests</h3></div>
+          <div class="table-wrap"><table><thead><tr><th>Drug</th><th>Qty</th><th>Status</th><th></th></tr></thead><tbody id="pr-rows"><tr><td colspan="4" class="table-empty">Loading...</td></tr></tbody></table></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Purchase Orders -->
+    <div class="tab-panel" id="panel-orders">
+      <div class="card">
+        <div class="card-header"><h3>New Purchase Order</h3></div>
+        <form id="po-form" class="stack">
+          <div class="form-grid">
+            <div class="field"><label>Vendor *</label><select id="po-vendor" required></select></div>
+            <div class="field"><label>Linked Purchase Request ID (optional)</label><input type="number" id="po-pr-id" /></div>
+            <div class="field"><label>Expected delivery date</label><input type="date" id="po-delivery" /></div>
+          </div>
+          <div class="card-header"><h4>Lines</h4><button type="button" class="btn btn--secondary btn--small" id="po-add-line">+ Add line</button></div>
+          <div id="po-lines" class="stack"></div>
+          <div class="form-actions"><button type="submit" class="btn btn--primary">Create Order</button></div>
+        </form>
+      </div>
+      <div class="card">
+        <div class="card-header"><h3>Purchase Orders</h3></div>
+        <div class="table-wrap"><table><thead><tr><th>ID</th><th>Vendor</th><th>Status</th><th>Expected</th><th></th></tr></thead><tbody id="po-rows"><tr><td colspan="5" class="table-empty">Loading...</td></tr></tbody></table></div>
+      </div>
+    </div>
+
+    <!-- Stock Transfers -->
+    <div class="tab-panel" id="panel-transfers">
+      <div class="grid grid--2">
+        <div class="card">
+          <div class="card-header"><h3>New Transfer</h3></div>
+          <form id="transfer-form" class="stack">
+            <div class="form-grid">
+              <div class="field"><label>From batch ID *</label><input type="number" id="tr-batch" required /></div>
+              <div class="field"><label>Quantity *</label><input type="number" min="1" id="tr-qty" required /></div>
+            </div>
+            <div class="field"><label>To location *</label><input type="text" id="tr-location" required /></div>
+            <div class="field"><label>Notes</label><textarea id="tr-notes" rows="2"></textarea></div>
+            <div class="form-actions"><button type="submit" class="btn btn--primary">Transfer</button></div>
+          </form>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>Transfers</h3></div>
+          <div class="table-wrap"><table><thead><tr><th>When</th><th>Drug</th><th>To</th><th>Qty</th></tr></thead><tbody id="transfer-rows"><tr><td colspan="4" class="table-empty">Loading...</td></tr></tbody></table></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- PO detail / receive modal -->
+<div class="modal" id="po-modal">
+  <div class="modal__box modal__box--wide">
+    <div class="modal__header"><h3 id="po-modal-title"></h3><button class="modal__close" onclick="closeModal('po-modal')">&times;</button></div>
+    <div id="po-modal-body" class="stack"></div>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script>
+const user = Auth.requirePage(['Pharmacist', 'Admin', 'InventoryManager']);
+renderNav('inventory');
+const isAdmin = user.role === 'Admin';
+
+qsa('.tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    qsa('.tab').forEach((t) => t.classList.remove('tab--active'));
+    qsa('.tab-panel').forEach((p) => p.classList.remove('tab-panel--active'));
+    tab.classList.add('tab--active');
+    document.getElementById(`panel-${tab.dataset.tab}`).classList.add('tab-panel--active');
+  });
+});
+
+let drugsCache = [];
+async function loadDrugsCache() {
+  try {
+    drugsCache = await Api.get('/pharmacy/drugs');
+    const opts = drugsCache.map((d) => `<option value="${d.id}">${escapeHtml(d.name)} ${escapeHtml(d.form || '')} ${escapeHtml(d.strength || '')}</option>`).join('');
+    if (qs('#pr-drug')) qs('#pr-drug').innerHTML = opts;
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+
+// ---- Vendors ----
+document.getElementById('vendor-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await Api.post('/inventory/vendors', {
+      name: qs('#ven-name').value.trim(), contact_person: qs('#ven-contact').value || null,
+      phone: qs('#ven-phone').value || null, email: qs('#ven-email').value || null,
+      gstin: qs('#ven-gstin').value || null, address: qs('#ven-address').value || null,
+    });
+    toast('Vendor added', 'success');
+    e.target.reset();
+    loadVendors();
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+let vendorsCache = [];
+async function loadVendors() {
+  try {
+    vendorsCache = await Api.get('/inventory/vendors');
+    qs('#vendor-rows').innerHTML = vendorsCache.length ? vendorsCache.map((v) => `
+      <tr>
+        <td>${escapeHtml(v.name)}</td><td>${escapeHtml(v.contact_person || '-')} ${escapeHtml(v.phone || '')}</td>
+        <td><span class="badge${v.is_active ? '' : ' badge--muted'}">${v.is_active ? 'Active' : 'Inactive'}</span></td>
+        <td><button class="btn btn--ghost btn--small" data-toggle-vendor="${v.id}" data-active="${v.is_active}">${v.is_active ? 'Deactivate' : 'Activate'}</button></td>
+      </tr>`).join('') : '<tr><td colspan="4" class="table-empty">No vendors</td></tr>';
+    if (qs('#po-vendor')) qs('#po-vendor').innerHTML = vendorsCache.filter((v) => v.is_active).map((v) => `<option value="${v.id}">${escapeHtml(v.name)}</option>`).join('');
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+qs('#vendor-rows').addEventListener('click', async (e) => {
+  const id = e.target.dataset.toggleVendor;
+  if (!id) return;
+  const isActive = e.target.dataset.active === 'true';
+  try { await Api.patch(`/inventory/vendors/${id}`, { is_active: !isActive }); loadVendors(); }
+  catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+// ---- Purchase Requests ----
+document.getElementById('pr-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await Api.post('/inventory/purchase-requests', { drug_id: Number(qs('#pr-drug').value), requested_quantity: Number(qs('#pr-qty').value), notes: qs('#pr-notes').value || null });
+    toast('Purchase request created', 'success');
+    e.target.reset();
+    loadPurchaseRequests();
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+function drugName(id) { const d = drugsCache.find((x) => x.id === id); return d ? d.name : `#${id}`; }
+
+async function loadPurchaseRequests() {
+  try {
+    const rows = await Api.get('/inventory/purchase-requests');
+    qs('#pr-rows').innerHTML = rows.length ? rows.map((pr) => `
+      <tr>
+        <td>${escapeHtml(drugName(pr.drug_id))}</td><td class="num">${pr.requested_quantity}</td>
+        <td><span class="badge${pr.status === 'Rejected' ? ' badge--danger' : ''}">${escapeHtml(pr.status)}</span></td>
+        <td>${isAdmin && pr.status === 'Pending' ? `<button class="btn btn--secondary btn--small" data-approve-pr="${pr.id}">Approve</button> <button class="btn btn--ghost btn--small" data-reject-pr="${pr.id}">Reject</button>` : ''}</td>
+      </tr>`).join('') : '<tr><td colspan="4" class="table-empty">No requests</td></tr>';
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+qs('#pr-rows').addEventListener('click', async (e) => {
+  const approveId = e.target.dataset.approvePr;
+  const rejectId = e.target.dataset.rejectPr;
+  try {
+    if (approveId) { await Api.patch(`/inventory/purchase-requests/${approveId}/approve`); toast('Approved', 'success'); loadPurchaseRequests(); }
+    if (rejectId) { await Api.patch(`/inventory/purchase-requests/${rejectId}/reject`); toast('Rejected', 'success'); loadPurchaseRequests(); }
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+// ---- Purchase Orders ----
+function addPoLine() {
+  const row = document.createElement('div');
+  row.className = 'po-line-row';
+  const opts = drugsCache.map((d) => `<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('');
+  row.innerHTML = `
+    <select class="po-line-drug">${opts}</select>
+    <input type="number" min="1" placeholder="Qty" class="po-line-qty" />
+    <input type="number" min="0" step="0.01" placeholder="Unit price" class="po-line-price" />
+    <button type="button" class="btn btn--ghost btn--small remove-po-line">&times;</button>`;
+  row.querySelector('.remove-po-line').addEventListener('click', () => row.remove());
+  document.getElementById('po-lines').appendChild(row);
+}
+document.getElementById('po-add-line').addEventListener('click', addPoLine);
+
+document.getElementById('po-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const lines = qsa('.po-line-row').map((row) => ({
+    drug_id: Number(row.querySelector('.po-line-drug').value),
+    quantity_ordered: Number(row.querySelector('.po-line-qty').value),
+    unit_price: Number(row.querySelector('.po-line-price').value),
+  })).filter((l) => l.drug_id && l.quantity_ordered > 0);
+  if (!lines.length) { toast('Add at least one line', 'info'); return; }
+  try {
+    await Api.post('/inventory/purchase-orders', {
+      vendor_id: Number(qs('#po-vendor').value), purchase_request_id: qs('#po-pr-id').value ? Number(qs('#po-pr-id').value) : null,
+      expected_delivery_date: qs('#po-delivery').value || null, lines,
+    });
+    toast('Purchase order created', 'success');
+    e.target.reset();
+    qs('#po-lines').innerHTML = '';
+    loadPurchaseOrders();
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+async function loadPurchaseOrders() {
+  try {
+    const rows = await Api.get('/inventory/purchase-orders');
+    qs('#po-rows').innerHTML = rows.length ? rows.map((po) => `
+      <tr data-id="${po.id}" style="cursor:pointer">
+        <td>#${po.id}</td><td>${escapeHtml(vendorsCache.find((v) => v.id === po.vendor_id)?.name || `#${po.vendor_id}`)}</td>
+        <td><span class="badge">${escapeHtml(po.status)}</span></td><td>${fmtDate(po.expected_delivery_date)}</td>
+        <td>${po.status === 'Sent' ? `<button class="btn btn--ghost btn--small" data-cancel-po="${po.id}">Cancel</button>` : ''}</td>
+      </tr>`).join('') : '<tr><td colspan="5" class="table-empty">No purchase orders</td></tr>';
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+qs('#po-rows').addEventListener('click', async (e) => {
+  const cancelId = e.target.dataset.cancelPo;
+  if (cancelId) {
+    try { await Api.post(`/inventory/purchase-orders/${cancelId}/cancel`); toast('Order cancelled', 'success'); loadPurchaseOrders(); }
+    catch (err) { toast(apiErrorMessage(err), 'danger'); }
+    return;
+  }
+  const row = e.target.closest('tr[data-id]');
+  if (row) openPoDetail(row.dataset.id);
+});
+
+async function openPoDetail(id) {
+  try {
+    const po = await Api.get(`/inventory/purchase-orders/${id}`);
+    qs('#po-modal-title').textContent = `Purchase Order #${po.id} - ${po.status}`;
+    const lineRows = po.lines.map((l) => `
+      <div class="receive-line-row">
+        <span>${escapeHtml(drugName(l.drug_id))} (ordered ${l.quantity_ordered}, received ${l.quantity_received})</span>
+        <input type="number" min="0" class="recv-qty" data-line="${l.id}" placeholder="Qty now" ${l.quantity_received >= l.quantity_ordered ? 'disabled' : ''} />
+        <input type="text" class="recv-batch" data-line="${l.id}" placeholder="Batch #" />
+        <input type="date" class="recv-expiry" data-line="${l.id}" />
+      </div>`).join('');
+    qs('#po-modal-body').innerHTML = `
+      <div class="stack">${lineRows}</div>
+      <div class="field"><label>Receiving location</label><input type="text" id="recv-location" value="Main Store" /></div>
+      ${po.status === 'Sent' || po.status === 'PartiallyReceived' ? '<div class="form-actions"><button class="btn btn--primary btn--small" id="receive-po-btn">Receive Goods</button></div>' : ''}
+    `;
+    document.getElementById('receive-po-btn')?.addEventListener('click', async () => {
+      const location = qs('#recv-location').value || 'Main Store';
+      const lines = qsa('.recv-qty').filter((i) => i.value && Number(i.value) > 0).map((i) => {
+        const lineId = i.dataset.line;
+        const batch = qs(`.recv-batch[data-line="${lineId}"]`).value || null;
+        const expiry = qs(`.recv-expiry[data-line="${lineId}"]`).value;
+        return { po_line_id: Number(lineId), quantity_received: Number(i.value), batch_number: batch, expiry_date: expiry, location };
+      });
+      if (!lines.length) { toast('Enter a received quantity for at least one line', 'info'); return; }
+      if (lines.some((l) => !l.expiry_date)) { toast('Expiry date is required for every received line', 'info'); return; }
+      try {
+        await Api.post(`/inventory/purchase-orders/${id}/receive`, { lines });
+        toast('Goods received', 'success');
+        closeModal('po-modal');
+        loadPurchaseOrders();
+      } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+    });
+    openModal('po-modal');
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+
+// ---- Stock Transfers ----
+document.getElementById('transfer-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await Api.post('/inventory/stock-transfers', {
+      from_batch_id: Number(qs('#tr-batch').value), to_location: qs('#tr-location').value.trim(),
+      quantity: Number(qs('#tr-qty').value), notes: qs('#tr-notes').value || null,
+    });
+    toast('Stock transferred', 'success');
+    e.target.reset();
+    loadTransfers();
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+async function loadTransfers() {
+  try {
+    const rows = await Api.get('/inventory/stock-transfers');
+    qs('#transfer-rows').innerHTML = rows.length ? rows.map((t) => `
+      <tr><td>${fmtDateTime(t.transferred_at)}</td><td>${escapeHtml(drugName(t.drug_id))}</td><td>${escapeHtml(t.to_location)}</td><td class="num">${t.quantity}</td></tr>
+    `).join('') : '<tr><td colspan="4" class="table-empty">No transfers</td></tr>';
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+
+// ---- Init ----
+(async () => {
+  await loadDrugsCache();
+  await loadVendors();
+  loadPurchaseRequests();
+  loadPurchaseOrders();
+  loadTransfers();
+})();
+</script>
+</body>
+</html>

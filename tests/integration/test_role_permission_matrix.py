@@ -14,8 +14,6 @@ assignment check (that's covered by test_ward_daily_scenarios.py's unassigned-nu
 """
 import pytest
 
-from tests.conftest import mock_groq_json
-
 
 @pytest.fixture
 def actors(make_user):
@@ -79,9 +77,6 @@ def _endpoints(patient_id, actors, ward_id):
              allowed={"HeadNurse"}, ok_status={200}),
         dict(name="get_tasks", method="GET", path=f"/api/ipd/tasks/{patient_id}",
              body=None, allowed={"HeadNurse", "NursingStation", "Nurse", "Doctor"}, ok_status={200}),
-        dict(name="nurse_consult", method="POST", path="/api/ipd/nurse-consult",
-             body={"patient_id": patient_id, "voice_text": "BP 120 over 80, stable"},
-             allowed={"HeadNurse", "Nurse"}, ok_status={200}, needs_groq=True),
         dict(name="create_nursing_note", method="POST", path="/api/nursing-notes",
              body={"patient_id": patient_id, "subjective": "s", "objective": "o", "assessment": "a", "plan": "p"},
              allowed={"HeadNurse", "Nurse"}, ok_status={200}),
@@ -103,7 +98,7 @@ def _endpoints(patient_id, actors, ward_id):
              allowed={"Admin"}, ok_status={200}),
         dict(name="drug_interactions", method="POST", path="/api/drug-interactions",
              body={"medications": [{"drugName": "Aspirin"}, {"drugName": "Warfarin"}]},
-             allowed={"Admin", "HeadNurse", "NursingStation", "Nurse", "Doctor"}, ok_status={200}, needs_groq=True),
+             allowed={"Admin", "HeadNurse", "NursingStation", "Nurse", "Doctor"}, ok_status={200}),
         dict(name="list_wards", method="GET", path="/api/wards",
              body=None, allowed={"HeadNurse", "Admin"}, ok_status={200}),
         dict(name="create_ward", method="POST", path="/api/wards",
@@ -137,7 +132,7 @@ def _make_cases():
     """Build (endpoint_name, role) pairs; actual endpoint dicts are resolved inside the test
     since they depend on per-test fixture values (patient_id, actor ids)."""
     names = ["create_patient", "assign_patient", "record_vital", "get_vitals", "create_task",
-             "get_tasks", "nurse_consult", "create_nursing_note", "update_patient",
+             "get_tasks", "create_nursing_note", "update_patient",
              "get_patient_details", "get_ipd_patients", "get_users", "update_user_role",
              "reset_password", "admin_create_user", "drug_interactions",
              "list_wards", "create_ward", "update_ward", "delete_ward",
@@ -152,11 +147,6 @@ def _make_cases():
 def test_permission_matrix(client, actors, patient_id, ward_id, auth_headers, monkeypatch, endpoint_name, role):
     endpoints_by_name = {e["name"]: e for e in _endpoints(patient_id, actors, ward_id)}
     endpoint = endpoints_by_name[endpoint_name]
-    if endpoint.get("needs_groq"):
-        if endpoint_name == "nurse_consult":
-            mock_groq_json(monkeypatch, {"vitals": [], "labs": [], "nursing_note": {"subjective": "ok"}})
-        else:
-            mock_groq_json(monkeypatch, [])
 
     user = actors[role]
     headers = auth_headers(user)
@@ -203,7 +193,7 @@ UNAUTH_ENDPOINTS = [
     ("POST", "/api/nursing-notes"),
     ("GET", "/api/auth/users"),
     ("GET", "/api/auth/me"),
-    ("POST", "/api/scribe"),
+    ("POST", "/api/consultations"),
     ("POST", "/api/drug-interactions"),
 ]
 

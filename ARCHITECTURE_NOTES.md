@@ -121,12 +121,11 @@ imports `backend.app.main:app` directly — not a hand-maintained duplicate.
     "English"`, else re-runs the draft through the LLM for translation with the same
     default-backfill behavior.
   - `_generate_json` — strips ```json / ``` code fences, `json.loads`s the result, and on
-    `JSONDecodeError` falls back to a crude regex/heading-based `_fallback_extract`. Both the
-    Groq request/response bodies and parse failures are logged via `print(...)` to stdout —
-    this means **full transcripts (raw patient conversation content) are written to server
-    logs** on every call and on every parse failure. Flagged as a PHI-in-logs concern in
-    TEST_NOTES.md; not something to silently "fix" by deleting prints since operators may rely
-    on them for debugging — needs an explicit decision (structured logging with redaction).
+    `JSONDecodeError` falls back to a crude regex/heading-based `_fallback_extract`.
+    **Resolved (previously flagged as a PHI-in-logs concern):** Groq request/response bodies
+    and parse failures are logged via `logger.debug(...)`, not `print(...)` — off by default at
+    Python's default `WARNING` level, so full transcripts are not written to server logs unless
+    an operator explicitly opts into debug-level logging.
     **Also enforces its `-> dict` return type as of the 2026-07-31 voice-hardening pass**: valid
     JSON that happens to parse to a list/string/number (e.g. Groq returning `"[1, 2, 3]"`) used
     to skip the `JSONDecodeError` fallback entirely and get returned as-is, crashing every
@@ -154,9 +153,14 @@ imports `backend.app.main:app` directly — not a hand-maintained duplicate.
    (`len(text)//4` as a token proxy — not a real tokenizer, purely a display estimate).
 5. Result returned to frontend as-is (not the persisted row).
 
-`POST /api/drug-interactions` is a separate, stateless AI call (no persistence): given a list of
-`{drugName, ...}` medications, asks Groq for pairwise interaction analysis, coerces non-list
-responses to `[]` defensively.
+**Resolved (previously an AI call):** `POST /api/drug-interactions` now matches a list of
+`{drugName, ...}` medications against `tasks_engine.py`'s small, explicit, hand-curated
+`KNOWN_INTERACTIONS` table (~20 well-established pairs, case-insensitive substring match) —
+not a Groq call. Deliberate, disclosed change: a curated safety net beats an LLM hallucinating
+interactions, with no formulary/interaction database to ground a real lookup against. Same
+function (`check_drug_interactions`) also backs the interaction check re-run at OPD consultation
+finalize time. A sibling `check_allergy_conflicts` does the same substring-match approach
+against `Patient.allergies`.
 
 ## 5. Data flow — IPD (Inpatient) workflow
 
@@ -201,10 +205,12 @@ data (`record_vital`, `create_task`, `update_task`, `create_nursing_note`, `nurs
 - **Discharge Summary (new feature, 2026-08-01)**: `POST`/`GET /api/ipd/patients/{id}/discharge-summary`
   (HeadNurse/NursingStation/Doctor to generate; same viewers as the rest of the chart — including
   an assigned Nurse — to read). Assembles the patient's full IPD record (vitals in chronological
-  order, all nursing notes, tasks, and any linked OPD `Consultation` rows) into an AI-drafted
-  discharge document via `scribe.generate_discharge_summary()`, persisted to the new
-  `DischargeSummary` table (one row per generation — regenerating creates a new row, `GET`
-  always returns the latest). Same never-raises-always-backfills contract as `scribe_transcript`,
+  order, all nursing notes, tasks, and any linked OPD `Consultation` rows) into a discharge
+  document via **`discharge_summary.py`** (a separate module, added later — deterministic
+  template assembly of already-recorded chart data, no AI/network dependency; fully replaces
+  the earlier `scribe.generate_discharge_summary()` LLM path this section used to describe),
+  persisted to the new `DischargeSummary` table (one row per generation — regenerating creates
+  a new row, `GET` always returns the latest). Same never-raises-always-backfills contract as `scribe_transcript`,
   plus the same "422 if every field came back empty" guard used elsewhere. Distinct from the
   discharge *action* above (`PUT /api/patients/{id}` with `status: "Discharged"`) — generating a
   summary doesn't discharge the patient and discharging doesn't require a summary; the UI's new

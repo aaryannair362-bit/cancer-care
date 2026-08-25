@@ -6,11 +6,11 @@ permission check implemented *after* some other validation step could, in princi
 bypassed by input that fails validation in a way that short-circuits before the role check --
 this file rules that out empirically for every denied endpoint).
 
-Note: record_vital, create_nursing_note, and nurse_consult all validate required fields
-(patient_id, and voice_text for nurse_consult) with a 400 *before* their role check runs -- a
-pre-existing, already-tested ordering (see test_ipd_edge_cases.py). So every payload here keeps
-those required fields present and valid, varying only extra/unrelated content, to correctly
-isolate "does the role check hold" from "does field validation happen to fire first."
+Note: record_vital and create_nursing_note both validate required fields (patient_id) with a
+400 *before* their role check runs -- a pre-existing, already-tested ordering (see
+test_ipd_edge_cases.py). So every payload here keeps those required fields present and valid,
+varying only extra/unrelated content, to correctly isolate "does the role check hold" from
+"does field validation happen to fire first."
 """
 import pytest
 
@@ -58,13 +58,6 @@ def test_station_denied_from_create_nursing_note_regardless_of_payload(client, s
 
 
 @pytest.mark.parametrize("case_id,extra", EXTRA_FIELD_VARIANTS, ids=[c[0] for c in EXTRA_FIELD_VARIANTS])
-def test_station_denied_from_nurse_consult_regardless_of_payload(client, station, patient_id, auth_headers, case_id, extra):
-    body = {"patient_id": patient_id, "voice_text": "patient stable", **extra}
-    resp = client.post("/api/ipd/nurse-consult", json=body, headers=auth_headers(station))
-    assert resp.status_code == 403, f"{case_id}: expected 403, got {resp.status_code}"
-
-
-@pytest.mark.parametrize("case_id,extra", EXTRA_FIELD_VARIANTS, ids=[c[0] for c in EXTRA_FIELD_VARIANTS])
 def test_station_denied_from_assign_regardless_of_payload(client, station, patient_id, auth_headers, case_id, extra):
     body = {"patient_id": patient_id, "nurse_id": 1, **extra}
     resp = client.post("/api/ipd/assign", json=body, headers=auth_headers(station))
@@ -103,11 +96,6 @@ def test_station_denied_from_unassign_even_with_missing_required_fields(client, 
 def test_station_denied_from_update_task_even_with_no_body_at_all(client, station, auth_headers):
     resp = client.patch("/api/ipd/tasks/1", json={}, headers=auth_headers(station))
     assert resp.status_code in (403, 404)
-
-
-def test_station_denied_from_voice_to_vitals_even_with_no_voice_text(client, station, auth_headers):
-    resp = client.post("/api/ipd/voice-to-vitals", json={}, headers=auth_headers(station))
-    assert resp.status_code == 403
 
 
 def test_station_denied_from_nurse_workload_regardless_of_query_params(client, station, auth_headers):

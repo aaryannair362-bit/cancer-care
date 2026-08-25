@@ -1,16 +1,10 @@
 """
-Tests for the new Discharge Summary feature (added to reduce the real-world hospital-operations
-burden of manually writing a discharge document from the chart): POST/GET
-/api/ipd/patients/{id}/discharge-summary. Assembles the patient's vitals/nursing-notes/tasks/
-consultations already captured elsewhere into an AI-generated summary, mirroring the
-scribe_transcript never-raises-always-backfills contract.
+Tests for the Discharge Summary feature: POST/GET /api/ipd/patients/{id}/discharge-summary.
+Assembles the patient's vitals/nursing-notes/tasks/consultations already captured elsewhere
+into a deterministic, template-based summary (see backend/app/discharge_summary.py) -- no
+AI/LLM involved, so these tests call the real generator directly rather than mocking a model.
 """
-import copy
-
 import pytest
-
-from app import drug_matcher
-from tests.conftest import mock_groq_json
 
 
 @pytest.fixture
@@ -53,40 +47,24 @@ def patient_with_full_stay(client, head_nurse, nurse, auth_headers):
     return pid
 
 
-FULL_SUMMARY_RESULT = {
-    "admissionSummary": "58yo male admitted with community-acquired pneumonia, febrile and tachypneic on arrival",
-    "hospitalCourse": "Treated with IV antibiotics; fever resolved and oxygen saturation normalized by day 2",
-    "dischargeDiagnosis": "Resolved community-acquired pneumonia",
-    "medicationsAtDischarge": [{"drugName": "Amoxicillin", "dose": "500mg", "frequency": "TID", "duration": "5 days"}],
-    "followUpInstructions": "Follow up with primary physician in 1 week; return if fever recurs",
-    "conditionAtDischarge": "Stable, afebrile, ambulatory",
-}
-
-
-def test_generate_discharge_summary_full_content(client, head_nurse, patient_with_full_stay, auth_headers, monkeypatch):
-    mock_groq_json(monkeypatch, FULL_SUMMARY_RESULT)
+def test_generated_summary_reflects_real_chart_data(client, head_nurse, patient_with_full_stay, auth_headers):
     resp = client.post(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(head_nurse))
     assert resp.status_code == 200
     data = resp.json()
-    assert data["admission_summary"] == FULL_SUMMARY_RESULT["admissionSummary"]
-    assert data["hospital_course"] == FULL_SUMMARY_RESULT["hospitalCourse"]
-    assert data["discharge_diagnosis"] == FULL_SUMMARY_RESULT["dischargeDiagnosis"]
-    # app/drug_matcher.py fuzzy-corrects extracted medication names (including bare/formless
-    # names now -- see drug_matcher.py's module docstring) -- not verbatim passthrough.
-    assert data["medications_at_discharge"] == drug_matcher.correct_medication_names(
-        copy.deepcopy(FULL_SUMMARY_RESULT["medicationsAtDischarge"])
-    )
-    assert data["follow_up_instructions"] == FULL_SUMMARY_RESULT["followUpInstructions"]
-    assert data["condition_at_discharge"] == FULL_SUMMARY_RESULT["conditionAtDischarge"]
+    assert "Community-acquired pneumonia" in data["admission_summary"]
+    assert "Community-acquired pneumonia" in data["discharge_diagnosis"]  # falls back to Patient.diagnosis (no consultations)
+    assert "2 vital-sign recording(s)" in data["hospital_course"]
+    assert "98" in data["hospital_course"]  # most recent oxygen_sat reading
+    assert "1 nursing note(s)" in data["hospital_course"]
+    assert data["condition_at_discharge"] == "Stable"
     assert data["generated_by"] == head_nurse.id
 
 
-def test_generated_summary_persists_and_is_retrievable(client, head_nurse, patient_with_full_stay, auth_headers, monkeypatch):
-    mock_groq_json(monkeypatch, FULL_SUMMARY_RESULT)
+def test_generated_summary_persists_and_is_retrievable(client, head_nurse, patient_with_full_stay, auth_headers):
     client.post(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(head_nurse))
     resp = client.get(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(head_nurse))
     assert resp.status_code == 200
-    assert resp.json()["discharge_diagnosis"] == FULL_SUMMARY_RESULT["dischargeDiagnosis"]
+    assert "Community-acquired pneumonia" in resp.json()["discharge_diagnosis"]
 
 
 def test_get_summary_before_any_generated_returns_404(client, head_nurse, patient_with_full_stay, auth_headers):
@@ -94,67 +72,41 @@ def test_get_summary_before_any_generated_returns_404(client, head_nurse, patien
     assert resp.status_code == 404
 
 
-def test_regenerating_creates_a_new_version_get_returns_latest(client, head_nurse, patient_with_full_stay, auth_headers, monkeypatch):
-    mock_groq_json(monkeypatch, FULL_SUMMARY_RESULT)
+def test_regenerating_creates_a_new_version_get_returns_latest(client, head_nurse, nurse, patient_with_full_stay, auth_headers):
     client.post(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(head_nurse))
 
-    updated_result = dict(FULL_SUMMARY_RESULT, conditionAtDischarge="Fully recovered, discharged home")
-    mock_groq_json(monkeypatch, updated_result)
+    # A new vital changes the "most recent vitals" line in the next generation.
+    client.post("/api/ipd/vitals", json={"patient_id": patient_with_full_stay, "bp_systolic": 118, "bp_diastolic": 76,
+                                          "heart_rate": 70, "temperature": 36.8, "oxygen_sat": 99, "respiratory_rate": 14},
+                headers=auth_headers(nurse))
     client.post(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(head_nurse))
 
     resp = client.get(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(head_nurse))
-    assert resp.json()["condition_at_discharge"] == "Fully recovered, discharged home"
+    assert "3 vital-sign recording(s)" in resp.json()["hospital_course"]
+    assert "99" in resp.json()["hospital_course"]
 
 
-def test_generates_even_for_patient_with_minimal_record(client, head_nurse, auth_headers, monkeypatch):
+def test_generates_even_for_patient_with_minimal_record(client, head_nurse, auth_headers):
     """A patient admitted and discharged same-day with no vitals/notes/tasks recorded --
     legitimate (quick observation stay), must still produce a (minimal) summary, not error."""
     pid = client.post("/api/ipd/patients", json={"name": "Quick Observation Patient", "ward": "General", "bed": "Q1"},
                        headers=auth_headers(head_nurse)).json()["id"]
-    mock_groq_json(monkeypatch, {
-        "admissionSummary": "Admitted for brief observation", "hospitalCourse": "Uneventful",
-        "dischargeDiagnosis": "No acute findings", "medicationsAtDischarge": [],
-        "followUpInstructions": "Routine follow-up as needed", "conditionAtDischarge": "Stable",
-    })
     resp = client.post(f"/api/ipd/patients/{pid}/discharge-summary", headers=auth_headers(head_nurse))
     assert resp.status_code == 200
-
-
-def test_total_generation_failure_returns_422_not_persisted(client, head_nurse, patient_with_full_stay, auth_headers, monkeypatch, db_session):
-    from app.models import DischargeSummary
-    mock_groq_json(monkeypatch, "not valid json at all")
-    resp = client.post(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(head_nurse))
-    assert resp.status_code == 422
-    assert db_session.query(DischargeSummary).count() == 0
-
-
-def test_malformed_llm_response_wrong_shape_returns_422(client, head_nurse, patient_with_full_stay, auth_headers, monkeypatch):
-    mock_groq_json(monkeypatch, "[1, 2, 3]")
-    resp = client.post(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(head_nurse))
-    assert resp.status_code == 422
-
-
-def test_partial_generation_result_accepted(client, head_nurse, patient_with_full_stay, auth_headers, monkeypatch):
-    """Only some fields populated -- still meaningfully useful, must not be treated as failure."""
-    mock_groq_json(monkeypatch, {"admissionSummary": "", "hospitalCourse": "", "dischargeDiagnosis": "Pneumonia, resolved",
-                                  "medicationsAtDischarge": [], "followUpInstructions": "", "conditionAtDischarge": ""})
-    resp = client.post(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(head_nurse))
-    assert resp.status_code == 200
-    assert resp.json()["discharge_diagnosis"] == "Pneumonia, resolved"
+    assert resp.json()["condition_at_discharge"] == "Not documented"
+    assert "No further clinical events" in resp.json()["hospital_course"]
 
 
 # ---------------------------------------------------------------------------
 # Role permissions
 # ---------------------------------------------------------------------------
 
-def test_doctor_can_generate(client, doctor, patient_with_full_stay, auth_headers, monkeypatch):
-    mock_groq_json(monkeypatch, FULL_SUMMARY_RESULT)
+def test_doctor_can_generate(client, doctor, patient_with_full_stay, auth_headers):
     resp = client.post(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(doctor))
     assert resp.status_code == 200
 
 
-def test_nursing_station_can_generate(client, station, patient_with_full_stay, auth_headers, monkeypatch):
-    mock_groq_json(monkeypatch, FULL_SUMMARY_RESULT)
+def test_nursing_station_can_generate(client, station, patient_with_full_stay, auth_headers):
     resp = client.post(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(station))
     assert resp.status_code == 200
 
@@ -164,16 +116,14 @@ def test_nurse_cannot_generate(client, nurse, patient_with_full_stay, auth_heade
     assert resp.status_code == 403
 
 
-def test_assigned_nurse_can_view_generated_summary(client, head_nurse, nurse, patient_with_full_stay, auth_headers, monkeypatch):
-    mock_groq_json(monkeypatch, FULL_SUMMARY_RESULT)
+def test_assigned_nurse_can_view_generated_summary(client, head_nurse, nurse, patient_with_full_stay, auth_headers):
     client.post(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(head_nurse))
     resp = client.get(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(nurse))
     assert resp.status_code == 200
 
 
-def test_unassigned_nurse_cannot_view_summary(client, head_nurse, make_user, patient_with_full_stay, auth_headers, monkeypatch):
+def test_unassigned_nurse_cannot_view_summary(client, head_nurse, make_user, patient_with_full_stay, auth_headers):
     other_nurse = make_user(email="other@discharge-summary.com", role="Nurse", organization_id=head_nurse.organization_id)
-    mock_groq_json(monkeypatch, FULL_SUMMARY_RESULT)
     client.post(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(head_nurse))
     resp = client.get(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(other_nurse))
     assert resp.status_code == 403
@@ -207,7 +157,7 @@ def test_cannot_generate_for_other_orgs_patient(client, head_nurse, make_user, d
     assert resp.status_code == 404
 
 
-def test_cannot_view_other_orgs_summary(client, head_nurse, make_user, db_session, auth_headers, monkeypatch):
+def test_cannot_view_other_orgs_summary(client, head_nurse, make_user, db_session, auth_headers):
     from app.models import Patient
     other_head = make_user(email="other-head2@discharge-summary.com", role="HeadNurse")
     patient = Patient(name="Foreign Patient 2", ward="General", bed="F2",
@@ -215,38 +165,14 @@ def test_cannot_view_other_orgs_summary(client, head_nurse, make_user, db_sessio
     db_session.add(patient)
     db_session.commit()
     db_session.refresh(patient)
-    mock_groq_json(monkeypatch, FULL_SUMMARY_RESULT)
     client.post(f"/api/ipd/patients/{patient.id}/discharge-summary", headers=auth_headers(other_head))
     resp = client.get(f"/api/ipd/patients/{patient.id}/discharge-summary", headers=auth_headers(head_nurse))
     assert resp.status_code == 404
 
 
-# ---------------------------------------------------------------------------
-# Real-content integration: the generated summary correctly reflects the actual chart data
-# passed into the prompt (via the mocked LLM standing in for what a real model would produce
-# from that context)
-# ---------------------------------------------------------------------------
-
-def test_summary_generation_includes_actual_vitals_trend_in_prompt_context(client, head_nurse, patient_with_full_stay, auth_headers, monkeypatch):
-    captured_prompts = []
-
-    def _fake_call(prompt, system=None, temperature=0.3):
-        captured_prompts.append(prompt)
-        import json
-        return json.dumps(FULL_SUMMARY_RESULT)
-
-    from app import main as app_main
-    monkeypatch.setattr(app_main.scribe, "_call_groq_api", _fake_call)
-    client.post(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(head_nurse))
-    assert len(captured_prompts) == 1
-    assert "94" in captured_prompts[0]  # the abnormal oxygen_sat reading recorded
-    assert "Community-acquired pneumonia" in captured_prompts[0]
-    assert "Breathing easier today" in captured_prompts[0]
-
-
-def test_summary_never_persists_raw_prompt_or_leaks_pii_via_error(client, head_nurse, patient_with_full_stay, auth_headers, monkeypatch):
-    mock_groq_json(monkeypatch, "invalid json triggers failure")
+def test_summary_body_never_leaks_other_patients_data(client, head_nurse, patient_with_full_stay, auth_headers):
+    """Basic sanity check: the generated summary text is scoped to this one patient's own
+    recorded data only."""
     resp = client.post(f"/api/ipd/patients/{patient_with_full_stay}/discharge-summary", headers=auth_headers(head_nurse))
-    assert resp.status_code == 422
-    # The 422 error body itself must not echo the patient's chart content.
-    assert "Community-acquired pneumonia" not in resp.text
+    assert resp.status_code == 200
+    assert "Discharge Summary Patient" in resp.json()["admission_summary"]

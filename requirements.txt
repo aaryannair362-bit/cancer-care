@@ -13,3 +13,9 @@ asyncpg==0.31.0
 psycopg2-binary==2.9.12
 rapidfuzz>=3.6.0
 metaphone>=0.6
+pypdf>=5.0.0
+PyMuPDF>=1.24.0
+Pillow>=10.0.0
+# Document OCR: pure pip install (torch/torchvision), no system package or Docker build step
+# required -- see ocr_service.py's module docstring for why this replaced pytesseract.
+easyocr>=1.7.2

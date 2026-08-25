@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Billing - Aivana HMS</title>
+<link rel="stylesheet" href="/static/css/shared.css" />
+</head>
+<body>
+<div class="app-shell">
+  <div class="topnav" id="topnav"></div>
+  <div class="page">
+    <div class="page-header"><div><h1>Billing</h1><p>Invoices, payments, refunds, and insurance/corporate claims.</p></div></div>
+
+    <div class="tabs">
+      <div class="tab tab--active" data-tab="invoices">Invoices</div>
+      <div class="tab" data-tab="catalog">Tariffs &amp; Packages</div>
+    </div>
+
+    <!-- Invoices -->
+    <div class="tab-panel tab-panel--active" id="panel-invoices">
+      <div class="grid grid--2">
+        <div class="card">
+          <div class="card-header"><h3>New Invoice</h3></div>
+          <form id="invoice-form" class="stack">
+            <div class="form-grid">
+              <div class="field"><label>Patient ID *</label><input type="number" id="inv-patient" required /></div>
+              <div class="field"><label>Consultation ID (optional)</label><input type="number" id="inv-consult" /></div>
+              <div class="field"><label>Payer type</label><select id="inv-payer"><option>Self</option><option>Insurance</option><option>Corporate</option></select></div>
+            </div>
+            <div class="form-actions"><button type="submit" class="btn btn--primary">Create Invoice</button></div>
+          </form>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>Filter</h3></div>
+          <div class="form-grid">
+            <div class="field"><label>Patient ID</label><input type="number" id="inv-filter-patient" /></div>
+            <div class="field"><label>Status</label>
+              <select id="inv-filter-status"><option value="">All</option><option>Draft</option><option>Finalized</option><option>PartiallyPaid</option><option>Paid</option><option>Refunded</option></select>
+            </div>
+          </div>
+          <button class="btn btn--secondary" id="inv-refresh-btn" type="button">Refresh</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>ID</th><th>Patient</th><th>Payer</th><th>Total</th><th>Balance Due</th><th>Status</th></tr></thead>
+            <tbody id="inv-rows"><tr><td colspan="6" class="table-empty">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Catalog -->
+    <div class="tab-panel" id="panel-catalog">
+      <div class="grid grid--2">
+        <div class="card">
+          <div class="card-header"><h3>Add Tariff</h3></div>
+          <form id="tariff-form" class="stack">
+            <div class="form-grid">
+              <div class="field"><label>Code *</label><input type="text" id="tar-code" required /></div>
+              <div class="field"><label>Name *</label><input type="text" id="tar-name" required /></div>
+              <div class="field"><label>Category *</label>
+                <select id="tar-category"><option>Consultation</option><option>BedDay</option><option>Procedure</option><option>Lab</option><option>Other</option></select>
+              </div>
+              <div class="field"><label>Unit price *</label><input type="number" step="0.01" min="0" id="tar-price" required /></div>
+            </div>
+            <div class="form-actions"><button type="submit" class="btn btn--primary">Add Tariff</button></div>
+          </form>
+          <div class="table-wrap"><table><thead><tr><th>Code</th><th>Name</th><th>Category</th><th>Price</th></tr></thead><tbody id="tariff-rows"></tbody></table></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>Add Package</h3></div>
+          <form id="package-form" class="stack">
+            <div class="field"><label>Name *</label><input type="text" id="pkg-name" required /></div>
+            <div class="field"><label>Description</label><textarea id="pkg-description" rows="2"></textarea></div>
+            <div class="field"><label>Price *</label><input type="number" step="0.01" min="0" id="pkg-price" required /></div>
+            <div class="form-actions"><button type="submit" class="btn btn--primary">Add Package</button></div>
+          </form>
+          <div class="table-wrap"><table><thead><tr><th>Name</th><th>Price</th></tr></thead><tbody id="package-rows"></tbody></table></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Invoice detail modal -->
+<div class="modal" id="invoice-modal">
+  <div class="modal__box modal__box--wide">
+    <div class="modal__header"><h3 id="invoice-modal-title"></h3><button class="modal__close" onclick="closeModal('invoice-modal')">&times;</button></div>
+    <div id="invoice-modal-body" class="stack"></div>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script>
+const user = Auth.requirePage(['Billing', 'Admin']);
+renderNav('billing');
+const isAdmin = user.role === 'Admin';
+
+qsa('.tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    qsa('.tab').forEach((t) => t.classList.remove('tab--active'));
+    qsa('.tab-panel').forEach((p) => p.classList.remove('tab-panel--active'));
+    tab.classList.add('tab--active');
+    document.getElementById(`panel-${tab.dataset.tab}`).classList.add('tab-panel--active');
+  });
+});
+
+let tariffsCache = [];
+let packagesCache = [];
+let preAuthCache = [];
+
+function preAuthStatusBadgeClass(status) {
+  if (status === 'Approved') return '';
+  if (status === 'Rejected') return 'badge--danger';
+  return 'badge--warn';
+}
+
+// ---- Tariffs & Packages ----
+document.getElementById('tariff-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await Api.post('/billing/tariffs', { code: qs('#tar-code').value.trim(), name: qs('#tar-name').value.trim(), category: qs('#tar-category').value, unit_price: Number(qs('#tar-price').value) });
+    toast('Tariff added', 'success');
+    e.target.reset();
+    loadTariffs();
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+async function loadTariffs() {
+  tariffsCache = await Api.get('/billing/tariffs').catch(() => []);
+  qs('#tariff-rows').innerHTML = tariffsCache.length ? tariffsCache.map((t) => `<tr><td class="mono">${escapeHtml(t.code)}</td><td>${escapeHtml(t.name)}</td><td>${escapeHtml(t.category)}</td><td class="num">${fmtMoney(t.unit_price)}</td></tr>`).join('') : '<tr><td colspan="4" class="table-empty">No tariffs</td></tr>';
+}
+
+document.getElementById('package-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await Api.post('/billing/packages', { name: qs('#pkg-name').value.trim(), description: qs('#pkg-description').value || null, price: Number(qs('#pkg-price').value) });
+    toast('Package added', 'success');
+    e.target.reset();
+    loadPackages();
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+async function loadPackages() {
+  packagesCache = await Api.get('/billing/packages').catch(() => []);
+  qs('#package-rows').innerHTML = packagesCache.length ? packagesCache.map((p) => `<tr><td>${escapeHtml(p.name)}</td><td class="num">${fmtMoney(p.price)}</td></tr>`).join('') : '<tr><td colspan="2" class="table-empty">No packages</td></tr>';
+}
+
+// ---- Invoices ----
+document.getElementById('invoice-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    const inv = await Api.post('/billing/invoices', {
+      patient_id: Number(qs('#inv-patient').value), consultation_id: qs('#inv-consult').value ? Number(qs('#inv-consult').value) : null,
+      payer_type: qs('#inv-payer').value,
+    });
+    toast(`Invoice #${inv.id} created`, 'success');
+    e.target.reset();
+    loadInvoices();
+    openInvoiceDetail(inv.id);
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+async function loadInvoices() {
+  const tbody = qs('#inv-rows');
+  tbody.innerHTML = '<tr><td colspan="6" class="table-empty">Loading...</td></tr>';
+  const params = new URLSearchParams();
+  if (qs('#inv-filter-patient').value) params.set('patient_id', qs('#inv-filter-patient').value);
+  if (qs('#inv-filter-status').value) params.set('status', qs('#inv-filter-status').value);
+  try {
+    const rows = await Api.get(`/billing/invoices${params.toString() ? `?${params}` : ''}`);
+    tbody.innerHTML = rows.length ? rows.map((inv) => `
+      <tr data-id="${inv.id}" style="cursor:pointer">
+        <td>#${inv.id}</td><td>#${inv.patient_id}</td><td>${escapeHtml(inv.payer_type)}</td>
+        <td class="num">${fmtMoney(inv.total_amount)}</td><td class="num">${fmtMoney(inv.balance_due)}</td>
+        <td><span class="badge${inv.status === 'Refunded' ? ' badge--muted' : ''}">${escapeHtml(inv.status)}</span></td>
+      </tr>`).join('') : '<tr><td colspan="6" class="table-empty">No invoices</td></tr>';
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+document.getElementById('inv-refresh-btn').addEventListener('click', loadInvoices);
+qs('#inv-rows').addEventListener('click', (e) => {
+  const row = e.target.closest('tr[data-id]');
+  if (row) openInvoiceDetail(row.dataset.id);
+});
+
+async function openInvoiceDetail(id) {
+  try {
+    const inv = await Api.get(`/billing/invoices/${id}`);
+    qs('#invoice-modal-title').textContent = `Invoice #${inv.id} - ${inv.status}`;
+    const isDraft = inv.status === 'Draft';
+    const canPay = inv.status === 'Finalized' || inv.status === 'PartiallyPaid';
+
+    // Pre-authorization only applies to Insurance payers (TPA search+pre-auth flow, see
+    // tpa.html) -- Corporate claims have no TPA step, matching billing.py.create_claim.
+    preAuthCache = inv.payer_type === 'Insurance'
+      ? await Api.get(`/pre-authorizations?patient_id=${inv.patient_id}`).catch(() => [])
+      : [];
+
+    const linesHtml = inv.lines.map((l) => `<tr><td>${escapeHtml(l.description)}</td><td>${escapeHtml(l.source_type)}</td><td class="num">${l.quantity}</td><td class="num">${fmtMoney(l.unit_price)}</td><td class="num">${fmtMoney(l.line_total)}</td></tr>`).join('') || '<tr><td colspan="5" class="table-empty">No lines yet</td></tr>';
+
+    const tariffOptions = tariffsCache.map((t) => `<option value="${t.id}">${escapeHtml(t.name)} (${fmtMoney(t.unit_price)})</option>`).join('');
+    const packageOptions = packagesCache.map((p) => `<option value="${p.id}">${escapeHtml(p.name)} (${fmtMoney(p.price)})</option>`).join('');
+    const bedDayTariffs = tariffsCache.filter((t) => t.category === 'BedDay').map((t) => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
+
+    qs('#invoice-modal-body').innerHTML = `
+      <div class="grid grid--4">
+        <div class="kpi"><div class="kpi__label">Subtotal</div><div class="kpi__value">${fmtMoney(inv.subtotal)}</div></div>
+        <div class="kpi"><div class="kpi__label">Discount</div><div class="kpi__value">${fmtMoney(inv.discount_amount)}</div></div>
+        <div class="kpi"><div class="kpi__label">Total</div><div class="kpi__value">${fmtMoney(inv.total_amount)}</div></div>
+        <div class="kpi"><div class="kpi__label">Balance Due</div><div class="kpi__value ${inv.balance_due > 0 ? 'kpi__value--warn' : ''}">${fmtMoney(inv.balance_due)}</div></div>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Description</th><th>Source</th><th>Qty</th><th>Unit</th><th>Total</th></tr></thead><tbody>${linesHtml}</tbody></table></div>
+
+      ${isDraft ? `
+      <div class="grid grid--3">
+        <form id="line-manual-form" class="stack card" style="padding:12px;">
+          <strong class="faint">Manual line</strong>
+          <input type="text" id="lm-desc" placeholder="Description" required />
+          <input type="number" id="lm-qty" placeholder="Qty" value="1" min="1" />
+          <input type="number" id="lm-price" placeholder="Unit price" step="0.01" min="0" required />
+          <button type="submit" class="btn btn--secondary btn--small">Add</button>
+        </form>
+        <form id="line-tariff-form" class="stack card" style="padding:12px;">
+          <strong class="faint">Tariff line</strong>
+          <select id="lt-tariff">${tariffOptions}</select>
+          <input type="number" id="lt-qty" placeholder="Qty" value="1" min="1" />
+          <button type="submit" class="btn btn--secondary btn--small">Add</button>
+        </form>
+        <form id="line-package-form" class="stack card" style="padding:12px;">
+          <strong class="faint">Package line</strong>
+          <select id="lp-package">${packageOptions}</select>
+          <button type="submit" class="btn btn--secondary btn--small">Add</button>
+        </form>
+      </div>
+      <div class="grid grid--2">
+        <form id="capture-pharmacy-form" class="stack card" style="padding:12px;">
+          <strong class="faint">Capture pharmacy charges</strong>
+          <input type="text" id="cp-ids" placeholder="Dispensing record IDs, comma-separated" />
+          <button type="submit" class="btn btn--secondary btn--small">Capture</button>
+        </form>
+        <form id="capture-bed-form" class="stack card" style="padding:12px;">
+          <strong class="faint">Capture bed-day charges</strong>
+          <select id="cb-tariff">${bedDayTariffs || '<option value="">No BedDay tariffs defined</option>'}</select>
+          <input type="number" id="cb-days" placeholder="Days" min="1" />
+          <button type="submit" class="btn btn--secondary btn--small">Capture</button>
+        </form>
+      </div>
+      ${isAdmin ? `
+      <form id="discount-form" class="stack card" style="padding:12px;">
+        <strong class="faint">Apply discount (Admin)</strong>
+        <div class="form-grid">
+          <input type="number" id="disc-amount" placeholder="Amount" step="0.01" min="0" />
+          <input type="text" id="disc-reason" placeholder="Reason" />
+        </div>
+        <button type="submit" class="btn btn--secondary btn--small">Apply</button>
+      </form>` : ''}
+      <div class="form-actions"><button class="btn btn--primary btn--small" id="finalize-invoice-btn">Finalize Invoice</button></div>
+      ` : ''}
+
+      ${canPay ? `
+      <form id="payment-form" class="stack card" style="padding:12px;">
+        <strong class="faint">Collect Payment</strong>
+        <div class="form-grid--3 form-grid">
+          <input type="number" id="pay-amount" placeholder="Amount" step="0.01" min="0" required />
+          <select id="pay-method"><option>Cash</option><option>Card</option><option>UPI</option><option>BankTransfer</option><option>Insurance</option></select>
+          <input type="text" id="pay-ref" placeholder="Reference #" />
+        </div>
+        <button type="submit" class="btn btn--primary btn--small">Collect</button>
+      </form>` : ''}
+
+      ${isAdmin && inv.amount_paid > inv.amount_refunded ? `
+      <form id="refund-form" class="stack card" style="padding:12px;">
+        <strong class="faint">Refund (Admin)</strong>
+        <div class="form-grid">
+          <input type="number" id="ref-amount" placeholder="Amount" step="0.01" min="0" required />
+          <input type="text" id="ref-reason" placeholder="Reason" required />
+        </div>
+        <button type="submit" class="btn btn--secondary btn--small">Refund</button>
+      </form>` : ''}
+
+      ${inv.payer_type === 'Insurance' ? `
+      <div class="card" style="padding:12px;">
+        <strong class="faint">Pre-Authorization (TPA)</strong>
+        <div class="table-wrap"><table><thead><tr><th>Request</th><th>Status</th><th>Submitted</th></tr></thead><tbody>
+          ${preAuthCache.length ? preAuthCache.map((p) => `
+            <tr><td>#${p.id}</td><td><span class="badge ${preAuthStatusBadgeClass(p.status)}">${escapeHtml(p.status)}</span></td><td>${fmtDateTime(p.submitted_at)}</td></tr>
+          `).join('') : '<tr><td colspan="3" class="table-empty">No pre-authorization submitted for this patient yet</td></tr>'}
+        </tbody></table></div>
+      </div>` : ''}
+
+      ${inv.payer_type !== 'Self' ? `<div id="claim-box" class="card" style="padding:12px;"><strong class="faint">Insurance / Corporate claim</strong><div id="claim-body">Loading...</div></div>` : ''}
+    `;
+
+    // wire draft-only forms
+    document.getElementById('line-manual-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try { await Api.post(`/billing/invoices/${id}/lines/manual`, { description: qs('#lm-desc').value.trim(), quantity: Number(qs('#lm-qty').value || 1), unit_price: Number(qs('#lm-price').value) }); openInvoiceDetail(id); }
+      catch (err) { toast(apiErrorMessage(err), 'danger'); }
+    });
+    document.getElementById('line-tariff-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try { await Api.post(`/billing/invoices/${id}/lines/tariff`, { tariff_id: Number(qs('#lt-tariff').value), quantity: Number(qs('#lt-qty').value || 1) }); openInvoiceDetail(id); }
+      catch (err) { toast(apiErrorMessage(err), 'danger'); }
+    });
+    document.getElementById('line-package-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try { await Api.post(`/billing/invoices/${id}/lines/package`, { package_id: Number(qs('#lp-package').value) }); openInvoiceDetail(id); }
+      catch (err) { toast(apiErrorMessage(err), 'danger'); }
+    });
+    document.getElementById('capture-pharmacy-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const ids = qs('#cp-ids').value.split(',').map((s) => s.trim()).filter(Boolean).map(Number);
+      if (!ids.length) { toast('Enter at least one dispensing record ID', 'info'); return; }
+      try { await Api.post(`/billing/invoices/${id}/capture-pharmacy`, { dispensing_record_ids: ids }); openInvoiceDetail(id); }
+      catch (err) { toast(apiErrorMessage(err), 'danger'); }
+    });
+    document.getElementById('capture-bed-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try { await Api.post(`/billing/invoices/${id}/capture-bed-days`, { tariff_id: Number(qs('#cb-tariff').value), days: Number(qs('#cb-days').value) }); openInvoiceDetail(id); }
+      catch (err) { toast(apiErrorMessage(err), 'danger'); }
+    });
+    document.getElementById('discount-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try { await Api.post(`/billing/invoices/${id}/discount`, { amount: Number(qs('#disc-amount').value), reason: qs('#disc-reason').value.trim() }); openInvoiceDetail(id); }
+      catch (err) { toast(apiErrorMessage(err), 'danger'); }
+    });
+    document.getElementById('finalize-invoice-btn')?.addEventListener('click', async () => {
+      try { await Api.post(`/billing/invoices/${id}/finalize`); toast('Invoice finalized', 'success'); loadInvoices(); openInvoiceDetail(id); }
+      catch (err) { toast(apiErrorMessage(err), 'danger'); }
+    });
+    document.getElementById('payment-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try { await Api.post(`/billing/invoices/${id}/payments`, { amount: Number(qs('#pay-amount').value), method: qs('#pay-method').value, reference_number: qs('#pay-ref').value || null }); toast('Payment collected', 'success'); loadInvoices(); openInvoiceDetail(id); }
+      catch (err) { toast(apiErrorMessage(err), 'danger'); }
+    });
+    document.getElementById('refund-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try { await Api.post(`/billing/invoices/${id}/refunds`, { amount: Number(qs('#ref-amount').value), reason: qs('#ref-reason').value.trim() }); toast('Refund issued', 'success'); loadInvoices(); openInvoiceDetail(id); }
+      catch (err) { toast(apiErrorMessage(err), 'danger'); }
+    });
+
+    // claim box (lazy)
+    const claimBody = qs('#claim-body');
+    if (claimBody) {
+      try {
+        const claim = await Api.get(`/billing/invoices/${id}/claim`);
+        const linkedPreAuth = claim.pre_authorization_id ? preAuthCache.find((p) => p.id === claim.pre_authorization_id) : null;
+        claimBody.innerHTML = `
+          <div class="flex-between"><span>${escapeHtml(claim.insurer_or_corporate_name)}</span><span class="badge">${escapeHtml(claim.status)}</span></div>
+          <div class="faint">Claim amount: ${fmtMoney(claim.claim_amount)}</div>
+          ${claim.pre_authorization_id ? `<div class="faint">Pre-authorization: #${claim.pre_authorization_id}${linkedPreAuth ? ` <span class="badge ${preAuthStatusBadgeClass(linkedPreAuth.status)}">${escapeHtml(linkedPreAuth.status)}</span>` : ''}</div>` : `<div class="faint">No pre-authorization linked</div>`}
+          <select id="claim-status-select">${['Submitted', 'Approved', 'Rejected', 'Settled'].map((s) => `<option ${s === claim.status ? 'selected' : ''}>${s}</option>`).join('')}</select>
+          <button class="btn btn--secondary btn--small" id="claim-status-btn">Update Status</button>`;
+        document.getElementById('claim-status-btn').addEventListener('click', async () => {
+          try { await Api.patch(`/billing/claims/${claim.id}/status`, { status: qs('#claim-status-select').value }); toast('Claim updated', 'success'); openInvoiceDetail(id); }
+          catch (err) { toast(apiErrorMessage(err), 'danger'); }
+        });
+      } catch (err) {
+        const approvedPreAuths = preAuthCache.filter((p) => p.status === 'Approved');
+        claimBody.innerHTML = `
+          <form id="claim-form" class="stack">
+            <input type="text" id="claim-name" placeholder="Insurer / corporate name" required />
+            <input type="text" id="claim-policy" placeholder="Policy / account number" />
+            <input type="number" id="claim-amount" placeholder="Claim amount" step="0.01" min="0" required />
+            ${approvedPreAuths.length ? `
+            <select id="claim-preauth">
+              <option value="">No pre-authorization link</option>
+              ${approvedPreAuths.map((p) => `<option value="${p.id}">Pre-authorization #${p.id} - Approved (${fmtDateTime(p.submitted_at)})</option>`).join('')}
+            </select>` : ''}
+            <button type="submit" class="btn btn--secondary btn--small">Submit Claim</button>
+          </form>`;
+        document.getElementById('claim-form').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const preAuthSelect = qs('#claim-preauth');
+          try {
+            await Api.post(`/billing/invoices/${id}/claim`, {
+              insurer_or_corporate_name: qs('#claim-name').value.trim(), policy_or_account_number: qs('#claim-policy').value || null,
+              claim_amount: Number(qs('#claim-amount').value), pre_authorization_id: preAuthSelect && preAuthSelect.value ? Number(preAuthSelect.value) : null,
+            });
+            toast('Claim submitted', 'success');
+            openInvoiceDetail(id);
+          } catch (err2) { toast(apiErrorMessage(err2), 'danger'); }
+        });
+      }
+    }
+
+    openModal('invoice-modal');
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+
+// ---- Init ----
+(async () => {
+  await loadTariffs();
+  await loadPackages();
+  loadInvoices();
+})();
+</script>
+</body>
+</html>

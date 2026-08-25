@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Pharmacy - Aivana HMS</title>
+<link rel="stylesheet" href="/static/css/shared.css" />
+</head>
+<body>
+<div class="app-shell">
+  <div class="topnav" id="topnav"></div>
+  <div class="page">
+    <div class="page-header"><div><h1>Pharmacy</h1><p>Formulary, dispensing, and the controlled-drug register.</p></div></div>
+
+    <div class="tabs">
+      <div class="tab tab--active" data-tab="formulary">Formulary</div>
+      <div class="tab" data-tab="pending">Pending Prescriptions</div>
+      <div class="tab" data-tab="dispense">Dispense</div>
+      <div class="tab" data-tab="records">Dispensing Records</div>
+      <div class="tab" data-tab="controlled">Controlled Register</div>
+      <div class="tab" data-tab="expiry">Expiry Alerts</div>
+    </div>
+
+    <!-- Formulary -->
+    <div class="tab-panel tab-panel--active" id="panel-formulary">
+      <div class="grid grid--2">
+        <div class="card">
+          <div class="card-header"><h3>Add Drug</h3></div>
+          <form id="drug-form" class="stack">
+            <div class="form-grid">
+              <div class="field"><label>Name *</label><input type="text" id="d-name" required /></div>
+              <div class="field"><label>Unit price *</label><input type="number" step="0.01" min="0" id="d-price" required /></div>
+              <div class="field"><label>Form</label><input type="text" id="d-form" placeholder="Tablet / Syrup..." /></div>
+              <div class="field"><label>Strength</label><input type="text" id="d-strength" placeholder="500mg" /></div>
+              <div class="field"><label>Barcode</label><input type="text" id="d-barcode" /></div>
+              <div class="field"><label>Reorder level</label><input type="number" min="0" id="d-reorder" value="0" /></div>
+            </div>
+            <div class="field field--row"><input type="checkbox" id="d-controlled" /><label for="d-controlled">Controlled substance (NDPS)</label></div>
+            <div class="form-actions"><button type="submit" class="btn btn--primary">Add Drug</button></div>
+          </form>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>Formulary</h3></div>
+          <div class="field--row search-bar">
+            <input type="text" id="drug-search" placeholder="Search drug name" />
+            <button class="btn btn--secondary btn--small" id="drug-search-btn" type="button">Search</button>
+            <label class="flex" style="white-space:nowrap;"><input type="checkbox" id="drug-low-stock" /> Low stock only</label>
+          </div>
+          <div class="table-wrap">
+            <table><thead><tr><th>Name</th><th>Form/Strength</th><th>Price</th><th>On Hand</th></tr></thead><tbody id="drug-rows"><tr><td colspan="4" class="table-empty">Loading...</td></tr></tbody></table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pending Prescriptions -->
+    <div class="tab-panel" id="panel-pending">
+      <div class="card">
+        <div class="card-header">
+          <h3>Recent Prescriptions</h3>
+          <div class="field--row">
+            <select id="pending-days"><option value="1">Last 24h</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option></select>
+            <button class="btn btn--secondary btn--small" id="pending-refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="stack" id="pending-list"><div class="faint">Loading...</div></div>
+      </div>
+    </div>
+
+    <!-- Dispense -->
+    <div class="tab-panel" id="panel-dispense">
+      <div class="grid grid--2">
+        <div class="card">
+          <div class="card-header"><h3>Dispense</h3></div>
+          <form id="dispense-form" class="stack">
+            <div class="field"><label>Drug *</label><select id="disp-drug" required></select></div>
+            <div class="form-grid">
+              <div class="field"><label>Quantity *</label><input type="number" min="1" id="disp-qty" required /></div>
+              <div class="field"><label>Patient ID</label><input type="number" id="disp-patient" /></div>
+              <div class="field"><label>Consultation ID</label><input type="number" id="disp-consult" /></div>
+              <div class="field"><label>Prescriber ID</label><input type="number" id="disp-prescriber" /></div>
+            </div>
+            <div class="field"><label>Counselling notes</label><textarea id="disp-notes" rows="2"></textarea></div>
+            <div class="form-actions"><button type="submit" class="btn btn--primary">Dispense</button></div>
+          </form>
+          <div id="dispense-result" class="stack"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>Refill</h3></div>
+          <form id="refill-form" class="stack">
+            <div class="field"><label>Original dispensing record ID *</label><input type="number" id="refill-id" required /></div>
+            <div class="field"><label>Quantity (blank = same as original)</label><input type="number" min="1" id="refill-qty" /></div>
+            <div class="field"><label>Counselling notes</label><textarea id="refill-notes" rows="2"></textarea></div>
+            <div class="form-actions"><button type="submit" class="btn btn--primary">Refill</button></div>
+          </form>
+          <div id="refill-result" class="stack"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Records -->
+    <div class="tab-panel" id="panel-records">
+      <div class="card">
+        <div class="field--row search-bar">
+          <input type="number" id="rec-filter-patient" placeholder="Patient ID" />
+          <input type="number" id="rec-filter-drug" placeholder="Drug ID" />
+          <button class="btn btn--secondary" id="rec-filter-btn" type="button">Filter</button>
+        </div>
+        <div class="table-wrap">
+          <table><thead><tr><th>When</th><th>Drug</th><th>Qty</th><th>Amount</th><th>Patient</th><th>Refill of</th></tr></thead><tbody id="rec-rows"><tr><td colspan="6" class="table-empty">Loading...</td></tr></tbody></table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Controlled Register -->
+    <div class="tab-panel" id="panel-controlled">
+      <div class="card">
+        <div class="field--row" style="max-width:260px;">
+          <input type="number" id="ctl-filter-drug" placeholder="Filter by drug ID (optional)" />
+          <button class="btn btn--secondary" id="ctl-filter-btn" type="button">Load</button>
+        </div>
+      </div>
+      <div id="ctl-ledger" class="stack"></div>
+    </div>
+
+    <!-- Expiry Alerts -->
+    <div class="tab-panel" id="panel-expiry">
+      <div class="card">
+        <div class="field--row search-bar" style="max-width:220px;">
+          <select id="expiry-days"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select>
+          <button class="btn btn--secondary" id="expiry-refresh">Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table><thead><tr><th>Drug</th><th>Batch</th><th>Qty</th><th>Expires</th><th>Location</th></tr></thead><tbody id="expiry-rows"><tr><td colspan="5" class="table-empty">Loading...</td></tr></tbody></table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Drug detail modal -->
+<div class="modal" id="drug-modal">
+  <div class="modal__box modal__box--wide">
+    <div class="modal__header"><h3 id="drug-modal-title"></h3><button class="modal__close" onclick="closeModal('drug-modal')">&times;</button></div>
+    <div id="drug-modal-body" class="stack"></div>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script>
+Auth.requirePage(['Pharmacist', 'Admin']);
+renderNav('pharmacy');
+
+qsa('.tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    qsa('.tab').forEach((t) => t.classList.remove('tab--active'));
+    qsa('.tab-panel').forEach((p) => p.classList.remove('tab-panel--active'));
+    tab.classList.add('tab--active');
+    document.getElementById(`panel-${tab.dataset.tab}`).classList.add('tab-panel--active');
+  });
+});
+
+// ---- Formulary ----
+document.getElementById('drug-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await Api.post('/pharmacy/drugs', {
+      name: qs('#d-name').value.trim(), unit_price: Number(qs('#d-price').value),
+      form: qs('#d-form').value || null, strength: qs('#d-strength').value || null,
+      barcode: qs('#d-barcode').value || null, reorder_level: Number(qs('#d-reorder').value || 0),
+      is_controlled: qs('#d-controlled').checked,
+    });
+    toast('Drug added to formulary', 'success');
+    e.target.reset();
+    loadDrugs();
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+async function loadDrugs() {
+  const tbody = qs('#drug-rows');
+  tbody.innerHTML = '<tr><td colspan="4" class="table-empty">Loading...</td></tr>';
+  const search = qs('#drug-search').value.trim();
+  const lowStock = qs('#drug-low-stock').checked;
+  const params = new URLSearchParams();
+  if (search) params.set('search', search);
+  if (lowStock) params.set('low_stock', 'true');
+  try {
+    const drugs = await Api.get(`/pharmacy/drugs${params.toString() ? `?${params}` : ''}`);
+    if (!drugs.length) { tbody.innerHTML = '<tr><td colspan="4" class="table-empty">No drugs found</td></tr>'; return; }
+    tbody.innerHTML = drugs.map((d) => `
+      <tr data-id="${d.id}" style="cursor:pointer">
+        <td>${escapeHtml(d.name)}${d.is_controlled ? ' <span class="badge badge--warn">Controlled</span>' : ''}</td>
+        <td>${escapeHtml(d.form || '-')} ${escapeHtml(d.strength || '')}</td>
+        <td class="num">${fmtMoney(d.unit_price)}</td>
+        <td class="num">${d.quantity_on_hand}${d.quantity_on_hand <= d.reorder_level ? ' <span class="badge badge--danger">Low</span>' : ''}</td>
+      </tr>`).join('');
+    populateDrugSelect(drugs);
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+document.getElementById('drug-search-btn').addEventListener('click', loadDrugs);
+document.getElementById('drug-low-stock').addEventListener('change', loadDrugs);
+qs('#drug-rows').addEventListener('click', (e) => {
+  const row = e.target.closest('tr[data-id]');
+  if (row) openDrugDetail(row.dataset.id);
+});
+
+async function populateDrugSelect(drugs) {
+  const select = qs('#disp-drug');
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML = drugs.map((d) => `<option value="${d.id}">${escapeHtml(d.name)} ${escapeHtml(d.form || '')} ${escapeHtml(d.strength || '')} (on hand: ${d.quantity_on_hand})</option>`).join('');
+  if (current) select.value = current;
+}
+
+async function openDrugDetail(id) {
+  try {
+    const d = await Api.get(`/pharmacy/drugs/${id}`);
+    qs('#drug-modal-title').textContent = `${d.name} ${d.form || ''} ${d.strength || ''}`;
+    qs('#drug-modal-body').innerHTML = `
+      <div class="grid grid--2">
+        <div class="field"><label>Unit price</label><input type="number" step="0.01" id="edit-price" value="${d.unit_price}" /></div>
+        <div class="field"><label>Reorder level</label><input type="number" id="edit-reorder" value="${d.reorder_level}" /></div>
+      </div>
+      <div class="form-actions"><button class="btn btn--secondary btn--small" id="save-drug-btn">Save Changes</button></div>
+      <h4>Receive Batch</h4>
+      <form id="batch-form" class="form-grid">
+        <div class="field"><label>Batch number</label><input type="text" id="b-number" /></div>
+        <div class="field"><label>Quantity *</label><input type="number" min="1" id="b-qty" required /></div>
+        <div class="field"><label>Expiry date *</label><input type="date" id="b-expiry" required /></div>
+        <div class="form-actions" style="grid-column: 1 / -1;"><button type="submit" class="btn btn--primary btn--small">Receive Batch</button></div>
+      </form>
+      <h4>Batches</h4>
+      <div class="table-wrap"><table><thead><tr><th>Batch</th><th>On Hand</th><th>Expiry</th><th>Location</th></tr></thead><tbody>
+        ${d.batches.map((b) => `<tr><td>${escapeHtml(b.batch_number || '-')}</td><td class="num">${b.quantity_on_hand}</td><td>${fmtDate(b.expiry_date)}${b.is_expired ? ' <span class="badge badge--danger">Expired</span>' : ''}</td><td>${escapeHtml(b.location)}</td></tr>`).join('') || '<tr><td colspan="4" class="table-empty">No batches</td></tr>'}
+      </tbody></table></div>
+    `;
+    document.getElementById('save-drug-btn').addEventListener('click', async () => {
+      try {
+        await Api.patch(`/pharmacy/drugs/${id}`, { unit_price: Number(qs('#edit-price').value), reorder_level: Number(qs('#edit-reorder').value) });
+        toast('Drug updated', 'success');
+        loadDrugs();
+        openDrugDetail(id);
+      } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+    });
+    document.getElementById('batch-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        await Api.post(`/pharmacy/drugs/${id}/batches`, { batch_number: qs('#b-number').value || null, received_quantity: Number(qs('#b-qty').value), expiry_date: qs('#b-expiry').value });
+        toast('Batch received', 'success');
+        loadDrugs();
+        openDrugDetail(id);
+      } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+    });
+    openModal('drug-modal');
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+
+// ---- Pending Prescriptions (Prescription Receipt) ----
+async function loadPending() {
+  const box = qs('#pending-list');
+  box.innerHTML = '<div class="faint">Loading...</div>';
+  try {
+    const rows = await Api.get(`/pharmacy/pending-prescriptions?days=${qs('#pending-days').value}`);
+    if (!rows.length) { box.innerHTML = '<div class="empty-state">No pending prescriptions</div>'; return; }
+    box.innerHTML = rows.map((c) => `
+      <div class="card" style="padding:12px;">
+        <div class="flex-between">
+          <div><strong>${escapeHtml(c.patient_name || 'Patient')}</strong> <span class="faint">${escapeHtml(c.case_id)} - ${fmtDateTime(c.created_at)}</span></div>
+        </div>
+        <div class="stack">
+          ${c.medications.map((m) => `
+            <div class="flex-between">
+              <span>${escapeHtml(m.drug_name)}${m.dose ? ` ${escapeHtml(m.dose)}` : ''}${m.frequency ? ` - ${escapeHtml(m.frequency)}` : ''}${!m.in_formulary ? ' <span class="badge badge--warn">Not in formulary</span>' : ''}</span>
+              <span class="flex">
+                <span class="badge${m.status === 'Dispensed' ? '' : ' badge--muted'}">${escapeHtml(m.status)}</span>
+                ${m.in_formulary && m.status !== 'Dispensed' ? `<button type="button" class="btn btn--secondary btn--small" data-quick-dispense data-drug-id="${m.drug_id}" data-patient-id="${c.patient_id || ''}" data-consult-id="${c.consultation_id}">Dispense</button>` : ''}
+              </span>
+            </div>`).join('')}
+        </div>
+      </div>`).join('');
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+document.getElementById('pending-refresh').addEventListener('click', loadPending);
+qs('#pending-list').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-quick-dispense]');
+  if (!btn) return;
+  qsa('.tab').forEach((t) => t.classList.remove('tab--active'));
+  qsa('.tab-panel').forEach((p) => p.classList.remove('tab-panel--active'));
+  qs('.tab[data-tab="dispense"]').classList.add('tab--active');
+  qs('#panel-dispense').classList.add('tab-panel--active');
+  qs('#disp-drug').value = btn.dataset.drugId;
+  qs('#disp-patient').value = btn.dataset.patientId || '';
+  qs('#disp-consult').value = btn.dataset.consultId || '';
+  qs('#disp-qty').focus();
+});
+
+// ---- Dispense ----
+document.getElementById('dispense-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    const result = await Api.post('/pharmacy/dispense', {
+      drug_id: Number(qs('#disp-drug').value), quantity: Number(qs('#disp-qty').value),
+      patient_id: qs('#disp-patient').value ? Number(qs('#disp-patient').value) : null,
+      consultation_id: qs('#disp-consult').value ? Number(qs('#disp-consult').value) : null,
+      prescriber_id: qs('#disp-prescriber').value ? Number(qs('#disp-prescriber').value) : null,
+      counselling_notes: qs('#disp-notes').value || null,
+    });
+    toast(`Dispensed - total ${fmtMoney(result.total_amount)}`, 'success');
+    qs('#dispense-result').innerHTML = result.lines.map((l) => `<div class="flex-between"><span>Batch #${l.batch_id}: ${l.quantity} units</span><span>${fmtMoney(l.total_amount)}</span></div>`).join('');
+    e.target.reset();
+    loadDrugs();
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+document.getElementById('refill-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    const result = await Api.post(`/pharmacy/refill/${qs('#refill-id').value}`, {
+      quantity: qs('#refill-qty').value ? Number(qs('#refill-qty').value) : null,
+      counselling_notes: qs('#refill-notes').value || null,
+    });
+    toast(`Refilled - total ${fmtMoney(result.total_amount)}`, 'success');
+    qs('#refill-result').innerHTML = result.lines.map((l) => `<div class="flex-between"><span>Batch #${l.batch_id}: ${l.quantity} units</span><span>${fmtMoney(l.total_amount)}</span></div>`).join('');
+    e.target.reset();
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+// ---- Dispensing Records ----
+async function loadRecords() {
+  const tbody = qs('#rec-rows');
+  const patientId = qs('#rec-filter-patient').value;
+  const drugId = qs('#rec-filter-drug').value;
+  const params = new URLSearchParams();
+  if (patientId) params.set('patient_id', patientId);
+  if (drugId) params.set('drug_id', drugId);
+  tbody.innerHTML = '<tr><td colspan="6" class="table-empty">Loading...</td></tr>';
+  try {
+    const rows = await Api.get(`/pharmacy/dispensing-records${params.toString() ? `?${params}` : ''}`);
+    tbody.innerHTML = rows.length ? rows.map((r) => `
+      <tr>
+        <td>${fmtDateTime(r.dispensed_at)}</td><td>#${r.drug_id}</td><td class="num">${r.quantity}</td>
+        <td class="num">${fmtMoney(r.total_amount)}</td><td>${r.patient_id ? `#${r.patient_id}` : '-'}</td>
+        <td>${r.refill_of_id ? `#${r.refill_of_id}` : '-'}</td>
+      </tr>`).join('') : '<tr><td colspan="6" class="table-empty">No records</td></tr>';
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+document.getElementById('rec-filter-btn').addEventListener('click', loadRecords);
+
+// ---- Controlled Register ----
+document.getElementById('ctl-filter-btn').addEventListener('click', async () => {
+  const drugId = qs('#ctl-filter-drug').value;
+  const box = qs('#ctl-ledger');
+  box.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const ledger = await Api.get(`/pharmacy/controlled-drug-register${drugId ? `?drug_id=${drugId}` : ''}`);
+    if (!ledger.length) { box.innerHTML = '<div class="empty-state">No controlled drugs found</div>'; return; }
+    box.innerHTML = ledger.map((entry) => `
+      <div class="card">
+        <div class="card-header"><h3>${escapeHtml(entry.drug_name)}</h3><span class="badge">Balance: ${entry.current_balance}</span></div>
+        <div class="table-wrap"><table><thead><tr><th>When</th><th>Type</th><th>Qty</th><th>Running Balance</th></tr></thead><tbody>
+          ${entry.entries.map((ev) => `<tr><td>${fmtDateTime(ev.at)}</td><td>${escapeHtml(ev.type)}</td><td class="num">${ev.quantity}</td><td class="num">${ev.running_balance}</td></tr>`).join('')}
+        </tbody></table></div>
+      </div>`).join('');
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+// ---- Expiry Alerts ----
+async function loadExpiry() {
+  const tbody = qs('#expiry-rows');
+  tbody.innerHTML = '<tr><td colspan="5" class="table-empty">Loading...</td></tr>';
+  try {
+    const rows = await Api.get(`/pharmacy/expiry-alerts?days=${qs('#expiry-days').value}`);
+    tbody.innerHTML = rows.length ? rows.map((b) => `
+      <tr><td>${escapeHtml(b.drug_name)} ${escapeHtml(b.drug_strength || '')}</td><td>${escapeHtml(b.batch_number || '-')}</td>
+      <td class="num">${b.quantity_on_hand}</td><td>${fmtDate(b.expiry_date)}</td><td>${escapeHtml(b.location)}</td></tr>
+    `).join('') : '<tr><td colspan="5" class="table-empty">No batches expiring soon</td></tr>';
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+document.getElementById('expiry-refresh').addEventListener('click', loadExpiry);
+
+// ---- Init ----
+loadDrugs();
+loadPending();
+loadRecords();
+loadExpiry();
+</script>
+</body>
+</html>

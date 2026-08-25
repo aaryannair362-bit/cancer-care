@@ -23,6 +23,12 @@ ADDITIVE_COLUMNS = [
     ("tasks", "source", "VARCHAR(20) DEFAULT 'Manual'"),
     ("tasks", "consultation_id", "INTEGER"),
     ("consultations", "finalized_at", "TIMESTAMP"),
+    ("patients", "admission_type", "VARCHAR(20) DEFAULT 'IPD'"),
+    ("patients", "allergies", "JSON"),
+    ("patients", "status", "VARCHAR(20) DEFAULT 'Active'"),
+    ("consultations", "objective_findings", "TEXT"),
+    ("consultations", "allergy_warnings", "JSON"),
+    ("billing_claims", "pre_authorization_id", "INTEGER"),
 ]
 
 

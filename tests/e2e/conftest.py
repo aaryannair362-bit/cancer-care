@@ -1,23 +1,19 @@
 """
 Fixtures for real-browser (Playwright) end-to-end tests. These drive the actual
 frontend/*.html + JS against a real listening HTTP server (Playwright cannot talk to an
-in-process ASGI TestClient), which is the only way to catch pure-frontend bugs like a `const`
-being reassigned in apiRequest() -- something no backend-only pytest test can ever exercise.
+in-process ASGI TestClient), which is the only way to catch pure-frontend bugs -- broken
+element wiring, a JS reference error, a form that posts the wrong field name -- that no
+backend-only pytest test can ever exercise.
 
 Reuses the SAME already-imported `app.main` module (and its throwaway SQLite engine) that the
-top-level tests/conftest.py set up -- Python caches that import, so there is no way to get a
+top-level tests/conftest.py sets up -- Python caches that import, so there is no way to get a
 second independently-configured copy within one pytest process, and there's no need to: the
 top-level `_clean_database` autouse fixture already resets tables before every test, e2e
 included.
-
-The actual "simulate voice input" mechanics (mock MediaRecorder, canned-transcript queuing,
-token minting, live server bootstrap) live in tests/_voice_helpers.py, shared with the
-standalone scale-test runner (tests/scale/runner.py) so there's exactly one implementation of
-each -- re-exported here for the existing test files that import them from this module.
 """
 import pytest
 
-from tests._voice_helpers import (  # noqa: F401  (re-exported for existing e2e test imports)
+from tests._voice_helpers import (  # noqa: F401 - compatibility re-exports
     MOCK_MEDIA_RECORDER_INIT_SCRIPT,
     mint_tokens,
     mock_transcription_network_failure,
@@ -45,9 +41,8 @@ def browser_context_args(browser_context_args):
 
 @pytest.fixture
 def js_page(page):
-    """A Playwright `page` with MediaRecorder/getUserMedia mocked before any script runs,
-    and JS errors captured so tests can assert the app never throws (that's exactly the class
-    of bug this suite exists to catch)."""
+    """A Playwright `page` with JS errors captured so tests can assert the app never throws
+    -- exactly the class of bug this suite exists to catch."""
     page.add_init_script(MOCK_MEDIA_RECORDER_INIT_SCRIPT)
     errors = []
     page.on("pageerror", lambda exc: errors.append(str(exc)))
@@ -56,18 +51,62 @@ def js_page(page):
 
 
 def mint_expired_access_token(user):
-    """An access token whose `exp` is already in the past, so the very first API call the
-    page makes triggers apiRequest()'s 401 -> refresh path -- deterministic, no real waiting
-    for the (15-minute default) ACCESS_TOKEN_EXPIRE_MINUTES to elapse."""
+    """Mint an already-expired access token to exercise the refresh path."""
     from datetime import datetime, timedelta
+
     from jose import jwt as jose_jwt
+
     from app.config import settings
 
     token_data = {
-        "user_id": user.id, "email": user.email, "role": user.role,
+        "user_id": user.id,
+        "email": user.email,
+        "role": user.role,
         "organization_id": user.organization_id,
     }
     return jose_jwt.encode(
         {**token_data, "exp": datetime.utcnow() - timedelta(minutes=1), "type": "access"},
-        settings.SECRET_KEY, algorithm=settings.ALGORITHM,
+        settings.SECRET_KEY,
+        algorithm=settings.ALGORITHM,
     )
+
+
+def login_as(page, base_url, user, landing_path=None):
+    """
+    Signs `user` in without driving the actual login form (deterministic, no dependency on
+    password-complexity fixtures) by minting real tokens and seeding the exact localStorage
+    shape frontend/js/api.js's Auth helper expects: access_token/refresh_token plus hms_user
+    (id/email/role/organization_id), matching what a real POST /api/auth/login response's
+    `user` object contains. Then navigates to `landing_path` (defaults to that role's home
+    page, mirroring index.html's own post-login redirect).
+    """
+    tokens = mint_tokens(user)
+    page.goto(f"{base_url}/index.html")
+    page.evaluate(
+        """([access, refresh, hmsUser]) => {
+            localStorage.setItem('access_token', access);
+            localStorage.setItem('refresh_token', refresh);
+            localStorage.setItem('hms_user', JSON.stringify(hmsUser));
+        }""",
+        [
+            tokens["access_token"],
+            tokens["refresh_token"],
+            {"id": user.id, "email": user.email, "role": user.role, "organization_id": user.organization_id},
+        ],
+    )
+    path = landing_path or _home_for(user.role)
+    page.goto(f"{base_url}{path}")
+    return page
+
+
+def _home_for(role: str) -> str:
+    return {
+        "Admin": "/admin.html",
+        "Doctor": "/opd.html",
+        "HeadNurse": "/headnurse.html",
+        "Nurse": "/ipd.html",
+        "NursingStation": "/frontdesk.html",
+        "Pharmacist": "/pharmacy.html",
+        "Billing": "/billing.html",
+        "TPA": "/tpa.html",
+    }.get(role, "/index.html")

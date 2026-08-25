@@ -33,10 +33,31 @@
             <button type="submit" class="btn-primary">Sign In</button>
             <div id="login-error" class="error"></div>
         </form>
+        <div style="margin-top: 24px; padding-top: 18px; border-top: 1px solid #E6E7E2;">
+            <a href="/cca_os.html" style="display: block; width: 100%; padding: 12px; background: linear-gradient(135deg, #06b6d4, #0284c7); border-radius: 10px; color: #ffffff; text-decoration: none; font-size: 13px; font-weight: 700; text-align: center; box-shadow: 0 4px 12px rgba(6, 182, 212, 0.3);">
+                🎗️ AIvana CCA Oncology OS
+            </a>
+            <p style="font-size: 11px; color: #667169; text-align: center; margin-top: 6px;">Sign in with a CCA role account above -- this link now requires login.</p>
+            
+            <div style="margin-top: 16px;">
+                <p style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #667169; margin-bottom: 8px; text-align: center;">Direct Clinical & Operations Portals</p>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                    <a href="/frontdesk.html" style="padding: 8px 10px; background: #F3F2EE; border-radius: 8px; color: #1C2621; text-decoration: none; font-size: 12px; font-weight: 500; text-align: center; border: 1px solid #E6E7E2;">🏥 Frontdesk</a>
+                    <a href="/opd.html" style="padding: 8px 10px; background: #F3F2EE; border-radius: 8px; color: #1C2621; text-decoration: none; font-size: 12px; font-weight: 500; text-align: center; border: 1px solid #E6E7E2;">👨‍⚕️ Doctor OPD</a>
+                    <a href="/ipd.html" style="padding: 8px 10px; background: #F3F2EE; border-radius: 8px; color: #1C2621; text-decoration: none; font-size: 12px; font-weight: 500; text-align: center; border: 1px solid #E6E7E2;">🛌 IPD Wards</a>
+                    <a href="/headnurse.html" style="padding: 8px 10px; background: #F3F2EE; border-radius: 8px; color: #1C2621; text-decoration: none; font-size: 12px; font-weight: 500; text-align: center; border: 1px solid #E6E7E2;">👩‍⚕️ Head Nurse</a>
+                    <a href="/billing.html" style="padding: 8px 10px; background: #F3F2EE; border-radius: 8px; color: #1C2621; text-decoration: none; font-size: 12px; font-weight: 500; text-align: center; border: 1px solid #E6E7E2;">💳 Billing</a>
+                    <a href="/tpa.html" style="padding: 8px 10px; background: #F3F2EE; border-radius: 8px; color: #1C2621; text-decoration: none; font-size: 12px; font-weight: 500; text-align: center; border: 1px solid #E6E7E2;">🏢 TPA Pre-Auth</a>
+                    <a href="/pharmacy.html" style="padding: 8px 10px; background: #F3F2EE; border-radius: 8px; color: #1C2621; text-decoration: none; font-size: 12px; font-weight: 500; text-align: center; border: 1px solid #E6E7E2;">💊 Pharmacy</a>
+                    <a href="/inventory.html" style="padding: 8px 10px; background: #F3F2EE; border-radius: 8px; color: #1C2621; text-decoration: none; font-size: 12px; font-weight: 500; text-align: center; border: 1px solid #E6E7E2;">📦 Inventory</a>
+                    <a href="/admin.html" style="grid-column: span 2; padding: 8px 10px; background: #F3F2EE; border-radius: 8px; color: #1C2621; text-decoration: none; font-size: 12px; font-weight: 500; text-align: center; border: 1px solid #E6E7E2;">⚙️ Hospital Admin</a>
+                </div>
+            </div>
+        </div>
     </div>
 </div>
+<script src="/static/js/api.js"></script>
 <script>
-const API_BASE = '/api';
 document.getElementById('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const email = document.getElementById('login-email').value;
@@ -54,24 +75,20 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
             errorEl.textContent = data.detail || 'Login failed';
             return;
         }
-        localStorage.setItem('access_token', data.access_token);
-        localStorage.setItem('refresh_token', data.refresh_token);
-        const role = data.user.role;
-        if (role === 'Admin') {
-            window.location.href = '/admin.html';
-        } else if (role === 'Doctor') {
-            window.location.href = '/opd.html';
-        } else if (role === 'HeadNurse') {
-            window.location.href = '/headnurse.html';
-        } else if (role === 'Nurse' || role === 'NursingStation') {
-            window.location.href = '/ipd.html';
-        } else {
-            window.location.href = '/opd.html';
-        }
+        // Regression fix: this used to only store access_token/refresh_token, never the
+        // 'hms_user' key every Auth.requirePage()-gated page (pharmacy/billing/inventory/
+        // frontdesk/tpa/cca_os) reads via Auth.getUser() -- meaning every one of those pages
+        // was unreachable after a real login (Auth.getUser() always returned null, so
+        // requirePage() always redirected straight back here). Also replaces the hardcoded,
+        // separately-maintained role->page redirect chain (which never knew about the CCA
+        // Oncology OS roles at all) with api.js's single ROLE_HOME source of truth.
+        Auth.setSession(data.access_token, data.refresh_token, data.user);
+        window.location.href = Auth.homeFor(data.user.role);
     } catch(err) {
         errorEl.textContent = 'Network error';
     }
 });
 </script>
+
 </body>
 </html>

@@ -1,0 +1,121 @@
+<div id="aivana-flow">
+  <style>
+    #aivana-flow { color: var(--foreground); font-family: inherit; }
+    #aivana-flow .af-head { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; margin-bottom:14px; flex-wrap:wrap; }
+    #aivana-flow .af-head h1 { margin:0; }
+    #aivana-flow .af-head p { margin:4px 0 0; color:var(--muted-foreground); }
+    #aivana-flow .af-controls { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:18px; }
+    #aivana-flow .af-stage { position:relative; }
+    #aivana-flow .af-lane { display:grid; grid-template-columns:128px 1fr; gap:14px; align-items:start; margin:0 0 18px; }
+    #aivana-flow .af-lane-title { display:flex; align-items:center; gap:7px; padding-top:11px; color:var(--muted-foreground); font-weight:500; }
+    #aivana-flow .af-track { display:grid; grid-template-columns:repeat(6,minmax(115px,1fr)); gap:20px; align-items:stretch; }
+    #aivana-flow .af-node { position:relative; min-height:82px; padding:11px; background:color-mix(in srgb,var(--viz-series-1) 10%,transparent); border-radius:10px; display:flex; flex-direction:column; justify-content:center; transition:opacity .18s ease, transform .18s ease; }
+    #aivana-flow .af-node::after { content:'→'; position:absolute; right:-17px; top:50%; transform:translateY(-50%); color:var(--muted-foreground); }
+    #aivana-flow .af-node:last-child::after { display:none; }
+    #aivana-flow .af-node strong { font-weight:500; }
+    #aivana-flow .af-node span { color:var(--muted-foreground); margin-top:4px; }
+    #aivana-flow .af-node[data-kind="clinical"] { background:color-mix(in srgb,var(--viz-series-2) 12%,transparent); }
+    #aivana-flow .af-node[data-kind="ai"] { background:color-mix(in srgb,var(--viz-series-3) 12%,transparent); }
+    #aivana-flow .af-node[data-kind="ops"] { background:color-mix(in srgb,var(--viz-series-4) 12%,transparent); }
+    #aivana-flow .af-node[data-kind="control"] { background:color-mix(in srgb,var(--viz-series-5) 12%,transparent); }
+    #aivana-flow .af-node.is-dim { opacity:.16; transform:scale(.98); }
+    #aivana-flow .af-gate { margin:4px 0 18px 142px; padding:12px 16px; background:color-mix(in srgb,var(--accent) 45%,transparent); border-radius:10px; display:flex; gap:12px; align-items:center; }
+    #aivana-flow .af-gate strong { font-weight:500; }
+    #aivana-flow .af-gate span { color:var(--muted-foreground); }
+    #aivana-flow .af-legend { display:flex; flex-wrap:wrap; gap:14px; margin:18px 0 0 142px; color:var(--muted-foreground); }
+    #aivana-flow .af-key { display:flex; gap:6px; align-items:center; }
+    #aivana-flow .af-dot { width:10px; height:10px; border-radius:3px; background:var(--viz-series-1); opacity:.55; }
+    #aivana-flow .af-key:nth-child(2) .af-dot { background:var(--viz-series-2); }
+    #aivana-flow .af-key:nth-child(3) .af-dot { background:var(--viz-series-3); }
+    #aivana-flow .af-key:nth-child(4) .af-dot { background:var(--viz-series-4); }
+    #aivana-flow .af-key:nth-child(5) .af-dot { background:var(--viz-series-5); }
+    @media (max-width:760px){
+      #aivana-flow .af-lane { grid-template-columns:1fr; gap:4px; }
+      #aivana-flow .af-track { grid-template-columns:1fr 1fr; gap:14px 20px; }
+      #aivana-flow .af-node:nth-child(2n)::after { content:'↓'; right:50%; top:auto; bottom:-17px; transform:translateX(50%); }
+      #aivana-flow .af-node:nth-child(2n+1)::after { content:'→'; }
+      #aivana-flow .af-gate, #aivana-flow .af-legend { margin-left:0; }
+    }
+    @media (max-width:420px){ #aivana-flow .af-track { grid-template-columns:1fr; } #aivana-flow .af-node::after { content:'↓' !important; right:50% !important; top:auto !important; bottom:-17px !important; transform:translateX(50%) !important; } }
+  </style>
+  <div class="af-head">
+    <div><h1>AIVANA complete system flow</h1><p>Patient journey, hospital operations, oncology intelligence and safety controls</p></div>
+    <span class="viz-badge" id="af-status" aria-live="polite">All flows</span>
+  </div>
+  <div class="af-controls" role="group" aria-label="Highlight flow">
+    <button class="btn btn-primary" type="button" data-filter="all" aria-pressed="true">Complete</button>
+    <button class="btn" type="button" data-filter="clinical" aria-pressed="false">Clinical journey</button>
+    <button class="btn" type="button" data-filter="ai" aria-pressed="false">AI + oncology</button>
+    <button class="btn" type="button" data-filter="ops" aria-pressed="false">Operations</button>
+    <button class="btn" type="button" data-filter="control" aria-pressed="false">Security + governance</button>
+  </div>
+  <div class="af-stage">
+    <section class="af-lane"><div class="af-lane-title"><i data-lucide="user-round" aria-hidden="true"></i>Entry</div><div class="af-track">
+      <div class="af-node" data-kind="clinical"><strong>Register patient</strong><span>MPI · MRN · demographics</span></div>
+      <div class="af-node" data-kind="ops"><strong>Book or walk in</strong><span>Appointment · queue token</span></div>
+      <div class="af-node" data-kind="clinical"><strong>Consent & identity</strong><span>Terms · oncology consent</span></div>
+      <div class="af-node" data-kind="control"><strong>Authenticate staff</strong><span>JWT · role · organization</span></div>
+      <div class="af-node" data-kind="ops"><strong>Route by role</strong><span>Front desk · doctor · nurse</span></div>
+      <div class="af-node" data-kind="clinical"><strong>Patient context</strong><span>History · allergies · active care</span></div>
+    </div></section>
+    <section class="af-lane"><div class="af-lane-title"><i data-lucide="stethoscope" aria-hidden="true"></i>OPD / intake</div><div class="af-track">
+      <div class="af-node" data-kind="clinical"><strong>Nurse intake</strong><span>Vitals · pain · risk scores</span></div>
+      <div class="af-node" data-kind="ai"><strong>Voice capture</strong><span>Sarvam / Whisper transcript</span></div>
+      <div class="af-node" data-kind="ai"><strong>Structured draft</strong><span>SOAP · medicines · labs</span></div>
+      <div class="af-node" data-kind="control"><strong>Clinician review</strong><span>Accept · correct · reject</span></div>
+      <div class="af-node" data-kind="clinical"><strong>Finalize consult</strong><span>Diagnosis · advice · follow-up</span></div>
+      <div class="af-node" data-kind="ops"><strong>Generate downstream work</strong><span>Orders · tasks · prescription</span></div>
+    </div></section>
+    <div class="af-gate"><i data-lucide="git-branch" aria-hidden="true"></i><strong>Disposition gate</strong><span>Home / follow-up · day care · admit to IPD · oncology pathway</span></div>
+    <section class="af-lane"><div class="af-lane-title"><i data-lucide="bed" aria-hidden="true"></i>IPD / ward</div><div class="af-track">
+      <div class="af-node" data-kind="clinical"><strong>Admit & assign</strong><span>Ward · bed · nurse</span></div>
+      <div class="af-node" data-kind="ops"><strong>Plan daily work</strong><span>Tasks · shifts · workload</span></div>
+      <div class="af-node" data-kind="clinical"><strong>Chart care</strong><span>Vitals · notes · assessments</span></div>
+      <div class="af-node" data-kind="clinical"><strong>Administer therapy</strong><span>MAR · procedures · monitoring</span></div>
+      <div class="af-node" data-kind="control"><strong>Detect exceptions</strong><span>Abnormal vitals · overdue work</span></div>
+      <div class="af-node" data-kind="ai"><strong>Discharge draft</strong><span>Course · medicines · follow-up</span></div>
+    </div></section>
+    <section class="af-lane"><div class="af-lane-title"><i data-lucide="ribbon" aria-hidden="true"></i>Oncology OS</div><div class="af-track">
+      <div class="af-node" data-kind="ai"><strong>Ingest records</strong><span>OCR · classify · extract</span></div>
+      <div class="af-node" data-kind="control"><strong>Verify evidence</strong><span>Provenance · contradictions</span></div>
+      <div class="af-node" data-kind="ai"><strong>Derive readiness</strong><span>Staging · guideline context</span></div>
+      <div class="af-node" data-kind="control"><strong>Clinical decision</strong><span>Stage confirmation · MDT</span></div>
+      <div class="af-node" data-kind="clinical"><strong>Live care plan</strong><span>Goals · tasks · treatment</span></div>
+      <div class="af-node" data-kind="clinical"><strong>Assess response</strong><span>Toxicity · clearance · follow-up</span></div>
+    </div></section>
+    <section class="af-lane"><div class="af-lane-title"><i data-lucide="package-check" aria-hidden="true"></i>Operations</div><div class="af-track">
+      <div class="af-node" data-kind="ops"><strong>Pharmacy</strong><span>Prescription · FEFO dispense</span></div>
+      <div class="af-node" data-kind="ops"><strong>Inventory</strong><span>Request · PO · receive · transfer</span></div>
+      <div class="af-node" data-kind="ops"><strong>Billing</strong><span>Tariff · package · invoice</span></div>
+      <div class="af-node" data-kind="ops"><strong>Payment / refund</strong><span>Settlement · reconciliation</span></div>
+      <div class="af-node" data-kind="ops"><strong>TPA claim</strong><span>Preauth · claim status</span></div>
+      <div class="af-node" data-kind="control"><strong>Audit trail</strong><span>Actor · action · outcome</span></div>
+    </div></section>
+    <section class="af-lane"><div class="af-lane-title"><i data-lucide="shield-check" aria-hidden="true"></i>Platform</div><div class="af-track">
+      <div class="af-node" data-kind="control"><strong>RBAC</strong><span>Server-side permissions</span></div>
+      <div class="af-node" data-kind="control"><strong>Tenant boundary</strong><span>Organization-scoped queries</span></div>
+      <div class="af-node" data-kind="control"><strong>Validation</strong><span>Pydantic · state rules</span></div>
+      <div class="af-node" data-kind="control"><strong>Persistence</strong><span>SQLAlchemy · migrations</span></div>
+      <div class="af-node" data-kind="control"><strong>External AI</strong><span>Rate limit · failure guards</span></div>
+      <div class="af-node" data-kind="control"><strong>Quality loop</strong><span>Unit · integration · E2E</span></div>
+    </div></section>
+  </div>
+  <div class="af-legend" aria-label="Legend">
+    <span class="af-key"><i class="af-dot"></i>Entry</span><span class="af-key"><i class="af-dot"></i>Clinical</span><span class="af-key"><i class="af-dot"></i>AI / intelligence</span><span class="af-key"><i class="af-dot"></i>Operations</span><span class="af-key"><i class="af-dot"></i>Controls</span>
+  </div>
+  <script>
+    (() => {
+      const root = document.getElementById('aivana-flow');
+      const buttons = [...root.querySelectorAll('[data-filter]')];
+      const nodes = [...root.querySelectorAll('.af-node')];
+      const status = root.querySelector('#af-status');
+      const labels = {all:'All flows',clinical:'Clinical journey',ai:'AI + oncology',ops:'Hospital operations',control:'Security + governance'};
+      buttons.forEach(button => button.addEventListener('click', () => {
+        const filter = button.dataset.filter;
+        buttons.forEach(b => { const active=b===button; b.setAttribute('aria-pressed', String(active)); b.classList.toggle('btn-primary',active); });
+        nodes.forEach(node => node.classList.toggle('is-dim', filter !== 'all' && node.dataset.kind !== filter));
+        status.textContent = labels[filter];
+      }));
+    })();
+  </script>
+</div>

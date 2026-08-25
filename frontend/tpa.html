@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Patient Search - Aivana HMS</title>
+<link rel="stylesheet" href="/static/css/shared.css" />
+<style>
+  #view-detail { display: none; }
+  .case-review { display:grid; grid-template-columns:minmax(340px, 42%) 1fr; min-height:520px; }
+  .case-summary-pane { padding:18px; overflow:auto; border-right:1px solid var(--border); }
+  .case-document-pane { display:flex; flex-direction:column; min-width:0; }
+  .document-tabs { padding:10px; display:flex; gap:8px; overflow:auto; border-bottom:1px solid var(--border); }
+  #insurance-document-viewer { width:100%; min-height:520px; flex:1; border:0; display:none; }
+  .summary-section { margin-bottom:18px; }
+  .summary-section h4 { margin:0 0 7px; }
+  @media (max-width:900px) { .case-review { grid-template-columns:1fr; } .case-summary-pane { border-right:0; border-bottom:1px solid var(--border); } }
+</style>
+</head>
+<body>
+<div class="app-shell">
+  <div class="topnav" id="topnav"></div>
+  <div class="page">
+
+    <!-- Search view -->
+    <div id="view-search">
+      <div class="page-header">
+        <div><h1>Insurance / TPA Patient Search</h1><p>Search the hospital index, review the complete clinical case and source reports, then push it for pre-approval.</p></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h3>Search Patient</h3></div>
+        <div class="field--row search-bar">
+          <input type="text" id="search-q" placeholder="Search by name, phone, or exact MRN" />
+          <button class="btn btn--secondary" id="search-btn" type="button">Search</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>MRN</th><th>Name</th><th>Age/Gender</th><th>Phone</th><th>Status</th><th></th></tr></thead>
+            <tbody id="search-results"><tr><td colspan="6" class="table-empty">Search to find a patient</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h3>Recent Submissions</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Patient</th><th>Status</th><th>Submitted</th><th></th></tr></thead>
+            <tbody id="submission-rows"><tr><td colspan="4" class="table-empty">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Patient record view -->
+    <div id="view-detail">
+      <div class="page-header">
+        <div>
+          <button class="btn btn--ghost btn--small" id="back-btn">&larr; Back to search</button>
+          <h1 id="pv-name"></h1>
+          <p id="pv-meta"></p>
+        </div>
+        <button class="btn btn--primary" id="process-preauth-btn">Push for Pre-Approval</button>
+      </div>
+
+      <div class="card" style="padding:0;overflow:hidden;">
+        <div class="card-header" style="padding:16px 18px;"><div><h3>Complete Case &amp; Supporting Reports</h3><p class="faint">OCR-derived findings must be verified against the original report shown alongside.</p></div></div>
+        <div class="case-review">
+          <div class="case-summary-pane" id="insurance-case-summary"><div class="loading">Loading complete case...</div></div>
+          <div class="case-document-pane">
+            <div class="document-tabs" id="insurance-document-tabs"><span class="faint">No supporting reports selected</span></div>
+            <div class="empty-state" id="insurance-document-empty">Select a report to view the complete original file.</div>
+            <iframe id="insurance-document-viewer" title="Original patient report"></iframe>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid--2">
+        <div class="card" id="pv-info"></div>
+        <div class="card">
+          <div class="card-header"><h3>Vitals (latest)</h3></div>
+          <div class="table-wrap"><table><thead><tr><th>When</th><th>BP</th><th>HR</th><th>Temp</th><th>SpO2</th></tr></thead><tbody id="pv-vitals"></tbody></table></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h3>Consultations</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Date</th><th>Type</th><th>Complaint</th><th>Diagnosis</th><th>Medications</th><th>Advice</th></tr></thead>
+            <tbody id="pv-consults"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h3>Procedures</h3></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>When</th><th>Procedure</th><th>Notes</th></tr></thead>
+            <tbody id="pv-procedures"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script>
+Auth.requirePage(['TPA']);
+renderNav('tpa');
+
+let currentPatientId = null;
+let currentDocumentObjectUrl = null;
+
+function renderSummaryList(values, empty = 'None recorded') {
+  return values?.length ? `<ul>${values.map((v) => `<li>${escapeHtml(typeof v === 'string' ? v : JSON.stringify(v))}</li>`).join('')}</ul>` : `<p class="faint">${empty}</p>`;
+}
+
+function renderCaseSummary(summary) {
+  const f = summary.imported_record_findings || {};
+  qs('#insurance-case-summary').innerHTML = `
+    <div class="alert alert--warn" style="margin-bottom:16px;">${escapeHtml(summary.disclaimer)}</div>
+    <div class="summary-section"><h4>Case overview</h4><div class="stack">
+      <div class="flex-between"><span class="muted">Hospital diagnosis</span><strong>${escapeHtml(summary.patient.diagnosis || 'Not recorded')}</strong></div>
+      <div class="flex-between"><span class="muted">Hospital visits</span><strong>${summary.overview.consultation_count}</strong></div>
+      <div class="flex-between"><span class="muted">Imported reports</span><strong>${summary.overview.document_count}</strong></div>
+      <div class="flex-between"><span class="muted">OCR completed</span><strong>${summary.overview.completed_ocr_count}</strong></div>
+    </div></div>
+    <div class="summary-section"><h4>Diagnoses / impressions from imported records</h4>${renderSummaryList(f.diagnoses)}</div>
+    <div class="summary-section"><h4>Medications from imported records</h4>${renderSummaryList(f.medications)}</div>
+    <div class="summary-section"><h4>Investigations and findings</h4>${renderSummaryList(f.investigations)}</div>
+    <div class="summary-section"><h4>Procedures from imported records</h4>${renderSummaryList(f.procedures)}</div>
+    <div class="summary-section"><h4>Known allergies</h4>${renderSummaryList([...(summary.patient.allergies || []), ...(f.allergies || [])])}</div>
+    <div class="summary-section"><h4>Hospital consultation timeline</h4>${summary.consultations.length ? summary.consultations.map((c) => `<div style="border-left:3px solid var(--accent);padding:3px 0 9px 10px;margin-bottom:8px;"><strong>${fmtDate(c.date)} · ${escapeHtml(c.visit_type || 'OPD')}</strong><div>${escapeHtml(c.diagnosis || c.chief_complaint || 'No diagnosis recorded')}</div></div>`).join('') : '<p class="faint">No hospital consultations yet.</p>'}</div>`;
+
+  const tabs = qs('#insurance-document-tabs');
+  tabs.innerHTML = summary.documents.length ? summary.documents.map((d) => `<button class="btn btn--secondary btn--small" data-insurance-document="${d.id}" title="OCR: ${escapeHtml(d.ocr_status)}">${escapeHtml(d.document_type || d.filename)}${d.document_date ? ` · ${escapeHtml(d.document_date)}` : ''}</button>`).join('') : '<span class="faint">No imported reports are attached to this patient</span>';
+  qsa('[data-insurance-document]', tabs).forEach((button) => button.addEventListener('click', () => openSupportingDocument(button.dataset.insuranceDocument)));
+  if (summary.documents.length) openSupportingDocument(summary.documents[0].id);
+}
+
+async function openSupportingDocument(documentId) {
+  try {
+    const blob = await Api.blob(`/patients/${currentPatientId}/documents/${documentId}/file`);
+    if (currentDocumentObjectUrl) URL.revokeObjectURL(currentDocumentObjectUrl);
+    currentDocumentObjectUrl = URL.createObjectURL(blob);
+    const viewer = qs('#insurance-document-viewer');
+    viewer.src = currentDocumentObjectUrl;
+    viewer.style.display = 'block';
+    qs('#insurance-document-empty').style.display = 'none';
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+
+function renderPatientRows(patients) {
+  const tbody = qs('#search-results');
+  if (!patients.length) { tbody.innerHTML = '<tr><td colspan="6" class="table-empty">No patients found</td></tr>'; return; }
+  tbody.innerHTML = patients.map((p) => `
+    <tr>
+      <td class="mono">${escapeHtml(p.mrn || '-')}</td>
+      <td>${escapeHtml(p.name)}<div class="faint">#${p.id}</div></td>
+      <td>${p.age ?? '-'} / ${escapeHtml(p.gender || '-')}</td>
+      <td>${escapeHtml(p.phone || '-')}</td>
+      <td><span class="badge">${escapeHtml(p.status)}</span></td>
+      <td><button class="btn btn--secondary btn--small" data-view="${p.id}">View Record</button></td>
+    </tr>`).join('');
+}
+
+async function runSearch() {
+  const q = qs('#search-q').value.trim();
+  try {
+    const results = await Api.get(`/patients/search${q ? `?q=${encodeURIComponent(q)}` : ''}`);
+    renderPatientRows(results);
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+qs('#search-btn').addEventListener('click', runSearch);
+qs('#search-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); });
+qs('#search-results').addEventListener('click', (e) => {
+  const id = e.target.dataset.view;
+  if (id) openPatient(id);
+});
+
+function preAuthStatusBadgeClass(status) {
+  if (status === 'Approved') return '';
+  if (status === 'Rejected') return 'badge--danger';
+  return 'badge--warn';
+}
+
+function preAuthActions(r) {
+  if (r.status !== 'Submitted') return '';
+  return `
+    <button class="btn btn--secondary btn--small" data-approve="${r.id}">Mark Approved</button>
+    <button class="btn btn--ghost btn--small" data-reject="${r.id}">Mark Rejected</button>`;
+}
+
+async function loadSubmissions() {
+  try {
+    const rows = await Api.get('/pre-authorizations');
+    qs('#submission-rows').innerHTML = rows.length ? rows.map((r) => `
+      <tr>
+        <td>${escapeHtml(r.patient_name)}<div class="faint">#${r.patient_id}</div></td>
+        <td><span class="badge ${preAuthStatusBadgeClass(r.status)}">${escapeHtml(r.status)}</span></td>
+        <td>${fmtDateTime(r.submitted_at)}</td>
+        <td class="flex">${preAuthActions(r)}</td>
+      </tr>`).join('') : '<tr><td colspan="4" class="table-empty">No pre-authorization requests submitted yet</td></tr>';
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+
+qs('#submission-rows').addEventListener('click', async (e) => {
+  const approveId = e.target.dataset.approve;
+  const rejectId = e.target.dataset.reject;
+  const id = approveId || rejectId;
+  if (!id) return;
+  try {
+    await Api.patch(`/pre-authorizations/${id}/status`, { status: approveId ? 'Approved' : 'Rejected' });
+    toast(`Pre-authorization ${approveId ? 'approved' : 'rejected'}`, 'success');
+    loadSubmissions();
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+});
+
+async function openPatient(id) {
+  currentPatientId = id;
+  try {
+    const [d, summary] = await Promise.all([
+      Api.get(`/patients/${id}/details`),
+      Api.get(`/patients/${id}/case-summary`),
+    ]);
+    const p = d.patient;
+    qs('#view-search').style.display = 'none';
+    qs('#view-detail').style.display = 'block';
+    qs('#pv-name').textContent = p.name;
+    qs('#pv-meta').textContent = `${p.age ?? '-'} / ${p.gender || '-'} - ${p.ward || '-'} / ${p.bed || '-'} - ${p.status}`;
+    renderCaseSummary(summary);
+
+    qs('#pv-info').innerHTML = `
+      <div class="card-header"><h3>Patient Info</h3></div>
+      <div class="stack">
+        <div class="flex-between"><span class="muted">Diagnosis</span><span>${escapeHtml(p.diagnosis || '-')}</span></div>
+        <div class="flex-between"><span class="muted">Admission type</span><span class="badge${p.admission_type === 'DayCare' ? ' badge--muted' : ''}">${escapeHtml(p.admission_type || 'OPD')}</span></div>
+        <div class="flex-between"><span class="muted">Status</span><span class="badge">${escapeHtml(p.status)}</span></div>
+        <div class="flex-between"><span class="muted">Admitted</span><span>${fmtDate(p.admission_date)}</span></div>
+        ${(p.allergies || []).length ? `<div class="alert alert--warn">Allergies: ${p.allergies.map(escapeHtml).join(', ')}</div>` : ''}
+      </div>`;
+
+    qs('#pv-vitals').innerHTML = d.vitals.length ? d.vitals.slice(0, 5).map((v) => `
+      <tr><td>${fmtDateTime(v.recorded_at)}</td><td>${v.bp_systolic ?? '-'}/${v.bp_diastolic ?? '-'}</td><td>${v.heart_rate ?? '-'}</td><td>${v.temperature ?? '-'}</td><td>${v.oxygen_sat ?? '-'}</td></tr>
+    `).join('') : '<tr><td colspan="5" class="table-empty">No vitals recorded</td></tr>';
+
+    qs('#pv-consults').innerHTML = d.consultations.length ? d.consultations.map((c) => `
+      <tr>
+        <td>${fmtDate(c.created_at)}</td>
+        <td>${escapeHtml(c.visit_type || '-')}</td>
+        <td>${escapeHtml(c.chief_complaint || '-')}</td>
+        <td>${escapeHtml(c.primary_diagnosis || '-')}</td>
+        <td>${(c.medications || []).map((m) => escapeHtml(m.drugName || '')).join(', ') || '-'}</td>
+        <td>${escapeHtml(c.advice || '-')}</td>
+      </tr>`).join('') : '<tr><td colspan="6" class="table-empty">No consultations</td></tr>';
+
+    qs('#pv-procedures').innerHTML = d.procedures.length ? d.procedures.map((r) => `
+      <tr><td>${fmtDateTime(r.performed_at)}</td><td>${escapeHtml(r.procedure_name)}</td><td>${escapeHtml(r.notes || '-')}</td></tr>
+    `).join('') : '<tr><td colspan="3" class="table-empty">No procedures recorded</td></tr>';
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+}
+
+qs('#back-btn').addEventListener('click', () => {
+  qs('#view-detail').style.display = 'none';
+  qs('#view-search').style.display = 'block';
+  currentPatientId = null;
+  qs('#insurance-document-viewer').src = 'about:blank';
+  qs('#insurance-document-viewer').style.display = 'none';
+  qs('#insurance-document-empty').style.display = 'block';
+  if (currentDocumentObjectUrl) URL.revokeObjectURL(currentDocumentObjectUrl);
+  currentDocumentObjectUrl = null;
+});
+
+qs('#process-preauth-btn').addEventListener('click', async () => {
+  if (!currentPatientId) return;
+  const btn = qs('#process-preauth-btn');
+  btn.disabled = true;
+  try {
+    const result = await Api.post('/pre-authorizations', { patient_id: Number(currentPatientId) });
+    toast(`Pushed for pre-approval (request #${result.id})`, 'success');
+    loadSubmissions();
+  } catch (err) { toast(apiErrorMessage(err), 'danger'); }
+  finally { btn.disabled = false; }
+});
+
+// ---- Init ----
+loadSubmissions();
+</script>
+</body>
+</html>

@@ -3,12 +3,10 @@ Everything NursingStation must NOT be able to do. This is the most important cov
 role: NursingStation is deliberately narrow (front-desk/admin duties only), so most of its
 "functionality" is actually about what it's correctly denied. Confirmed against
 backend/app/main.py: NursingStation is excluded from record_vital, create_task, update_task,
-create_nursing_note, nurse_consult, voice_to_vitals, assign_patient, unassign_patient,
-nurse_workload, get_users, and every Admin-only endpoint.
+create_nursing_note, assign_patient, unassign_patient, nurse_workload, get_users, and every
+Admin-only endpoint.
 """
 import pytest
-
-from tests.conftest import mock_groq_json
 
 
 @pytest.fixture
@@ -42,35 +40,9 @@ def test_station_cannot_record_vitals(client, station, patient_id, auth_headers)
     assert resp.status_code == 403
 
 
-def test_station_cannot_record_voice_vitals(client, station, patient_id, auth_headers, monkeypatch):
-    mock_groq_json(monkeypatch, {"heart_rate": 80})
-    resp = client.post("/api/ipd/vitals", json={"patient_id": patient_id, "voice_text": "HR 80"}, headers=auth_headers(station))
-    assert resp.status_code == 403
-
-
-def test_station_cannot_use_voice_to_vitals_preview(client, station, auth_headers, monkeypatch):
-    mock_groq_json(monkeypatch, {"heart_rate": 80})
-    resp = client.post("/api/ipd/voice-to-vitals", json={"voice_text": "HR 80"}, headers=auth_headers(station))
-    assert resp.status_code == 403
-
-
 def test_station_cannot_create_nursing_note(client, station, patient_id, auth_headers):
     resp = client.post("/api/nursing-notes", json={"patient_id": patient_id, "subjective": "x", "objective": "",
                                                      "assessment": "", "plan": ""}, headers=auth_headers(station))
-    assert resp.status_code == 403
-
-
-def test_station_cannot_create_voice_nursing_note(client, station, patient_id, auth_headers, monkeypatch):
-    mock_groq_json(monkeypatch, {"subjective": "x", "objective": "", "assessment": "", "plan": ""})
-    resp = client.post("/api/nursing-notes", json={"patient_id": patient_id, "voice_text": "patient stable"},
-                        headers=auth_headers(station))
-    assert resp.status_code == 403
-
-
-def test_station_cannot_run_nurse_consult(client, station, patient_id, auth_headers, monkeypatch):
-    mock_groq_json(monkeypatch, {"vitals": [], "labs": [], "nursing_note": {}})
-    resp = client.post("/api/ipd/nurse-consult", json={"patient_id": patient_id, "voice_text": "full consult"},
-                        headers=auth_headers(station))
     assert resp.status_code == 403
 
 

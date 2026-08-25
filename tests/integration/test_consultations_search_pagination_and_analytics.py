@@ -1,8 +1,11 @@
 """
 GET /api/consultations (search/pagination/finalized extension) and GET /api/consultations/analytics
 -- both scoped per-doctor (Consultation.user_id), not per-organization, matching this endpoint's
-existing convention that a doctor's consultation history is their own. Analytics deliberately never
-exposes the AI provider/model name (see main.py's docstring) -- only aggregate latency/token figures.
+existing convention that a doctor's consultation history is their own. Analytics reports
+consultation volume only -- the latency/token-usage fields that used to reflect the AI scribe
+pipeline's own telemetry were removed along with that pipeline (see CHANGELOG.md); the
+Consultation.gemini_latency/total_tokens columns themselves still exist (unused, no backfill),
+so tests can still set them without affecting the analytics assertions below.
 """
 import pytest
 from datetime import datetime, timedelta
@@ -113,14 +116,13 @@ def test_analytics_never_exposes_model_or_provider_name(client, doctor, db_sessi
     assert "model" not in serialized
 
 
-def test_analytics_aggregates_latency_and_tokens(client, doctor, db_session, auth_headers):
-    _make_consultation(db_session, doctor, "case-1", "P1", gemini_latency=1.0, total_tokens=100)
-    _make_consultation(db_session, doctor, "case-2", "P2", gemini_latency=3.0, total_tokens=300)
+def test_analytics_aggregates_consultation_volume(client, doctor, db_session, auth_headers):
+    _make_consultation(db_session, doctor, "case-1", "P1")
+    _make_consultation(db_session, doctor, "case-2", "P2")
     resp = client.get("/api/consultations/analytics", headers=auth_headers(doctor))
     body = resp.json()
     assert body["total_consultations"] == 2
-    assert body["avg_latency"] == 2.0
-    assert body["avg_tokens"] == 200.0
+    assert sum(d["count"] for d in body["consultations_per_day"]) == 2
 
 
 def test_analytics_excludes_consultations_outside_window(client, doctor, db_session, auth_headers):

@@ -206,7 +206,8 @@
                 <div id="step-panel-setup" class="step-panel active">
                     <div class="card card-narrow">
                         <div class="card-title" style="margin-bottom:4px;">Select patient</div>
-                        <div class="row-sub" style="margin-bottom:4px;">Choose the patient for this consultation</div>
+                        <div class="row-sub" style="margin-bottom:10px;">Search registered and admitted patients, review their complete case, then start the consultation.</div>
+                        <input id="patient-search" placeholder="Search by patient name, phone, or MRN" style="margin-bottom:12px;" />
                         <div id="patient-pick-grid" class="patient-pick-grid"></div>
                         <!-- Real state-holder behind the patient-card grid above -- kept
                              actionable (non-zero bounding box) rather than display:none, since
@@ -378,6 +379,22 @@
         </section>
     </main>
 </div>
+<div id="case-summary-modal" style="display:none;position:fixed;inset:0;background:rgba(20,28,24,.7);z-index:1000;padding:18px;">
+  <div style="height:100%;background:white;border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.25);">
+    <div style="padding:14px 18px;border-bottom:1px solid #e5e7e2;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+      <div><strong id="case-summary-title">Patient case summary</strong><div class="row-sub" id="case-summary-subtitle"></div></div>
+      <div style="display:flex;gap:8px;"><button class="btn-primary" id="summary-start-consult">Start consultation</button><button class="btn-outline" id="close-case-summary">Close</button></div>
+    </div>
+    <div style="display:grid;grid-template-columns:minmax(380px,42%) 1fr;min-height:0;flex:1;">
+      <div id="case-summary-content" style="overflow:auto;padding:20px;border-right:1px solid #e5e7e2;"></div>
+      <div style="display:flex;flex-direction:column;min-width:0;">
+        <div id="case-document-tabs" style="padding:10px;border-bottom:1px solid #e5e7e2;display:flex;gap:8px;overflow:auto;"></div>
+        <div id="case-document-empty" style="padding:40px;color:#66736d;text-align:center;">Choose a report to view the original source file.</div>
+        <iframe id="case-document-viewer" title="Original patient document" style="display:none;width:100%;height:100%;border:0;"></iframe>
+      </div>
+    </div>
+  </div>
+</div>
 <script src="/static/js/voice-capture.js"></script>
 <script>
 const API_BASE = '/api';
@@ -396,6 +413,9 @@ let currentConsultationId = null;
 let currentPatientName = '';
 let currentPatientAge = '';
 let currentPatientGender = '';
+let allRegisteredPatients = [];
+let summaryPatientId = null;
+let currentDocumentObjectUrl = null;
 
 const transcriptInput = document.getElementById('transcript-input');
 const startBtn = document.getElementById('start-consult-btn');
@@ -533,9 +553,10 @@ function renderPatientCards(patients) {
         const initials = (p.name || '?').split(' ').filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
         const details = [p.age ? `${p.age}y` : null, p.gender, p.ward].filter(Boolean).join(' · ');
         return `
-            <div class="patient-pick ${String(p.id) === String(patientSelect.value) ? 'active' : ''}" data-patient-id="${p.id}">
+            <div class="patient-pick ${String(p.id) === String(patientSelect.value) ? 'active' : ''}" data-patient-id="${p.id}" style="position:relative;padding-right:105px;">
                 <div class="row-avatar">${initials}</div>
                 <div><div class="row-title">${p.name}</div><div class="row-sub">${details}</div></div>
+                <button class="btn-outline patient-summary-btn" data-summary-patient="${p.id}" style="position:absolute;right:10px;top:12px;padding:5px 8px;">Case summary</button>
             </div>
         `;
     }).join('');
@@ -547,16 +568,81 @@ function renderPatientCards(patients) {
             el.classList.add('active');
         });
     });
+    grid.querySelectorAll('.patient-summary-btn').forEach(button => button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        openCaseSummary(button.dataset.summaryPatient);
+    }));
 }
 
 async function loadPatients() {
-    const res = await apiRequest('/ipd/patients');
+    const res = await apiRequest('/patients/search?limit=100');
     if (res.ok) {
         const patients = await res.json();
-        patientSelect.innerHTML = '<option value="">— Select Patient —</option>' + patients.map(p => `<option value="${p.id}">${p.name} (${p.ward})</option>`).join('');
+        allRegisteredPatients = patients;
+        patientSelect.innerHTML = '<option value="">— Select Patient —</option>' + patients.map(p => `<option value="${p.id}">${p.name} (${p.mrn || 'No MRN'})</option>`).join('');
         renderPatientCards(patients);
+        const requested = new URLSearchParams(location.search).get('patient_id');
+        if (requested && patients.some(p => String(p.id) === String(requested))) openCaseSummary(requested);
     }
 }
+
+document.getElementById('patient-search').addEventListener('input', (event) => {
+    const q = event.target.value.trim().toLowerCase();
+    renderPatientCards(!q ? allRegisteredPatients : allRegisteredPatients.filter(p => [p.name, p.phone, p.mrn].some(v => String(v || '').toLowerCase().includes(q))));
+});
+
+function safe(value) {
+    return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function summaryList(values, empty='None recorded') {
+    return values && values.length ? `<ul>${values.map(v => `<li>${safe(typeof v === 'string' ? v : JSON.stringify(v))}</li>`).join('')}</ul>` : `<p class="row-sub">${empty}</p>`;
+}
+async function openCaseSummary(patientId) {
+    summaryPatientId = String(patientId);
+    document.getElementById('case-summary-modal').style.display = 'block';
+    document.getElementById('case-summary-content').innerHTML = '<p>Loading complete case...</p>';
+    const res = await apiRequest(`/patients/${patientId}/case-summary`);
+    if (!res.ok) { document.getElementById('case-summary-content').innerHTML = '<p>Could not load this patient summary.</p>'; return; }
+    const data = await res.json();
+    const p = data.patient;
+    document.getElementById('case-summary-title').textContent = p.name;
+    document.getElementById('case-summary-subtitle').textContent = `${p.mrn || 'No MRN'} · ${p.age ?? '-'} years · ${p.gender || '-'} · ${data.overview.document_count} imported file(s) · ${data.overview.consultation_count} visit(s)`;
+    const findings = data.imported_record_findings;
+    document.getElementById('case-summary-content').innerHTML = `
+      <div style="background:#fff8e7;border:1px solid #eadcae;padding:10px;border-radius:8px;font-size:12px;margin-bottom:14px;">${safe(data.disclaimer)}</div>
+      <h3>Current hospital record</h3><p><strong>Diagnosis:</strong> ${safe(p.diagnosis || 'Not recorded')}</p><p><strong>Known allergies:</strong></p>${summaryList(p.allergies)}
+      <h3>Findings from imported records</h3><h4>Diagnoses / impressions</h4>${summaryList(findings.diagnoses)}<h4>Medications</h4>${summaryList(findings.medications)}<h4>Investigations and findings</h4>${summaryList(findings.investigations)}<h4>Procedures</h4>${summaryList(findings.procedures)}
+      <h3>Hospital consultation timeline</h3>${data.consultations.length ? data.consultations.map(c => `<div style="border-left:3px solid #5f826d;padding:4px 0 10px 12px;margin-bottom:8px;"><strong>${new Date(c.date).toLocaleDateString()} · ${safe(c.visit_type || 'OPD')}</strong><div>${safe(c.diagnosis || c.chief_complaint || 'No diagnosis recorded')}</div></div>`).join('') : '<p class="row-sub">No hospital consultations yet. Imported documents are shown separately above.</p>'}
+      <h3>Recent vitals</h3>${data.recent_vitals.length ? `<table class="data-table"><tr><th>Date</th><th>BP</th><th>HR</th><th>SpO2</th></tr>${data.recent_vitals.slice(0,10).map(v => `<tr><td>${new Date(v.recorded_at).toLocaleString()}</td><td>${safe(v.bp || '-')}</td><td>${safe(v.heart_rate ?? '-')}</td><td>${safe(v.oxygen_sat ?? '-')}</td></tr>`).join('')}</table>` : '<p class="row-sub">No vitals recorded.</p>'}`;
+    const tabs = document.getElementById('case-document-tabs');
+    tabs.innerHTML = data.documents.length ? data.documents.map(d => `<button class="btn-outline" data-view-document="${d.id}" title="${safe(d.ocr_status)}">${safe(d.document_type || d.filename)} · ${safe(d.document_date || '')}</button>`).join('') : '<span class="row-sub">No external reports uploaded</span>';
+    tabs.querySelectorAll('[data-view-document]').forEach(btn => btn.addEventListener('click', () => viewCaseDocument(patientId, btn.dataset.viewDocument)));
+    if (data.documents.length) viewCaseDocument(patientId, data.documents[0].id);
+}
+async function viewCaseDocument(patientId, documentId) {
+    const res = await apiRequest(`/patients/${patientId}/documents/${documentId}/file`);
+    if (!res.ok) return;
+    const blob = await res.blob();
+    if (currentDocumentObjectUrl) URL.revokeObjectURL(currentDocumentObjectUrl);
+    currentDocumentObjectUrl = URL.createObjectURL(blob);
+    const viewer = document.getElementById('case-document-viewer');
+    viewer.src = currentDocumentObjectUrl;
+    viewer.style.display = 'block';
+    document.getElementById('case-document-empty').style.display = 'none';
+}
+function closeCaseSummary() {
+    document.getElementById('case-summary-modal').style.display = 'none';
+    document.getElementById('case-document-viewer').src = 'about:blank';
+    if (currentDocumentObjectUrl) URL.revokeObjectURL(currentDocumentObjectUrl);
+    currentDocumentObjectUrl = null;
+}
+document.getElementById('close-case-summary').addEventListener('click', closeCaseSummary);
+document.getElementById('summary-start-consult').addEventListener('click', () => {
+    patientSelect.value = summaryPatientId;
+    patientSelect.dispatchEvent(new Event('change'));
+    closeCaseSummary();
+    document.getElementById('start-consult-btn').click();
+});
 
 async function checkGroqStatus() {
     try {
