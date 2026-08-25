@@ -60,19 +60,58 @@ def _get_org_doctor(db: Session, doctor_id: int, org_id: int) -> User:
     return doctor
 
 
-def _appointment_out(a: Appointment) -> dict:
+def _appointment_out(a: Appointment, db: Optional[Session] = None) -> dict:
+    patient_name = None
+    patient_mrn = None
+    doctor_name = None
+    if db:
+        p = db.query(Patient).filter(Patient.id == a.patient_id).first()
+        if p:
+            patient_name = p.name
+            patient_mrn = getattr(p, "mrn", f"MRN-{p.id}")
+        d = db.query(User).filter(User.id == a.doctor_id).first()
+        if d:
+            doctor_name = f"Dr. {d.email.split('@')[0].replace('.', ' ').title()}" if d.email else f"Doctor #{d.id}"
     return {
-        "id": a.id, "patient_id": a.patient_id, "doctor_id": a.doctor_id,
-        "scheduled_at": a.scheduled_at.isoformat(), "status": a.status, "reason": a.reason,
+        "id": a.id,
+        "patient_id": a.patient_id,
+        "patient_name": patient_name or f"Patient #{a.patient_id}",
+        "patient_mrn": patient_mrn or f"#{a.patient_id}",
+        "doctor_id": a.doctor_id,
+        "doctor_name": doctor_name or f"Dr. #{a.doctor_id}",
+        "scheduled_at": a.scheduled_at.isoformat(),
+        "status": a.status,
+        "reason": a.reason,
         "follow_up_of_consultation_id": a.follow_up_of_consultation_id,
     }
 
 
-def _token_out(t: QueueToken) -> dict:
+def _token_out(t: QueueToken, db: Optional[Session] = None) -> dict:
+    patient_name = None
+    patient_mrn = None
+    doctor_name = None
+    if db:
+        p = db.query(Patient).filter(Patient.id == t.patient_id).first()
+        if p:
+            patient_name = p.name
+            patient_mrn = getattr(p, "mrn", f"MRN-{p.id}")
+        if t.doctor_id:
+            d = db.query(User).filter(User.id == t.doctor_id).first()
+            if d:
+                doctor_name = f"Dr. {d.email.split('@')[0].replace('.', ' ').title()}" if d.email else f"Doctor #{d.id}"
     return {
-        "id": t.id, "patient_id": t.patient_id, "appointment_id": t.appointment_id, "doctor_id": t.doctor_id,
-        "token_number": t.token_number, "token_date": t.token_date.isoformat(), "is_emergency": t.is_emergency,
-        "status": t.status, "issued_at": t.issued_at.isoformat(),
+        "id": t.id,
+        "patient_id": t.patient_id,
+        "patient_name": patient_name or f"Patient #{t.patient_id}",
+        "patient_mrn": patient_mrn or f"#{t.patient_id}",
+        "appointment_id": t.appointment_id,
+        "doctor_id": t.doctor_id,
+        "doctor_name": doctor_name or (f"Dr. #{t.doctor_id}" if t.doctor_id else "Any Doctor"),
+        "token_number": t.token_number,
+        "token_date": t.token_date.isoformat(),
+        "is_emergency": t.is_emergency,
+        "status": t.status,
+        "issued_at": t.issued_at.isoformat(),
         "called_at": t.called_at.isoformat() if t.called_at else None,
         "completed_at": t.completed_at.isoformat() if t.completed_at else None,
     }
@@ -141,7 +180,7 @@ def create_appointment(payload: AppointmentCreate, current_user: dict = Depends(
     db.commit()
     db.refresh(appointment)
     log_audit(db, current_user["id"], current_user["email"], org_id, "create_appointment", f"appointments/{appointment.id}", "Success")
-    return _appointment_out(appointment)
+    return _appointment_out(appointment, db=db)
 
 
 @router.get("/api/appointments")
@@ -162,7 +201,7 @@ def list_appointments(
         query = query.filter(Appointment.status == status)
     if on_date is not None:
         query = query.filter(func.date(Appointment.scheduled_at) == on_date)
-    return [_appointment_out(a) for a in query.order_by(Appointment.scheduled_at).all()]
+    return [_appointment_out(a, db=db) for a in query.order_by(Appointment.scheduled_at).all()]
 
 
 @router.post("/api/appointments/{appointment_id}/cancel")
@@ -177,7 +216,7 @@ def cancel_appointment(appointment_id: int, current_user: dict = Depends(get_cur
     appointment.status = "Cancelled"
     db.commit()
     log_audit(db, current_user["id"], current_user["email"], org_id, "cancel_appointment", f"appointments/{appointment_id}", "Success")
-    return _appointment_out(appointment)
+    return _appointment_out(appointment, db=db)
 
 
 def _issue_token(db: Session, org_id: int, patient_id: int, doctor_id: Optional[int],
@@ -215,7 +254,7 @@ def check_in_appointment(appointment_id: int, current_user: dict = Depends(get_c
     db.commit()
     db.refresh(token)
     log_audit(db, current_user["id"], current_user["email"], org_id, "check_in_appointment", f"appointments/{appointment_id}", "Success")
-    return {"appointment": _appointment_out(appointment), "token": _token_out(token)}
+    return {"appointment": _appointment_out(appointment, db=db), "token": _token_out(token, db=db)}
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +274,7 @@ def issue_walkin_token(payload: TokenIssue, current_user: dict = Depends(get_cur
     db.refresh(token)
     log_audit(db, current_user["id"], current_user["email"], org_id, "issue_token", f"queue_tokens/{token.id}",
                "Success", f"emergency={payload.is_emergency}")
-    return _token_out(token)
+    return _token_out(token, db=db)
 
 
 @router.get("/api/queue/tokens")
@@ -255,7 +294,7 @@ def list_queue(
     if status:
         query = query.filter(QueueToken.status == status)
     tokens = query.order_by(QueueToken.is_emergency.desc(), QueueToken.token_number.asc()).all()
-    return [_token_out(t) for t in tokens]
+    return [_token_out(t, db=db) for t in tokens]
 
 
 def _get_org_token(db: Session, token_id: int, org_id: int) -> QueueToken:
@@ -275,7 +314,7 @@ def call_token(token_id: int, current_user: dict = Depends(get_current_user), db
     token.status = "InProgress"
     token.called_at = datetime.utcnow()
     db.commit()
-    return _token_out(token)
+    return _token_out(token, db=db)
 
 
 @router.patch("/api/queue/tokens/{token_id}/complete")
@@ -288,7 +327,7 @@ def complete_token(token_id: int, current_user: dict = Depends(get_current_user)
     token.status = "Completed"
     token.completed_at = datetime.utcnow()
     db.commit()
-    return _token_out(token)
+    return _token_out(token, db=db)
 
 
 @router.patch("/api/queue/tokens/{token_id}/skip")
@@ -300,4 +339,4 @@ def skip_token(token_id: int, current_user: dict = Depends(get_current_user), db
         raise HTTPException(400, f"Cannot skip a token that is {token.status}")
     token.status = "Skipped"
     db.commit()
-    return _token_out(token)
+    return _token_out(token, db=db)

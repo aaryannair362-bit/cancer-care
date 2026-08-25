@@ -302,8 +302,8 @@ async function loadAppointments() {
     tbody.innerHTML = rows.map((a) => `
       <tr>
         <td>${fmtDateTime(a.scheduled_at)}</td>
-        <td>#${a.patient_id}</td>
-        <td>#${a.doctor_id}</td>
+        <td><strong>${escapeHtml(a.patient_name || `Patient #${a.patient_id}`)}</strong><div class="faint mono">${escapeHtml(a.patient_mrn || `#${a.patient_id}`)}</div></td>
+        <td>${escapeHtml(a.doctor_name || `Dr. #${a.doctor_id}`)}</td>
         <td>${escapeHtml(a.reason || '-')}</td>
         <td><span class="badge${a.status === 'Cancelled' ? ' badge--danger' : ''}">${escapeHtml(a.status)}</span></td>
         <td>${appointmentActions(a)}</td>
@@ -359,8 +359,8 @@ async function loadQueue() {
     tbody.innerHTML = rows.map((t) => `
       <tr>
         <td class="mono">${t.token_number}${t.is_emergency ? ' <span class="badge badge--danger">ER</span>' : ''}</td>
-        <td>#${t.patient_id}</td>
-        <td>${t.doctor_id ? `#${t.doctor_id}` : '-'}</td>
+        <td><strong>${escapeHtml(t.patient_name || `Patient #${t.patient_id}`)}</strong><div class="faint mono">${escapeHtml(t.patient_mrn || `#${t.patient_id}`)}</div></td>
+        <td>${escapeHtml(t.doctor_name || '-')}</td>
         <td><span class="badge${t.status === 'Skipped' ? ' badge--muted' : ''}">${escapeHtml(t.status)}</span></td>
         <td>${fmtDateTime(t.issued_at)}</td>
         <td>${queueActions(t)}</td>
