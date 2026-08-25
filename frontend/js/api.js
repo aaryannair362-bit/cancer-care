@@ -18,8 +18,8 @@ const ROLE_HOME = {
   TPA: '/tpa.html',
   // CCA Oncology OS personas (see backend/app/auth.py's CCA_ROLES) -- all land on the same
   // role-aware single-page app, which renders a different sidebar per role at runtime.
-  CCAFrontDesk: '/cca_os.html',
-  CCANurseNavigator: '/cca_os.html',
+  CCAFrontDesk: '/frontdesk.html',
+  CCANurseNavigator: '/nurse_navigator.html',
   CCAMedicalOncologist: '/cca_os.html',
   CCASurgicalOncologist: '/cca_os.html',
   CCARadiationOncologist: '/cca_os.html',

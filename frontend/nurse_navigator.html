@@ -1,0 +1,963 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aivana — Nurse Navigator</title>
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-page: #F1F5F9;
+            --bg-sidebar: #EEF2F6;
+            --bg-surface: #FFFFFF;
+            --bg-card-subtle: #F8FAFC;
+            
+            --ink-900: #0F172A;
+            --ink-800: #1E293B;
+            --ink-700: #334155;
+            --ink-600: #475569;
+            --ink-500: #64748B;
+            --ink-400: #94A3B8;
+            --ink-300: #CBD5E1;
+            
+            --line: #E2E8F0;
+            --line-subtle: #F1F5F9;
+            
+            --brand-primary: #3B82F6;
+            --brand-dark: #1E3A8A;
+            --navy-action: #2A4365;
+            --navy-action-hover: #1E3A8A;
+            
+            --green-badge-bg: #DCFCE7;
+            --green-badge-text: #166534;
+            --amber-badge-bg: #FEF3C7;
+            --amber-badge-text: #92400E;
+            --rose-badge-bg: #FFE4E6;
+            --rose-badge-text: #9F1239;
+            --blue-badge-bg: #E0E7FF;
+            --blue-badge-text: #3730A3;
+            
+            --radius-sm: 6px;
+            --radius-md: 10px;
+            --radius-lg: 14px;
+            --radius-full: 9999px;
+            
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+            --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg-page);
+            color: var(--ink-800);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* Top Header */
+        .topbar {
+            height: 64px;
+            background: var(--bg-surface);
+            border-bottom: 1px solid var(--line);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 24px;
+            flex-shrink: 0;
+            z-index: 20;
+        }
+        .brand-logo {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--ink-900);
+            letter-spacing: -0.5px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            text-decoration: none;
+        }
+        .search-pill-container {
+            flex: 1;
+            max-width: 520px;
+            margin: 0 32px;
+            position: relative;
+        }
+        .search-pill-input {
+            width: 100%;
+            height: 40px;
+            background: #F8FAFC;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-full);
+            padding: 0 16px 0 42px;
+            font-size: 13.5px;
+            color: var(--ink-900);
+            outline: none;
+            transition: all 0.15s ease;
+        }
+        .search-pill-input:focus {
+            background: #FFFFFF;
+            border-color: var(--brand-primary);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+        }
+        .search-icon-fixed {
+            position: absolute;
+            left: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--ink-400);
+            font-size: 15px;
+            pointer-events: none;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .icon-circle-btn {
+            width: 38px;
+            height: 38px;
+            border-radius: var(--radius-full);
+            border: 1px solid var(--line);
+            background: var(--bg-surface);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--ink-600);
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .role-badge-pill {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            background: #F8FAFC;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-full);
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--ink-800);
+            cursor: pointer;
+        }
+        .avatar-pill {
+            width: 38px;
+            height: 38px;
+            border-radius: var(--radius-full);
+            background: #E2E8F0;
+            color: var(--ink-800);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 13px;
+            border: 1px solid var(--line);
+            cursor: pointer;
+        }
+
+        /* Layout */
+        .app-body {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 240px;
+            background: var(--bg-sidebar);
+            border-right: 1px solid var(--line);
+            padding: 20px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+        .sidebar-section-title {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.8px;
+            color: var(--ink-400);
+            text-transform: uppercase;
+            padding: 10px 12px 6px;
+        }
+        .sidebar-nav-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 11px 14px;
+            border-radius: var(--radius-md);
+            font-size: 13.5px;
+            font-weight: 500;
+            color: var(--ink-700);
+            text-decoration: none;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .sidebar-nav-item:hover {
+            background: rgba(255, 255, 255, 0.6);
+            color: var(--ink-900);
+        }
+        .sidebar-nav-item.active {
+            background: #FFFFFF;
+            color: var(--ink-900);
+            font-weight: 600;
+            box-shadow: var(--shadow-sm);
+            border: 1px solid rgba(226, 232, 240, 0.8);
+        }
+        .nav-item-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .nav-chevron {
+            color: var(--ink-400);
+            font-size: 12px;
+        }
+
+        /* Main Workspace Canvas */
+        .canvas {
+            flex: 1;
+            overflow-y: auto;
+            padding: 28px 36px;
+        }
+
+        .view-panel { display: none; }
+        .view-panel.active { display: block; }
+
+        /* Page Headings */
+        .page-title {
+            font-size: 26px;
+            font-weight: 700;
+            color: var(--ink-900);
+            letter-spacing: -0.5px;
+            margin-bottom: 4px;
+        }
+        .page-subtitle {
+            font-size: 13.5px;
+            color: var(--ink-500);
+            margin-bottom: 20px;
+        }
+
+        /* Filter Toolbar */
+        .filter-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+        }
+        .filter-input {
+            height: 38px;
+            padding: 0 12px 0 34px;
+            background: #FFFFFF;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            color: var(--ink-800);
+            min-width: 200px;
+            outline: none;
+        }
+        .filter-select {
+            height: 38px;
+            padding: 0 12px;
+            background: #FFFFFF;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            color: var(--ink-700);
+            outline: none;
+            cursor: pointer;
+        }
+
+        /* Nurse Patient 2-Column Grid */
+        .nurse-queue-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        .nurse-patient-card {
+            background: var(--bg-surface);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-lg);
+            padding: 20px;
+            box-shadow: var(--shadow-sm);
+            transition: all 0.15s ease;
+        }
+        .nurse-patient-card:hover {
+            border-color: var(--ink-300);
+            box-shadow: var(--shadow-md);
+        }
+
+        .card-top-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 16px;
+        }
+        .patient-id-block {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+        .patient-avatar-icon {
+            width: 42px;
+            height: 42px;
+            border-radius: var(--radius-full);
+            background: #F1F5F9;
+            color: var(--ink-600);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+        }
+        .card-patient-name {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--ink-900);
+            margin-bottom: 2px;
+        }
+        .card-patient-meta {
+            font-size: 12px;
+            color: var(--ink-500);
+        }
+        .priority-badge {
+            background: #F1F5F9;
+            color: var(--ink-600);
+            font-size: 11.5px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: var(--radius-sm);
+        }
+
+        .card-mid-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .mid-block-label {
+            font-size: 11px;
+            color: var(--ink-400);
+            text-transform: uppercase;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        .mid-block-value {
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--ink-900);
+        }
+        .mid-block-sub {
+            font-size: 12px;
+            color: var(--ink-500);
+            margin-top: 2px;
+        }
+
+        .intake-status-badge {
+            display: inline-flex;
+            align-items: center;
+            background: #EFF6FF;
+            color: #1E40AF;
+            font-size: 12px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: var(--radius-sm);
+        }
+
+        .attention-notice-box {
+            background: #FFFBEB;
+            border: 1px solid #FDE68A;
+            border-radius: var(--radius-sm);
+            padding: 8px 12px;
+            font-size: 12px;
+            color: #92400E;
+            font-weight: 500;
+            margin-bottom: 16px;
+        }
+        .attention-notice-box.empty {
+            background: #F8FAFC;
+            border-color: var(--line);
+            color: var(--ink-500);
+        }
+
+        .card-action-row {
+            display: flex;
+            justify-content: flex-end;
+        }
+
+        .btn-navy {
+            background: var(--navy-action);
+            color: #FFFFFF;
+            font-size: 13px;
+            font-weight: 600;
+            padding: 9px 18px;
+            border-radius: var(--radius-sm);
+            border: none;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: background 0.15s;
+        }
+        .btn-navy:hover { background: var(--navy-action-hover); }
+
+        .btn-outline {
+            background: #FFFFFF;
+            border: 1px solid var(--line);
+            color: var(--ink-700);
+            font-size: 13px;
+            font-weight: 600;
+            padding: 9px 16px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        /* Nurse Intake Screen Styles */
+        .patient-context-banner {
+            background: #FFFFFF;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-lg);
+            padding: 16px 20px;
+            display: grid;
+            grid-template-columns: 1.2fr 1.2fr 1.5fr 1.5fr;
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+        .banner-label {
+            font-size: 11px;
+            color: var(--ink-400);
+            font-weight: 600;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .banner-value {
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--ink-900);
+        }
+        .banner-sub {
+            font-size: 12px;
+            color: var(--ink-500);
+            margin-top: 2px;
+        }
+
+        .wizard-stepper-6 {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 8px;
+            margin-bottom: 24px;
+        }
+        .step-pill-6 {
+            background: #FFFFFF;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-md);
+            padding: 12px 10px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--ink-600);
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .step-pill-6.active {
+            background: #EFF6FF;
+            border-color: var(--brand-primary);
+            color: var(--brand-dark);
+        }
+
+        .intake-card {
+            background: #FFFFFF;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-lg);
+            padding: 24px;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .form-grid-3 {
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .form-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--ink-700);
+        }
+        .form-input, .form-select, .form-textarea {
+            width: 100%;
+            height: 38px;
+            padding: 0 12px;
+            background: #FFFFFF;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            color: var(--ink-900);
+            outline: none;
+        }
+        .form-textarea {
+            height: auto;
+            padding: 10px 12px;
+        }
+
+        .symptom-checkbox-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin-top: 14px;
+        }
+        .symptom-check-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #F8FAFC;
+            border: 1px solid var(--line);
+            padding: 10px 14px;
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Top Navigation Header -->
+    <header class="topbar">
+        <a href="/nurse_navigator.html" class="brand-logo">Aivana</a>
+        
+        <div class="search-pill-container">
+            <span class="search-icon-fixed">🔍</span>
+            <input type="text" class="search-pill-input" placeholder="Search patient or workflow" />
+        </div>
+
+        <div class="header-actions">
+            <button class="icon-circle-btn" title="Notifications">🔔</button>
+            <div class="role-badge-pill" onclick="location.href='/index.html'">
+                <span>Nurse Navigator</span>
+                <span>▾</span>
+            </div>
+            <div class="avatar-pill" title="Logged in">NN ▾</div>
+        </div>
+    </header>
+
+    <div class="app-body">
+        <!-- Left Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="sidebar-section-title">CLINICAL</div>
+
+            <a class="sidebar-nav-item active" id="nav-patients" onclick="showNurseTab('patients')">
+                <div class="nav-item-left">
+                    <span>👥</span>
+                    <span>Patients</span>
+                </div>
+                <span class="nav-chevron">›</span>
+            </a>
+
+            <a class="sidebar-nav-item" id="nav-nexus" onclick="showNurseTab('nexus')">
+                <div class="nav-item-left">
+                    <span>⚡</span>
+                    <span>NEXUS</span>
+                </div>
+                <span class="nav-chevron">›</span>
+            </a>
+        </aside>
+
+        <!-- Main Workspace Canvas -->
+        <main class="canvas">
+            
+            <!-- ===== VIEW 1: PATIENTS (NURSE QUEUE) ===== -->
+            <div id="view-nurse-patients" class="view-panel active">
+                <h1 class="page-title">Patients</h1>
+                <p class="page-subtitle">Patients awaiting or undergoing nursing intake</p>
+
+                <!-- Filter Toolbar -->
+                <div class="filter-toolbar">
+                    <div style="position:relative;">
+                        <span style="position:absolute; left:10px; top:10px; color:var(--ink-400); font-size:13px;">🔍</span>
+                        <input type="text" class="filter-input" placeholder="Name, MRN, mobile..." />
+                    </div>
+                    <select class="filter-select"><option>Active intake queue</option></select>
+                    <select class="filter-select"><option>All arrival status</option></select>
+                    <select class="filter-select"><option>All specialties</option></select>
+                    <select class="filter-select"><option>All priorities</option></select>
+                    <select class="filter-select"><option>New + Follow-up</option></select>
+                    <select class="filter-select"><option>Today</option></select>
+                </div>
+
+                <!-- 2-Column Nurse Patient Queue -->
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                    <div style="font-weight:700; font-size:15px;">Nurse Patient Queue</div>
+                    <span style="font-size:12px; color:var(--ink-500);" id="nurse-patient-count">6 patients</span>
+                </div>
+
+                <div class="nurse-queue-grid" id="nurse-queue-grid">
+                    <!-- Card 1: Arun Shah -->
+                    <div class="nurse-patient-card">
+                        <div class="card-top-row">
+                            <div class="patient-id-block">
+                                <div class="patient-avatar-icon">👤</div>
+                                <div>
+                                    <div class="card-patient-name">Arun Shah</div>
+                                    <div class="card-patient-meta">CCA-02521 · 57 years · Male · Today · 10:45</div>
+                                </div>
+                            </div>
+                            <span class="priority-badge">Routine</span>
+                        </div>
+
+                        <div class="card-mid-grid">
+                            <div>
+                                <div class="mid-block-label">Visit context</div>
+                                <div class="mid-block-value">New · Surgical Oncology</div>
+                                <div class="mid-block-sub">New surgical assessment</div>
+                            </div>
+                            <div>
+                                <div class="mid-block-label">Intake status</div>
+                                <span class="intake-status-badge">Intake in Progress</span>
+                            </div>
+                        </div>
+
+                        <div class="attention-notice-box">
+                            ⚠️ Medication reconciliation incomplete
+                        </div>
+
+                        <div class="card-action-row">
+                            <button class="btn-navy" onclick="openNurseIntakeWizard('Arun Shah', 'CCA-02521', 57, 'Male', 'New · Surgical Oncology')">Continue Intake →</button>
+                        </div>
+                    </div>
+
+                    <!-- Card 2: Meena Rao -->
+                    <div class="nurse-patient-card">
+                        <div class="card-top-row">
+                            <div class="patient-id-block">
+                                <div class="patient-avatar-icon">👤</div>
+                                <div>
+                                    <div class="card-patient-name">Meena Rao</div>
+                                    <div class="card-patient-meta">CCA-02516 · 48 years · Female · Today · 11:00</div>
+                                </div>
+                            </div>
+                            <span class="priority-badge">Routine</span>
+                        </div>
+
+                        <div class="card-mid-grid">
+                            <div>
+                                <div class="mid-block-label">Visit context</div>
+                                <div class="mid-block-value">New · Radiation Oncology</div>
+                                <div class="mid-block-sub">Radiation Oncology opinion</div>
+                            </div>
+                            <div>
+                                <div class="mid-block-label">Intake status</div>
+                                <span class="intake-status-badge">Ready for Handoff</span>
+                            </div>
+                        </div>
+
+                        <div class="attention-notice-box empty">
+                            No active nursing attention item
+                        </div>
+
+                        <div class="card-action-row">
+                            <button class="btn-navy" onclick="openNurseIntakeWizard('Meena Rao', 'CCA-02516', 48, 'Female', 'New · Radiation Oncology')">Review Handoff →</button>
+                        </div>
+                    </div>
+
+                    <!-- Card 3: Sunita Patil -->
+                    <div class="nurse-patient-card">
+                        <div class="card-top-row">
+                            <div class="patient-id-block">
+                                <div class="patient-avatar-icon">👤</div>
+                                <div>
+                                    <div class="card-patient-name">Sunita Patil</div>
+                                    <div class="card-patient-meta">CCA-02481 · 52 years · Female · Today · 10:30</div>
+                                </div>
+                            </div>
+                            <span class="priority-badge">Routine</span>
+                        </div>
+
+                        <div class="card-mid-grid">
+                            <div>
+                                <div class="mid-block-label">Visit context</div>
+                                <div class="mid-block-value">Follow-up · Medical Oncology</div>
+                                <div class="mid-block-sub">Cycle 3 Pre-chemo clearance</div>
+                            </div>
+                            <div>
+                                <div class="mid-block-label">Intake status</div>
+                                <span class="intake-status-badge">Intake in Progress</span>
+                            </div>
+                        </div>
+
+                        <div class="attention-notice-box">
+                            ⚠️ Pre-chemo CBC report review pending
+                        </div>
+
+                        <div class="card-action-row">
+                            <button class="btn-navy" onclick="openNurseIntakeWizard('Sunita Patil', 'CCA-02481', 52, 'Female', 'Follow-up · Medical Oncology')">Continue Intake →</button>
+                        </div>
+                    </div>
+
+                    <!-- Card 4: Ravi Kumar -->
+                    <div class="nurse-patient-card">
+                        <div class="card-top-row">
+                            <div class="patient-id-block">
+                                <div class="patient-avatar-icon">👤</div>
+                                <div>
+                                    <div class="card-patient-name">Ravi Kumar</div>
+                                    <div class="card-patient-meta">CCA-02519 · 61 years · Male · Today · 12:00</div>
+                                </div>
+                            </div>
+                            <span class="priority-badge">Routine</span>
+                        </div>
+
+                        <div class="card-mid-grid">
+                            <div>
+                                <div class="mid-block-label">Visit context</div>
+                                <div class="mid-block-value">New · Medical Oncology</div>
+                                <div class="mid-block-sub">Referral intake assessment</div>
+                            </div>
+                            <div>
+                                <div class="mid-block-label">Intake status</div>
+                                <span class="intake-status-badge">Awaiting Intake</span>
+                            </div>
+                        </div>
+
+                        <div class="attention-notice-box empty">
+                            No active nursing attention item
+                        </div>
+
+                        <div class="card-action-row">
+                            <button class="btn-navy" onclick="openNurseIntakeWizard('Ravi Kumar', 'CCA-02519', 61, 'Male', 'New · Medical Oncology')">Start Intake →</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== VIEW 2: NURSE INTAKE WIZARD ===== -->
+            <div id="view-nurse-intake" class="view-panel">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                    <div>
+                        <h1 class="page-title">Nurse Intake</h1>
+                        <div class="page-subtitle">Document the pre-consultation oncology assessment and prepare a structured clinical handoff.</div>
+                    </div>
+                    <button class="btn-outline" onclick="closeNurseIntakeWizard()">← Back to Patients</button>
+                </div>
+
+                <div style="margin-bottom:14px;">
+                    <span class="intake-status-badge">Intake in Progress</span>
+                </div>
+
+                <!-- Patient Context Banner -->
+                <div class="patient-context-banner">
+                    <div>
+                        <div class="banner-label">Patient</div>
+                        <div class="banner-value" id="intake-hdr-name">Arun Shah · CCA-02521</div>
+                        <div class="banner-sub" id="intake-hdr-age-sex">57 years · Male</div>
+                    </div>
+                    <div>
+                        <div class="banner-label">Visit</div>
+                        <div class="banner-value" id="intake-hdr-visit">New · Surgical Oncology</div>
+                        <div class="banner-sub">Today · 10:45</div>
+                    </div>
+                    <div>
+                        <div class="banner-label">Known Oncology Context · Read only</div>
+                        <div class="banner-value" style="font-size:12.5px;">Referral-provided gastrointestinal lesion</div>
+                        <div class="banner-sub">Not clinically confirmed</div>
+                    </div>
+                    <div>
+                        <div class="banner-label">Current Treatment · Read only</div>
+                        <div class="banner-value" style="font-size:12.5px;">No active treatment recorded</div>
+                        <div class="banner-sub">Not applicable</div>
+                    </div>
+                </div>
+
+                <!-- Stepper 6 Pills -->
+                <div class="wizard-stepper-6">
+                    <div class="step-pill-6 active" id="nurse-step-1" onclick="goToNurseStep(1)">1. Visit &amp; Symptoms</div>
+                    <div class="step-pill-6" id="nurse-step-2" onclick="goToNurseStep(2)">2. History &amp; Medication</div>
+                    <div class="step-pill-6" id="nurse-step-3" onclick="goToNurseStep(3)">3. Vitals &amp; Functional Assessment</div>
+                    <div class="step-pill-6" id="nurse-step-4" onclick="goToNurseStep(4)">4. Documents &amp; Available Results</div>
+                    <div class="step-pill-6" id="nurse-step-5" onclick="goToNurseStep(5)">5. Nurse Assessment</div>
+                    <div class="step-pill-6" id="nurse-step-6" onclick="goToNurseStep(6)">6. Review &amp; Handoff</div>
+                </div>
+
+                <!-- Step 1 Form Content -->
+                <div class="intake-card" id="nurse-step-content-1">
+                    <div style="font-size:16px; font-weight:700; margin-bottom:16px;">Visit &amp; Symptoms</div>
+
+                    <div class="form-grid-3">
+                        <div class="form-group">
+                            <label class="form-label">Chief Concern</label>
+                            <input type="text" class="form-input" id="nurse-concern" value="New surgical assessment" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Symptom Onset</label>
+                            <input type="date" class="form-input" id="nurse-onset" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Pain Score (0–10)</label>
+                            <input type="number" class="form-input" id="nurse-pain" min="0" max="10" value="2" />
+                        </div>
+                    </div>
+
+                    <div class="form-label" style="margin-top:12px;">Reported Symptoms</div>
+                    <div class="symptom-checkbox-grid">
+                        <label class="symptom-check-item"><input type="checkbox" checked /> Fatigue</label>
+                        <label class="symptom-check-item"><input type="checkbox" checked /> Nausea</label>
+                        <label class="symptom-check-item"><input type="checkbox" /> Vomiting</label>
+                        <label class="symptom-check-item"><input type="checkbox" /> Pain</label>
+                        <label class="symptom-check-item"><input type="checkbox" /> Weight Loss</label>
+                        <label class="symptom-check-item"><input type="checkbox" /> Loss of Appetite</label>
+                        <label class="symptom-check-item"><input type="checkbox" /> Fever</label>
+                        <label class="symptom-check-item"><input type="checkbox" /> Cough</label>
+                    </div>
+
+                    <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:24px;">
+                        <button class="btn-navy" onclick="goToNurseStep(3)">Continue to Vitals &amp; Assessment →</button>
+                    </div>
+                </div>
+
+                <!-- Step 3 Form Content (Vitals & BSA) -->
+                <div class="intake-card" id="nurse-step-content-3" style="display:none;">
+                    <div style="font-size:16px; font-weight:700; margin-bottom:16px;">Vitals &amp; Functional Assessment</div>
+
+                    <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:16px; margin-bottom:20px;">
+                        <div class="form-group">
+                            <label class="form-label">Blood Pressure (BP)</label>
+                            <input type="text" class="form-input" id="vitals-bp" placeholder="120/80" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Heart Rate (bpm)</label>
+                            <input type="number" class="form-input" id="vitals-hr" placeholder="78" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">SpO2 (%)</label>
+                            <input type="number" class="form-input" id="vitals-spo2" placeholder="98" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Temperature (°F)</label>
+                            <input type="text" class="form-input" id="vitals-temp" placeholder="98.4" />
+                        </div>
+                    </div>
+
+                    <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:16px; margin-bottom:20px;">
+                        <div class="form-group">
+                            <label class="form-label">Height (cm)</label>
+                            <input type="number" class="form-input" id="vitals-height" placeholder="172" oninput="calcBSA()" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Weight (kg)</label>
+                            <input type="number" class="form-input" id="vitals-weight" placeholder="68" oninput="calcBSA()" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Calculated BSA (m²)</label>
+                            <input type="text" class="form-input" id="vitals-bsa" value="1.81 m²" readonly style="background:#F1F5F9; font-weight:700;" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">ECOG Performance Status</label>
+                            <select class="form-select" id="vitals-ecog">
+                                <option value="0">0 — Fully active</option>
+                                <option value="1" selected>1 — Restricted in strenuous activity</option>
+                                <option value="2">2 — Ambulatory, capable of self-care</option>
+                                <option value="3">3 — Limited self-care, >50% in bed</option>
+                                <option value="4">4 — Completely disabled</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:24px;">
+                        <button class="btn-outline" onclick="goToNurseStep(1)">← Back</button>
+                        <button class="btn-navy" onclick="submitNurseHandoff()">Complete Intake &amp; Handoff to Doctor →</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== VIEW 3: NEXUS CLINICAL INTELLIGENCE ===== -->
+            <div id="view-nurse-nexus" class="view-panel">
+                <h1 class="page-title">NEXUS Clinical Brief</h1>
+                <p class="page-subtitle">AI-assisted clinical synthesis and clinical milestone tracker</p>
+
+                <div class="intake-card">
+                    <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+                        <div style="font-size:28px;">⚡</div>
+                        <div>
+                            <div style="font-size:18px; font-weight:700; color:var(--ink-900);">AIvana NEXUS Intelligence</div>
+                            <div style="font-size:12.5px; color:var(--ink-500);">Synthesizes multi-source records, histopathology, and guideline milestones</div>
+                        </div>
+                    </div>
+
+                    <div style="background:#F8FAFC; border:1px solid var(--line); border-radius:8px; padding:16px; font-size:13.5px; line-height:1.6;">
+                        <p><strong>Clinical Summary:</strong> 57-year-old male presenting with suspected gastrointestinal malignancy. Pre-consultation nurse intake in progress. Vital parameters stable. Medication reconciliation required prior to oncologist consultation.</p>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script>
+        function showNurseTab(tabName) {
+            document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.sidebar-nav-item').forEach(el => el.classList.remove('active'));
+
+            const targetView = document.getElementById(`view-nurse-${tabName}`);
+            const targetNav = document.getElementById(`nav-${tabName}`);
+
+            if (targetView) targetView.classList.add('active');
+            if (targetNav) targetNav.classList.add('active');
+        }
+
+        function openNurseIntakeWizard(name, mrn, age, sex, visit) {
+            document.getElementById('intake-hdr-name').textContent = `${name} · ${mrn}`;
+            document.getElementById('intake-hdr-age-sex').textContent = `${age} years · ${sex}`;
+            document.getElementById('intake-hdr-visit').textContent = visit;
+
+            document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
+            document.getElementById('view-nurse-intake').classList.add('active');
+            goToNurseStep(1);
+        }
+
+        function closeNurseIntakeWizard() {
+            showNurseTab('patients');
+        }
+
+        function goToNurseStep(stepNum) {
+            document.querySelectorAll('.step-pill-6').forEach((p, idx) => {
+                p.classList.remove('active');
+                if (idx + 1 === stepNum) p.classList.add('active');
+            });
+
+            document.getElementById('nurse-step-content-1').style.display = stepNum === 1 ? 'block' : 'none';
+            document.getElementById('nurse-step-content-3').style.display = stepNum === 3 ? 'block' : 'none';
+        }
+
+        function calcBSA() {
+            const h = parseFloat(document.getElementById('vitals-height').value) || 172;
+            const w = parseFloat(document.getElementById('vitals-weight').value) || 68;
+            // Mosteller formula: sqrt(h * w / 3600)
+            const bsa = Math.sqrt((h * w) / 3600).toFixed(2);
+            document.getElementById('vitals-bsa').value = `${bsa} m²`;
+        }
+
+        function submitNurseHandoff() {
+            alert('✅ Nurse Intake & Vitals Assessment completed! Structured clinical handoff sent to the Doctor.');
+            closeNurseIntakeWizard();
+        }
+    </script>
+</body>
+</html>

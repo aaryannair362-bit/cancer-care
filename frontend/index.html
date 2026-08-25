@@ -185,18 +185,19 @@
 
     <main class="main-content">
         <div class="login-card">
-            <div class="card-header">
-                <h2>Select Role / Persona</h2>
-                <p>Select your persona to access your specialized workspace</p>
+            <div class="card-header" style="text-align:left; margin-bottom: 24px;">
+                <h1 style="font-size: 20px; font-weight: 700; color: #0F172A; margin-bottom: 4px;">Aivana</h1>
+                <p style="font-size: 13.5px; color: #64748B;">Sign in to your workspace</p>
             </div>
 
             <form id="demo-login-form">
-                <div class="form-group">
+                <div class="form-group" style="margin-bottom: 18px;">
+                    <label class="form-label" style="display:block; font-size: 13px; font-weight: 600; color: #334155; margin-bottom: 8px;">Demo Role</label>
                     <select id="persona-select" class="role-dropdown">
                         <optgroup label="🎗️ Oncology OS (CCA Roles)">
-                            <option value="ccafrontdesk@aivana.com|CCAFrontDesk">Front Desk / Registration</option>
+                            <option value="ccafrontdesk@aivana.com|CCAFrontDesk" selected>Front Desk / Registration</option>
                             <option value="navigator@aivana.com|CCANurseNavigator">Nurse Navigator</option>
-                            <option value="oncologist@aivana.com|CCAMedicalOncologist" selected>Medical Oncologist</option>
+                            <option value="oncologist@aivana.com|CCAMedicalOncologist">Medical Oncologist</option>
                             <option value="surgeon@aivana.com|CCASurgicalOncologist">Surgical Oncologist</option>
                             <option value="radonc@aivana.com|CCARadiationOncologist">Radiation Oncologist</option>
                             <option value="radiologist@aivana.com|CCARadiologist">Radiologist</option>
@@ -223,16 +224,16 @@
                     </select>
                 </div>
 
-                <button type="submit" id="btn-submit" class="btn-signin">Sign in</button>
+                <button type="submit" id="btn-submit" class="btn-signin" style="background: #3B5A80; padding: 12px; font-size: 14px; font-weight: 600; border-radius: 8px;">Sign in</button>
                 <div id="login-error" class="error-message"></div>
             </form>
 
-            <div class="disclaimer-box">
-                <div class="disclaimer-icon">🛡️</div>
-                <div>Demonstration authentication only. No SSO, OAuth, MFA, identity provider, or production authorization is configured.</div>
+            <div class="disclaimer-box" style="background: #EFF6FF; border: 1px solid #BFDBFE; border-radius: 8px; padding: 12px 14px; margin-top: 20px; font-size: 12px; color: #1E40AF; display: flex; gap: 10px; align-items: flex-start; text-align: left;">
+                <div style="font-size: 14px; line-height: 1;">🛡️</div>
+                <div style="line-height: 1.4;">Demonstration authentication only. No SSO, OAuth, MFA, identity provider, or production authorization is configured.</div>
             </div>
 
-            <div class="pwd-toggle-link">
+            <div class="pwd-toggle-link" style="margin-top: 16px;">
                 <a href="#" id="toggle-pwd-btn">Need traditional password login?</a>
             </div>
 
