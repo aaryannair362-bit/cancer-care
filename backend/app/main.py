@@ -180,6 +180,10 @@ def seed_demo_logins(db: Session):
     are created in both demo_cc table and User table with status='Active'.
     """
     try:
+        # Explicitly ensure tables exist in the database
+        Base.metadata.create_all(bind=engine)
+        DemoCC.__table__.create(bind=engine, checkfirst=True)
+
         # 1. Ensure default Organization exists
         org = db.query(Organization).first()
         if not org:
