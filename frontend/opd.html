@@ -202,37 +202,69 @@
             <div id="scribe-view" class="view active">
                 <div class="stepper" id="step-header"></div>
 
-                <!-- ===== Step 0: Setup ===== -->
+                <!-- ===== Step 0: Setup (Live OPD Queue & Case Summary) ===== -->
                 <div id="step-panel-setup" class="step-panel active">
-                    <div class="card card-narrow">
-                        <div class="card-title" style="margin-bottom:4px;">Select patient</div>
-                        <div class="row-sub" style="margin-bottom:10px;">Search registered and admitted patients, review their complete case, then start the consultation.</div>
-                        <input id="patient-search" placeholder="Search by patient name, phone, or MRN" style="margin-bottom:12px;" />
-                        <div id="patient-pick-grid" class="patient-pick-grid"></div>
-                        <!-- Real state-holder behind the patient-card grid above -- kept
-                             actionable (non-zero bounding box) rather than display:none, since
-                             several tests still drive it directly via select_option(). -->
-                        <select id="patient-select" style="position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;">
-                            <option value="">— Select Patient —</option>
-                        </select>
-                        <div class="field-row" style="margin-top:20px;">
-                            <div>
-                                <label class="field-label">Consultation language</label>
-                                <select id="print-language" class="select">
-                                    <option value="English">English</option>
-                                    <option value="Hindi">Hindi</option>
-                                    <option value="Tamil">Tamil</option>
-                                    <option value="Telugu">Telugu</option>
-                                    <option value="Kannada">Kannada</option>
-                                    <option value="Bengali">Bengali</option>
-                                    <option value="Marathi">Marathi</option>
-                                    <option value="Malayalam">Malayalam</option>
-                                    <option value="Gujarati">Gujarati</option>
-                                    <option value="Punjabi">Punjabi</option>
-                                </select>
+                    <div style="display:grid; grid-template-columns: 360px 1fr; gap: 20px; align-items: start;">
+                        <!-- Left: Live OPD Queue -->
+                        <div class="card" style="padding: 18px;">
+                            <div class="card-head" style="margin-bottom: 8px;">
+                                <div>
+                                    <div class="card-title" style="font-size:16px;">🎟️ Today's OPD Queue</div>
+                                    <div class="row-sub" style="font-size:12px;">Patients waiting for consultation</div>
+                                </div>
+                                <button id="queue-reload-btn" class="btn-outline" style="padding:4px 8px; font-size:11px;" type="button">🔄 Refresh</button>
+                            </div>
+                            <input id="queue-search" placeholder="Filter queue by name/MRN..." style="margin-bottom:10px; width:100%; padding:8px 10px; font-size:12px; border:1px solid var(--line); border-radius:6px;" />
+                            <div id="opd-queue-list" style="display:flex; flex-direction:column; gap:8px; max-height:580px; overflow-y:auto; padding-right:4px;">
+                                <p style="color:var(--ink-400); font-size:12px; text-align:center; padding:20px;">Loading today's queue...</p>
+                            </div>
+                            
+                            <!-- Hidden compatibility select for automated test runners -->
+                            <select id="patient-select" style="position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0;">
+                                <option value="">— Select Patient —</option>
+                            </select>
+                        </div>
+
+                        <!-- Right: Patient Case Summary & Scribing Setup -->
+                        <div class="card" id="patient-case-view-panel" style="padding: 22px; min-height: 500px;">
+                            <div id="no-patient-selected" style="text-align:center; padding: 60px 20px; color:var(--ink-500);">
+                                <div style="font-size: 40px; margin-bottom: 12px;">👈</div>
+                                <h3 style="color:var(--ink-900); margin-bottom: 6px;">Select a Patient from the Queue</h3>
+                                <p style="font-size: 13px; max-width: 420px; margin: 0 auto;">Click on any patient in today's OPD queue on the left to review their complete medical history, previous consultations, lab files, and start scribing.</p>
+                            </div>
+
+                            <div id="patient-selected-details" style="display:none;">
+                                <div style="display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid var(--line); padding-bottom:14px; margin-bottom:16px;">
+                                    <div>
+                                        <h2 id="case-panel-name" style="font-size:20px; font-weight:700; color:var(--ink-900); margin-bottom:4px;">Patient Name</h2>
+                                        <div id="case-panel-meta" class="row-sub" style="font-size:13px;">MRN · Age · Gender</div>
+                                    </div>
+                                    <div style="display:flex; align-items:center; gap:10px;">
+                                        <div>
+                                            <label class="field-label" style="margin-bottom:2px; font-size:11px;">Language</label>
+                                            <select id="print-language" class="select" style="padding:5px 8px; font-size:12px;">
+                                                <option value="English">English</option>
+                                                <option value="Hindi">Hindi</option>
+                                                <option value="Tamil">Tamil</option>
+                                                <option value="Telugu">Telugu</option>
+                                                <option value="Kannada">Kannada</option>
+                                                <option value="Bengali">Bengali</option>
+                                                <option value="Marathi">Marathi</option>
+                                                <option value="Malayalam">Malayalam</option>
+                                                <option value="Gujarati">Gujarati</option>
+                                                <option value="Punjabi">Punjabi</option>
+                                            </select>
+                                        </div>
+                                        <button id="start-consult-btn" class="btn-primary" style="padding:10px 18px; font-size:13px; margin-top:14px;">🎤 Call &amp; Start Consult</button>
+                                    </div>
+                                </div>
+
+                                <!-- Inline Case Summary & History Tabs -->
+                                <div id="case-summary-inline-content" style="font-size:13px; line-height:1.5;">
+                                    <p>Loading patient history...</p>
+                                </div>
                             </div>
                         </div>
-                        <button id="start-consult-btn" class="btn-primary" style="margin-top:20px;">🎤 Start Consultation</button>
                     </div>
                 </div>
 
@@ -543,52 +575,190 @@ async function loadTranscriptionProvider() {
     }
 }
 
-function renderPatientCards(patients) {
-    const grid = document.getElementById('patient-pick-grid');
-    if (!patients || patients.length === 0) {
-        grid.innerHTML = '<p style="color:var(--ink-400); font-size:13px;">No patients available yet.</p>';
+let currentActiveQueueToken = null;
+let opdQueueTokens = [];
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function renderOpdQueue(tokens) {
+    const listEl = document.getElementById('opd-queue-list');
+    if (!tokens || tokens.length === 0) {
+        listEl.innerHTML = `
+            <div style="text-align:center; padding:30px 10px; color:var(--ink-400);">
+                <div style="font-size:28px; margin-bottom:8px;">⏳</div>
+                <div style="font-weight:600; color:var(--ink-700);">No patients in queue</div>
+                <p style="font-size:11px; margin-top:4px;">Tokens issued at Front Desk will appear here.</p>
+            </div>
+        `;
         return;
     }
-    grid.innerHTML = patients.map(p => {
-        const initials = (p.name || '?').split(' ').filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
-        const details = [p.age ? `${p.age}y` : null, p.gender, p.ward].filter(Boolean).join(' · ');
+
+    listEl.innerHTML = tokens.map(t => {
+        const isSelected = currentActiveQueueToken && currentActiveQueueToken.id === t.id;
+        const isEmergency = t.is_emergency;
+
         return `
-            <div class="patient-pick ${String(p.id) === String(patientSelect.value) ? 'active' : ''}" data-patient-id="${p.id}" style="position:relative;padding-right:105px;">
-                <div class="row-avatar">${initials}</div>
-                <div><div class="row-title">${p.name}</div><div class="row-sub">${details}</div></div>
-                <button class="btn-outline patient-summary-btn" data-summary-patient="${p.id}" style="position:absolute;right:10px;top:12px;padding:5px 8px;">Case summary</button>
+            <div class="card opd-queue-item ${isSelected ? 'active-queue-card' : ''}" 
+                 data-token-id="${t.id}" data-patient-id="${t.patient_id}"
+                 style="padding:12px; cursor:pointer; border: 1.5px solid ${isSelected ? 'var(--sage-700)' : 'var(--line)'}; background: ${isSelected ? 'var(--sage-100)' : 'var(--surface)'}; border-radius:10px; transition: all 0.2s; margin-bottom:4px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                    <div style="display:flex; align-items:center; gap:6px;">
+                        <span style="font-weight:700; font-size:12px; color:var(--sage-800); background:#E2E8F0; padding:2px 8px; border-radius:6px;">Token #${t.token_number}</span>
+                        ${isEmergency ? '<span style="background:#EF4444; color:white; font-size:10px; font-weight:700; padding:2px 6px; border-radius:4px;">EMERGENCY</span>' : ''}
+                    </div>
+                    <span style="font-size:11px; font-weight:600; color:${t.status==='Waiting' ? '#D97706' : t.status==='InProgress' ? '#2F6F52' : '#64748B'};">${t.status}</span>
+                </div>
+                <div style="font-weight:600; font-size:13.5px; color:var(--ink-900); margin-bottom:2px;">${escapeHtml(t.patient_name || `Patient #${t.patient_id}`)}</div>
+                <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--ink-500);">
+                    <span>${escapeHtml(t.patient_mrn || '')}</span>
+                    <span>${t.issued_at ? new Date(t.issued_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : ''}</span>
+                </div>
             </div>
         `;
     }).join('');
-    grid.querySelectorAll('.patient-pick').forEach(el => {
+
+    listEl.querySelectorAll('.opd-queue-item').forEach(el => {
         el.addEventListener('click', () => {
-            patientSelect.value = el.dataset.patientId;
-            patientSelect.dispatchEvent(new Event('change'));
-            grid.querySelectorAll('.patient-pick').forEach(c => c.classList.remove('active'));
-            el.classList.add('active');
+            const tokenId = Number(el.dataset.tokenId);
+            const token = tokens.find(item => item.id === tokenId);
+            if (token) selectQueueToken(token);
         });
     });
-    grid.querySelectorAll('.patient-summary-btn').forEach(button => button.addEventListener('click', (event) => {
-        event.stopPropagation();
-        openCaseSummary(button.dataset.summaryPatient);
-    }));
 }
 
-async function loadPatients() {
-    const res = await apiRequest('/patients/search?limit=100');
-    if (res.ok) {
-        const patients = await res.json();
-        allRegisteredPatients = patients;
-        patientSelect.innerHTML = '<option value="">— Select Patient —</option>' + patients.map(p => `<option value="${p.id}">${p.name} (${p.mrn || 'No MRN'})</option>`).join('');
-        renderPatientCards(patients);
-        const requested = new URLSearchParams(location.search).get('patient_id');
-        if (requested && patients.some(p => String(p.id) === String(requested))) openCaseSummary(requested);
+async function loadOpdQueue() {
+    try {
+        const res = await apiRequest('/queue/tokens');
+        if (res.ok) {
+            opdQueueTokens = await res.json();
+            renderOpdQueue(opdQueueTokens);
+            
+            patientSelect.innerHTML = '<option value="">— Select Patient —</option>' + 
+                opdQueueTokens.map(t => `<option value="${t.patient_id}">${t.patient_name} (${t.patient_mrn || `#${t.patient_id}`})</option>`).join('');
+                
+            if (currentActiveQueueToken) {
+                const refreshed = opdQueueTokens.find(t => t.id === currentActiveQueueToken.id);
+                if (refreshed) currentActiveQueueToken = refreshed;
+            } else if (opdQueueTokens.length > 0) {
+                // Auto-select the first waiting or in-progress token if available
+                const firstActionable = opdQueueTokens.find(t => t.status === 'Waiting' || t.status === 'InProgress') || opdQueueTokens[0];
+                if (firstActionable) selectQueueToken(firstActionable);
+            }
+        }
+    } catch(err) {
+        console.error("Failed to load queue:", err);
     }
 }
 
-document.getElementById('patient-search').addEventListener('input', (event) => {
-    const q = event.target.value.trim().toLowerCase();
-    renderPatientCards(!q ? allRegisteredPatients : allRegisteredPatients.filter(p => [p.name, p.phone, p.mrn].some(v => String(v || '').toLowerCase().includes(q))));
+async function selectQueueToken(token) {
+    currentActiveQueueToken = token;
+    selectedPatientId = token.patient_id;
+    patientSelect.value = token.patient_id;
+    patientSelect.dispatchEvent(new Event('change'));
+    
+    renderOpdQueue(opdQueueTokens);
+    await loadInlineCaseSummary(token.patient_id);
+}
+
+async function loadInlineCaseSummary(patientId) {
+    document.getElementById('no-patient-selected').style.display = 'none';
+    const panel = document.getElementById('patient-selected-details');
+    panel.style.display = 'block';
+    
+    const container = document.getElementById('case-summary-inline-content');
+    container.innerHTML = '<p style="color:var(--ink-500); padding:20px 0;">Loading medical records and full case history...</p>';
+
+    try {
+        const res = await apiRequest(`/patients/${patientId}/case-summary`);
+        if (!res.ok) {
+            container.innerHTML = '<p style="color:var(--clay-600);">Could not load patient case summary.</p>';
+            return;
+        }
+        const data = await res.json();
+        const p = data.patient;
+        
+        document.getElementById('case-panel-name').textContent = p.name;
+        document.getElementById('case-panel-meta').textContent = `${p.mrn || 'No MRN'} · ${p.age ?? '-'} yrs · ${p.gender || '-'} · ${p.blood_group || 'Blood Group N/A'} · Contact: ${p.phone || '-'}`;
+        
+        const findings = data.imported_record_findings || {};
+        
+        container.innerHTML = `
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px;">
+                <div style="background:#F8FAFC; border:1px solid var(--line); border-radius:8px; padding:12px;">
+                    <div style="font-weight:700; font-size:11px; color:var(--sage-700); text-transform:uppercase; margin-bottom:4px;">Primary Diagnosis & Allergies</div>
+                    <div style="font-weight:600; color:var(--ink-900); font-size:13px;">${safe(p.diagnosis || 'No primary diagnosis recorded')}</div>
+                    <div style="margin-top:6px; font-size:12px; color:var(--ink-700);"><strong>Known Allergies:</strong> ${p.allergies && p.allergies.length ? p.allergies.join(', ') : 'None recorded'}</div>
+                </div>
+
+                <div style="background:#F8FAFC; border:1px solid var(--line); border-radius:8px; padding:12px;">
+                    <div style="font-weight:700; font-size:11px; color:var(--sage-700); text-transform:uppercase; margin-bottom:4px;">Record Highlights</div>
+                    <div style="font-size:12px; color:var(--ink-700);"><strong>Hospital Consultations:</strong> ${data.overview?.consultation_count || 0} visit(s)</div>
+                    <div style="font-size:12px; color:var(--ink-700); margin-top:4px;"><strong>Uploaded Lab/Scan Files:</strong> ${data.overview?.document_count || 0} report(s)</div>
+                </div>
+            </div>
+
+            <!-- OCR Imported Findings -->
+            <div style="background:#FFFBEB; border:1px solid #FDE68A; border-radius:8px; padding:12px; margin-bottom:14px;">
+                <div style="font-weight:700; font-size:11px; color:#B45309; text-transform:uppercase; margin-bottom:4px;">📑 Findings from Imported External Medical Records</div>
+                <div style="font-size:12px; color:#78350F; line-height:1.6;">
+                    ${findings.diagnoses && findings.diagnoses.length ? `<div><strong>Extracted Diagnoses:</strong> ${findings.diagnoses.join('; ')}</div>` : ''}
+                    ${findings.medications && findings.medications.length ? `<div><strong>Past Medication History:</strong> ${findings.medications.join('; ')}</div>` : ''}
+                    ${findings.investigations && findings.investigations.length ? `<div><strong>Diagnostics & Lab Findings:</strong> ${findings.investigations.join('; ')}</div>` : ''}
+                    ${findings.procedures && findings.procedures.length ? `<div><strong>Surgical/Clinical Procedures:</strong> ${findings.procedures.join('; ')}</div>` : ''}
+                    ${(!findings.diagnoses?.length && !findings.medications?.length && !findings.investigations?.length && !findings.procedures?.length) ? '<div class="row-sub">No external OCR reports uploaded for this patient.</div>' : ''}
+                </div>
+            </div>
+
+            <!-- Consultation History -->
+            <div style="margin-bottom:14px;">
+                <div style="font-weight:700; font-size:12px; color:var(--ink-700); margin-bottom:6px;">🕒 Previous Consultation History</div>
+                ${data.consultations && data.consultations.length ? data.consultations.map(c => `
+                    <div style="border-left:3px solid var(--sage-700); background:#FFFFFF; border:1px solid var(--line); border-left-width:3px; padding:8px 12px; border-radius:6px; margin-bottom:6px;">
+                        <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--ink-500);">
+                            <span><strong>${new Date(c.date).toLocaleDateString()}</strong> · ${safe(c.visit_type || 'OPD')}</span>
+                            <span style="font-weight:600;">${c.finalized ? 'Finalized' : 'Draft'}</span>
+                        </div>
+                        <div style="font-weight:600; font-size:12.5px; margin-top:2px; color:var(--ink-900);">${safe(c.diagnosis || c.chief_complaint || 'General Checkup')}</div>
+                    </div>
+                `).join('') : '<p class="row-sub" style="font-size:12px;">No prior hospital consultations recorded.</p>'}
+            </div>
+
+            <!-- Recent Vitals -->
+            <div>
+                <div style="font-weight:700; font-size:12px; color:var(--ink-700); margin-bottom:6px;">🩺 Recent Vitals Trend</div>
+                ${data.recent_vitals && data.recent_vitals.length ? `
+                    <table class="data-table" style="font-size:11px; width:100%; border-collapse:collapse;">
+                        <thead><tr><th>Recorded At</th><th>BP</th><th>Heart Rate</th><th>SpO2</th></tr></thead>
+                        <tbody>
+                            ${data.recent_vitals.slice(0, 5).map(v => `
+                                <tr>
+                                    <td>${new Date(v.recorded_at).toLocaleString()}</td>
+                                    <td>${safe(v.bp || '-')}</td>
+                                    <td>${safe(v.heart_rate ?? '-')} bpm</td>
+                                    <td>${safe(v.oxygen_sat ?? '-')} %</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                ` : '<p class="row-sub" style="font-size:12px;">No vitals recorded yet.</p>'}
+            </div>
+        `;
+    } catch(err) {
+        container.innerHTML = '<p style="color:var(--clay-600);">Error loading patient case details.</p>';
+    }
+}
+
+async function loadPatients() {
+    await loadOpdQueue();
+}
+
+document.getElementById('queue-reload-btn')?.addEventListener('click', loadOpdQueue);
+document.getElementById('queue-search')?.addEventListener('input', (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    renderOpdQueue(!q ? opdQueueTokens : opdQueueTokens.filter(t => [t.patient_name, t.patient_mrn, String(t.token_number)].some(v => String(v || '').toLowerCase().includes(q))));
 });
 
 function safe(value) {
@@ -737,13 +907,19 @@ async function startVoiceCapture() {
     }
 }
 
-document.getElementById('start-consult-btn').addEventListener('click', () => {
+document.getElementById('start-consult-btn').addEventListener('click', async () => {
     const patientId = patientSelect.value;
     if (!patientId) {
-        alert('Please select a patient first.');
+        alert('Please select a patient from the queue first.');
         return;
     }
     selectedPatientId = patientId;
+    if (currentActiveQueueToken) {
+        try {
+            await apiRequest(`/queue/tokens/${currentActiveQueueToken.id}/call`, { method: 'PATCH' });
+            loadOpdQueue();
+        } catch(e) {}
+    }
     goToStep(1);
     startVoiceCapture();
 });
@@ -913,6 +1089,13 @@ async function finalizeConsultation() {
     analysisStatus.textContent = `✅ Finalized and saved.${taskNote}`;
     if (data.interaction_warnings && data.interaction_warnings.length > 0) {
         renderInteractions(data.interaction_warnings);
+    }
+    if (currentActiveQueueToken) {
+        try {
+            await apiRequest(`/queue/tokens/${currentActiveQueueToken.id}/complete`, { method: 'PATCH' });
+            currentActiveQueueToken = null;
+            loadOpdQueue();
+        } catch(e) {}
     }
     loadConsultations();
 }
