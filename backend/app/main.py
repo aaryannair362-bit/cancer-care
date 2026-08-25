@@ -337,6 +337,46 @@ def seed_demo_logins(db: Session):
                 "target_url": "/cca_os.html",
                 "description": "Cancer treatment estimates, government schemes & insurance",
             },
+            {
+                "role": "CCARadiologyCoordinator",
+                "email": "radcoord@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Radiology Coordinator)",
+                "target_url": "/cca_os.html",
+                "description": "Radiology scheduling, image intake & scan review coordination",
+            },
+            {
+                "role": "CCALabPhlebotomy",
+                "email": "lab@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Lab / Phlebotomy)",
+                "target_url": "/cca_os.html",
+                "description": "Sample collection, CBC/LFT/RFT pre-chemo clearances",
+            },
+            {
+                "role": "CCAInfusionNurse",
+                "email": "infusion@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Oncology Day-Care / Infusion Nurse)",
+                "target_url": "/cca_os.html",
+                "description": "Daycare chemotherapy administration & chair monitoring",
+            },
+            {
+                "role": "CCAExternalMDTSpecialist",
+                "email": "externalmdt@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (External MDT Specialist)",
+                "target_url": "/cca_os.html",
+                "description": "Remote external oncologist consultation & second opinions",
+            },
+            {
+                "role": "CCAFrontDesk",
+                "email": "ccafrontdesk@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Front Desk / Registration)",
+                "target_url": "/cca_os.html",
+                "description": "Oncology intake, consent capture & appointment check-in",
+            },
         ]
 
         # 3. Populate demo_cc table and User table
@@ -453,6 +493,71 @@ def get_demo_logins(db: Session = Depends(get_db)):
         ]
     }
 
+
+@app.post("/api/auth/demo-login")
+async def demo_login(request: Request, db: Session = Depends(get_db)):
+    """Passwordless demo login for presentations and evaluations.
+    Takes { "email": ... } or { "role": ... }, verifies or auto-provisions the user,
+    and returns valid auth tokens and user profile immediately without password check.
+    """
+    try:
+        body = await request.json()
+        email = body.get("email")
+        role = body.get("role")
+        user = None
+        
+        if email:
+            user = db.query(User).filter(User.email == email).first()
+        elif role:
+            user = db.query(User).filter(User.role == role).first()
+
+        if not user:
+            # Check demo_cc for exact match
+            demo_match = None
+            if email:
+                demo_match = db.query(DemoCC).filter(DemoCC.email == email).first()
+            elif role:
+                demo_match = db.query(DemoCC).filter(DemoCC.role == role).first()
+            
+            org = db.query(Organization).first()
+            if not org:
+                org = Organization(name="AIvana Cancer Care Hospital", device_limit=50)
+                db.add(org)
+                db.flush()
+                
+            user_email = email or (demo_match.email if demo_match else f"{role.lower()}@aivana.com")
+            user_role = role or (demo_match.role if demo_match else "Doctor")
+            pwd_hash = get_password_hash("Password@2026!")
+            
+            user = User(
+                email=user_email,
+                password_hash=pwd_hash,
+                role=user_role,
+                organization_id=org.id,
+                status="Active",
+                must_change_password=False,
+            )
+            db.add(user)
+            db.flush()
+            db.add(PasswordHistory(user_id=user.id, password_hash=pwd_hash))
+            db.commit()
+
+        user.failed_login_attempts = 0
+        user.lock_until = None
+        user.status = "Active"
+        user.last_active = datetime.utcnow()
+        db.commit()
+
+        token_data = {"user_id": user.id, "email": user.email, "role": user.role, "organization_id": user.organization_id}
+        log_audit(db, user.id, user.email, user.organization_id, "demo_login", "auth/demo-login", "Success")
+        return {
+            "access_token": create_access_token(token_data),
+            "refresh_token": create_refresh_token(token_data),
+            "user": {"id": user.id, "email": user.email, "role": user.role, "organization_id": user.organization_id}
+        }
+    except Exception as e:
+        logger.error("Demo login error: %s", e)
+        raise HTTPException(500, "Internal server error")
 
 
 @app.post("/api/auth/register")

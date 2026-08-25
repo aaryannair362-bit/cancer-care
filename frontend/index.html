@@ -3,71 +3,318 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AIVANA Hospital - Login</title>
+    <title>AIvana OS — Healthcare & Oncology Platform</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,500&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
-                * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Inter', -apple-system, system-ui, sans-serif; background: #FBFAF7; color: #1C2621; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
-        .login-container { width: 100%; max-width: 420px; padding: 20px; }
-        .login-header { text-align: center; margin-bottom: 30px; }
-        .login-header h1 { font-size: 32px; font-weight: 700; background: linear-gradient(135deg, #2F6F52, #2F6F52); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .login-header p { color: #667169; font-size: 14px; margin-top: 4px; }
-        .login-box { background: #FFFFFF; border: 1px solid #E6E7E2; border-radius: 16px; padding: 30px; }
-        .login-box input { width: 100%; padding: 12px 14px; margin-bottom: 12px; background: #F3F2EE; border: 1px solid #E6E7E2; border-radius: 10px; color: #1C2621; font-size: 14px; outline: none; }
-        .login-box input:focus { border-color: #2F6F52; }
-        .btn-primary { width: 100%; padding: 12px; background: linear-gradient(135deg, #2F6F52, #234E39); border: none; border-radius: 10px; color: white; font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
-        .btn-primary:hover { opacity: 0.9; }
-        .error { color: #C1694F; font-size: 13px; margin-top: 8px; text-align: center; }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #F8FAFC;
+            color: #0F172A;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .navbar {
+            background: #0F172A;
+            color: #FFFFFF;
+            padding: 14px 28px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid #1E293B;
+        }
+        .navbar-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 16px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+        }
+        .navbar-brand span {
+            background: linear-gradient(135deg, #38BDF8, #818CF8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .main-content {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+        .login-card {
+            width: 100%;
+            max-width: 480px;
+            background: #FFFFFF;
+            border: 1px solid #E2E8F0;
+            border-radius: 16px;
+            padding: 36px 32px;
+            box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.05), 0 8px 10px -6px rgba(15, 23, 42, 0.03);
+        }
+        .card-header {
+            text-align: center;
+            margin-bottom: 28px;
+        }
+        .card-header h2 {
+            font-size: 22px;
+            font-weight: 700;
+            color: #0F172A;
+            margin-bottom: 6px;
+        }
+        .card-header p {
+            font-size: 13px;
+            color: #64748B;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: #334155;
+            margin-bottom: 8px;
+        }
+        .role-dropdown {
+            width: 100%;
+            padding: 12px 14px;
+            font-size: 14px;
+            font-family: inherit;
+            color: #0F172A;
+            background: #FFFFFF;
+            border: 1.5px solid #CBD5E1;
+            border-radius: 10px;
+            outline: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .role-dropdown:focus {
+            border-color: #3B82F6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+        }
+        .btn-signin {
+            width: 100%;
+            padding: 13px;
+            background: #475569;
+            background: linear-gradient(135deg, #334155, #475569);
+            color: #FFFFFF;
+            border: none;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 12px rgba(71, 85, 105, 0.25);
+        }
+        .btn-signin:hover {
+            background: linear-gradient(135deg, #1E293B, #334155);
+            transform: translateY(-1px);
+        }
+        .btn-signin:active {
+            transform: translateY(0);
+        }
+        .disclaimer-box {
+            margin-top: 24px;
+            padding: 14px 16px;
+            background: #F1F5F9;
+            border: 1px solid #E2E8F0;
+            border-radius: 10px;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            font-size: 12px;
+            line-height: 1.5;
+            color: #475569;
+        }
+        .disclaimer-icon {
+            font-size: 15px;
+            line-height: 1;
+            color: #0284C7;
+            margin-top: 1px;
+        }
+        .error-message {
+            color: #DC2626;
+            font-size: 13px;
+            text-align: center;
+            margin-top: 10px;
+        }
+        .pwd-toggle-link {
+            text-align: center;
+            margin-top: 18px;
+            font-size: 12px;
+        }
+        .pwd-toggle-link a {
+            color: #64748B;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        .pwd-toggle-link a:hover {
+            color: #0F172A;
+            text-decoration: underline;
+        }
+        #password-auth-section {
+            display: none;
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid #E2E8F0;
+        }
+        .input-text {
+            width: 100%;
+            padding: 11px 13px;
+            margin-bottom: 12px;
+            border: 1.5px solid #CBD5E1;
+            border-radius: 8px;
+            font-size: 13px;
+            outline: none;
+        }
+        .input-text:focus {
+            border-color: #3B82F6;
+        }
     </style>
 </head>
 <body>
-<div class="login-container">
-    <div class="login-header">
-        <h1>🏥 AIVANA Hospital</h1>
-        <p>Unified Clinical Portal</p>
-    </div>
-    <div class="login-box">
-        <form id="login-form">
-            <input type="email" id="login-email" placeholder="name@aivana.com" required />
-            <input type="password" id="login-password" placeholder="Password" required />
-            <button type="submit" class="btn-primary">Sign In</button>
-            <div id="login-error" class="error"></div>
-        </form>
-    </div>
-</div>
-<script src="/static/js/api.js"></script>
-<script>
-document.getElementById('login-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const email = document.getElementById('login-email').value;
-    const password = document.getElementById('login-password').value;
-    const errorEl = document.getElementById('login-error');
-    errorEl.textContent = '';
-    try {
-        const res = await fetch(`${API_BASE}/auth/login`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, password })
-        });
-        const data = await res.json();
-        if (!res.ok) {
-            errorEl.textContent = data.detail || 'Login failed';
-            return;
-        }
-        // Regression fix: this used to only store access_token/refresh_token, never the
-        // 'hms_user' key every Auth.requirePage()-gated page (pharmacy/billing/inventory/
-        // frontdesk/tpa/cca_os) reads via Auth.getUser() -- meaning every one of those pages
-        // was unreachable after a real login (Auth.getUser() always returned null, so
-        // requirePage() always redirected straight back here). Also replaces the hardcoded,
-        // separately-maintained role->page redirect chain (which never knew about the CCA
-        // Oncology OS roles at all) with api.js's single ROLE_HOME source of truth.
-        Auth.setSession(data.access_token, data.refresh_token, data.user);
-        window.location.href = Auth.homeFor(data.user.role);
-    } catch(err) {
-        errorEl.textContent = 'Network error';
-    }
-});
-</script>
 
+    <nav class="navbar">
+        <div class="navbar-brand">
+            🏥 <span>AIvana OS — Cancer Care & Healthcare</span>
+        </div>
+        <div style="font-size: 12px; color: #94A3B8;">Clinical Navigation Portal</div>
+    </nav>
+
+    <main class="main-content">
+        <div class="login-card">
+            <div class="card-header">
+                <h2>Select Role / Persona</h2>
+                <p>Select your persona to access your specialized workspace</p>
+            </div>
+
+            <form id="demo-login-form">
+                <div class="form-group">
+                    <select id="persona-select" class="role-dropdown">
+                        <optgroup label="🎗️ Oncology OS (CCA Roles)">
+                            <option value="ccafrontdesk@aivana.com|CCAFrontDesk">Front Desk / Registration</option>
+                            <option value="navigator@aivana.com|CCANurseNavigator">Nurse Navigator</option>
+                            <option value="oncologist@aivana.com|CCAMedicalOncologist" selected>Medical Oncologist</option>
+                            <option value="surgeon@aivana.com|CCASurgicalOncologist">Surgical Oncologist</option>
+                            <option value="radonc@aivana.com|CCARadiationOncologist">Radiation Oncologist</option>
+                            <option value="radiologist@aivana.com|CCARadiologist">Radiologist</option>
+                            <option value="radcoord@aivana.com|CCARadiologyCoordinator">Radiology Coordinator</option>
+                            <option value="pathologist@aivana.com|CCAPathologist">Pathologist / Molecular Diagnostics</option>
+                            <option value="lab@aivana.com|CCALabPhlebotomy">Lab / Phlebotomy</option>
+                            <option value="infusion@aivana.com|CCAInfusionNurse">Oncology Day-Care / Infusion Nurse</option>
+                            <option value="mdtcoord@aivana.com|CCAMDTCoordinator">MDT Coordinator</option>
+                            <option value="externalmdt@aivana.com|CCAExternalMDTSpecialist">External MDT Specialist</option>
+                            <option value="liaison@aivana.com|CCAPatientLiaison">Patient Liaison / Care Coordinator</option>
+                            <option value="counsellor@aivana.com|CCAFinancialCounsellor">Financial Counsellor / Patient Financial Services</option>
+                            <option value="admin@aivana.com|Admin">Admin / Operations</option>
+                        </optgroup>
+                        <optgroup label="🏥 Hospital Core & Operations">
+                            <option value="doctor@aivana.com|Doctor">Doctor OPD (General Medicine)</option>
+                            <option value="headnurse@aivana.com|HeadNurse">Head Nurse (Ward Oversight)</option>
+                            <option value="nurse@aivana.com|Nurse">Staff Nurse (IPD Inpatient)</option>
+                            <option value="frontdesk@aivana.com|NursingStation">Nursing Station / Frontdesk</option>
+                            <option value="pharmacy@aivana.com|Pharmacist">Pharmacist (Dispensary)</option>
+                            <option value="inventory@aivana.com|InventoryManager">Inventory Manager (Procurement)</option>
+                            <option value="billing@aivana.com|Billing">Billing Desk & Cashier</option>
+                            <option value="tpa@aivana.com|TPA">TPA Insurance Desk</option>
+                        </optgroup>
+                    </select>
+                </div>
+
+                <button type="submit" id="btn-submit" class="btn-signin">Sign in</button>
+                <div id="login-error" class="error-message"></div>
+            </form>
+
+            <div class="disclaimer-box">
+                <div class="disclaimer-icon">🛡️</div>
+                <div>Demonstration authentication only. No SSO, OAuth, MFA, identity provider, or production authorization is configured.</div>
+            </div>
+
+            <div class="pwd-toggle-link">
+                <a href="#" id="toggle-pwd-btn">Need traditional password login?</a>
+            </div>
+
+            <div id="password-auth-section">
+                <form id="traditional-login-form">
+                    <input type="email" id="trad-email" class="input-text" placeholder="name@aivana.com" required />
+                    <input type="password" id="trad-password" class="input-text" placeholder="Password" required />
+                    <button type="submit" class="btn-signin" style="background: #2563EB;">Sign In with Password</button>
+                </form>
+            </div>
+        </div>
+    </main>
+
+    <script src="/static/js/api.js"></script>
+    <script>
+    // Demo Passwordless Sign In
+    document.getElementById('demo-login-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const select = document.getElementById('persona-select');
+        const [email, role] = select.value.split('|');
+        const errorEl = document.getElementById('login-error');
+        const btn = document.getElementById('btn-submit');
+        
+        errorEl.textContent = '';
+        btn.disabled = true;
+        btn.textContent = 'Signing in...';
+
+        try {
+            const res = await fetch(`${API_BASE}/auth/demo-login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, role })
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                errorEl.textContent = data.detail || 'Sign in failed';
+                btn.disabled = false;
+                btn.textContent = 'Sign in';
+                return;
+            }
+
+            Auth.setSession(data.access_token, data.refresh_token, data.user);
+            window.location.href = Auth.homeFor(data.user.role);
+        } catch (err) {
+            errorEl.textContent = 'Network connection error';
+            btn.disabled = false;
+            btn.textContent = 'Sign in';
+        }
+    });
+
+    // Traditional Password Login
+    document.getElementById('toggle-pwd-btn').addEventListener('click', (e) => {
+        e.preventDefault();
+        const section = document.getElementById('password-auth-section');
+        section.style.display = section.style.display === 'block' ? 'none' : 'block';
+    });
+
+    document.getElementById('traditional-login-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const email = document.getElementById('trad-email').value.trim();
+        const password = document.getElementById('trad-password').value;
+        const errorEl = document.getElementById('login-error');
+        errorEl.textContent = '';
+
+        try {
+            const res = await fetch(`${API_BASE}/auth/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, password })
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                errorEl.textContent = data.detail || 'Authentication failed';
+                return;
+            }
+
+            Auth.setSession(data.access_token, data.refresh_token, data.user);
+            window.location.href = Auth.homeFor(data.user.role);
+        } catch (err) {
+            errorEl.textContent = 'Network connection error';
+        }
+    });
+    </script>
 </body>
 </html>

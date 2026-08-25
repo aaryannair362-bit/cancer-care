@@ -38,11 +38,33 @@
         <input type="email" id="new-email" placeholder="Email address" />
         <select id="new-role">
             <option value="">— Select Role —</option>
-            <option value="Doctor">Doctor</option>
-            <option value="HeadNurse">Head Nurse</option>
-            <option value="Nurse">Nurse</option>
-            <option value="NursingStation">Nursing Station</option>
-            <option value="Admin">Admin</option>
+            <optgroup label="🎗️ Oncology OS (CCA Roles)">
+                <option value="CCAMedicalOncologist">Medical Oncologist</option>
+                <option value="CCASurgicalOncologist">Surgical Oncologist</option>
+                <option value="CCARadiationOncologist">Radiation Oncologist</option>
+                <option value="CCARadiologist">Radiologist</option>
+                <option value="CCARadiologyCoordinator">Radiology Coordinator</option>
+                <option value="CCAPathologist">Pathologist</option>
+                <option value="CCALabPhlebotomy">Lab / Phlebotomy</option>
+                <option value="CCAInfusionNurse">Infusion / Daycare Nurse</option>
+                <option value="CCANurseNavigator">Nurse Navigator</option>
+                <option value="CCAMDTCoordinator">MDT Coordinator</option>
+                <option value="CCAExternalMDTSpecialist">External MDT Specialist</option>
+                <option value="CCAPatientLiaison">Patient Liaison</option>
+                <option value="CCAFinancialCounsellor">Financial Counsellor</option>
+                <option value="CCAFrontDesk">CCA Front Desk</option>
+            </optgroup>
+            <optgroup label="🏥 Hospital Core & Operations">
+                <option value="Admin">Admin</option>
+                <option value="Doctor">Doctor (OPD)</option>
+                <option value="HeadNurse">Head Nurse</option>
+                <option value="Nurse">Staff Nurse (IPD)</option>
+                <option value="NursingStation">Nursing Station / Frontdesk</option>
+                <option value="Pharmacist">Pharmacist</option>
+                <option value="InventoryManager">Inventory Manager</option>
+                <option value="Billing">Billing Desk</option>
+                <option value="TPA">TPA Insurance Desk</option>
+            </optgroup>
         </select>
         <input type="text" id="new-password" placeholder="Password (or leave blank to auto-generate)" />
         <button id="create-user-btn" class="btn-primary">Create User</button>
@@ -87,6 +109,44 @@
     </table>
 </div>
 <script>
+const ALL_ROLES = [
+    { group: '🎗️ Oncology OS (CCA Roles)', roles: [
+        { value: 'CCAMedicalOncologist', label: 'Medical Oncologist' },
+        { value: 'CCASurgicalOncologist', label: 'Surgical Oncologist' },
+        { value: 'CCARadiationOncologist', label: 'Radiation Oncologist' },
+        { value: 'CCARadiologist', label: 'Radiologist' },
+        { value: 'CCARadiologyCoordinator', label: 'Radiology Coordinator' },
+        { value: 'CCAPathologist', label: 'Pathologist' },
+        { value: 'CCALabPhlebotomy', label: 'Lab / Phlebotomy' },
+        { value: 'CCAInfusionNurse', label: 'Infusion / Daycare Nurse' },
+        { value: 'CCANurseNavigator', label: 'Nurse Navigator' },
+        { value: 'CCAMDTCoordinator', label: 'MDT Coordinator' },
+        { value: 'CCAExternalMDTSpecialist', label: 'External MDT Specialist' },
+        { value: 'CCAPatientLiaison', label: 'Patient Liaison' },
+        { value: 'CCAFinancialCounsellor', label: 'Financial Counsellor' },
+        { value: 'CCAFrontDesk', label: 'CCA Front Desk' },
+    ]},
+    { group: '🏥 Hospital Core & Operations', roles: [
+        { value: 'Admin', label: 'Admin' },
+        { value: 'Doctor', label: 'Doctor (OPD)' },
+        { value: 'HeadNurse', label: 'Head Nurse' },
+        { value: 'Nurse', label: 'Staff Nurse (IPD)' },
+        { value: 'NursingStation', label: 'Nursing Station / Frontdesk' },
+        { value: 'Pharmacist', label: 'Pharmacist' },
+        { value: 'InventoryManager', label: 'Inventory Manager' },
+        { value: 'Billing', label: 'Billing Desk' },
+        { value: 'TPA', label: 'TPA Insurance Desk' },
+    ]}
+];
+
+function buildRoleOptions(selectedRole) {
+    return ALL_ROLES.map(g => `
+        <optgroup label="${g.group}">
+            ${g.roles.map(r => `<option value="${r.value}" ${r.value === selectedRole ? 'selected' : ''}>${r.label}</option>`).join('')}
+        </optgroup>
+    `).join('');
+}
+
 const API_BASE = '/api';
 let accessToken = localStorage.getItem('access_token');
 if (!accessToken) {
@@ -159,11 +219,7 @@ async function loadUsers() {
                     <td>${u.email}</td>
                     <td>
                         <select class="role-select" data-id="${u.id}">
-                            <option value="Doctor" ${u.role==='Doctor'?'selected':''}>Doctor</option>
-                            <option value="HeadNurse" ${u.role==='HeadNurse'?'selected':''}>Head Nurse</option>
-                            <option value="Nurse" ${u.role==='Nurse'?'selected':''}>Nurse</option>
-                            <option value="NursingStation" ${u.role==='NursingStation'?'selected':''}>Nursing Station</option>
-                            <option value="Admin" ${u.role==='Admin'?'selected':''}>Admin</option>
+                            ${buildRoleOptions(u.role)}
                         </select>
                     </td>
                     <td>${u.status}</td>
