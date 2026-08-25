@@ -36,14 +36,12 @@ services:
         sync: false
       - key: GROQ_MODEL
         value: openai/gpt-oss-120b
-      - key: GROQ_AUDIO_MODEL
-        value: whisper-large-v3
       - key: TRANSCRIPTION_PROVIDER
         value: sarvam
       - key: SARVAM_API_KEY
         sync: false
       - key: ALLOWED_ORIGINS
-        sync: false
+        value: "*"
       - key: RATE_LIMIT_ENABLED
         value: "true"
       - key: MAX_PATIENT_DOCUMENT_MB

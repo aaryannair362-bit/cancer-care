@@ -20,7 +20,7 @@ class ScribeEngine:
     def __init__(self):
         self.api_key = settings.GROQ_API_KEY
         self.model = settings.GROQ_MODEL
-        self.audio_model = settings.GROQ_AUDIO_MODEL
+        self.audio_model = getattr(settings, "GROQ_AUDIO_MODEL", "whisper-large-v3")
         self.base_url = "https://api.groq.com/openai/v1/chat/completions"
         self._reasoning_format_supported = True
         logger.info("GROQ_API_KEY present: %s, length: %d, model: %s",

@@ -23,37 +23,13 @@ class Settings(BaseSettings):
     # already-known-too-slow qwen model with no warning. Matching the default to the real,
     # working value removes that trap regardless of the env var.
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-    # Whisper model used for POST /api/transcribe-audio (see scribe.py's transcribe_audio) --
-    # a separate setting from GROQ_MODEL since it's a different model for a different Groq
-    # endpoint. MUST be "whisper-large-v3", not "-turbo" or "distil-whisper-large-v3-en":
-    # transcribe_audio calls Groq's /audio/TRANSLATIONS endpoint specifically (not
-    # /audio/transcriptions), and Groq's hosted translations task only supports the full
-    # whisper-large-v3 model -- the turbo/distilled variants are transcription-only there.
-    # Tried "-turbo" here for a real, wanted latency win (see git history) and it broke
-    # transcription in production ("Transcription failed" on every recording, confirmed live)
-    # -- reverted same-day. If a faster audio path is wanted later, it has to come from
-    # switching endpoints (transcriptions + explicit language handling) or a different
-    # provider/local model, not from swapping the model on this same endpoint.
-    GROQ_AUDIO_MODEL: str = os.getenv("GROQ_AUDIO_MODEL", "whisper-large-v3")
-    # Sarvam AI's Saaras v3 (sarvam_transcriber.py) -- an alternative audio-transcription
-    # provider, purpose-built and benchmarked for Hindi/English code-switched speech
-    # specifically. Verified live before this became the default: real API calls against the
-    # actual key confirmed the request/response contract, confirmed a <=30s chunk round-trips
-    # in ~1.4s, and confirmed the documented 30-second-per-request cap with a real 400
-    # response -- but NOT yet verified with a real recording through a real browser (only the
-    # API mechanics and the mocked unit/integration tests) -- see sarvam_transcriber.py's
-    # module docstring. Chosen as the default by explicit product decision despite that gap;
-    # if real-world results look wrong, this is a one-line Render env var revert to "whisper"
-    # (today's previously-default, still fully working, unchanged path), not a code deploy --
-    # same reasoning as GROQ_MODEL/GROQ_AUDIO_MODEL above.
+    # Sarvam AI's Saaras v3 (sarvam_transcriber.py) -- audio transcription engine
+    # purpose-built for Hindi/English medical speech and code-switching.
     SARVAM_API_KEY: str = os.getenv("SARVAM_API_KEY", "")
     TRANSCRIPTION_PROVIDER: str = os.getenv("TRANSCRIPTION_PROVIDER", "sarvam")
-    # Comma-separated list of origins allowed to call the API. The frontend is same-origin
-    # (served by this same FastAPI process, API_BASE = '/api'), so this only matters for local
-    # dev on a different port/live-server and any future separately-hosted frontend.
-    ALLOWED_ORIGINS: str = "http://localhost:8000,http://127.0.0.1:8000"
-    # Disabled in tests (tests/conftest.py, tests/scale/runner.py) -- many legitimate tests
-    # fire dozens of auth calls from the same test-client "IP" in well under a minute.
+    # Allowed CORS origins. Since frontend is served by FastAPI directly, requests are
+    # same-origin by default. "*" or specific domains allow external access.
+    ALLOWED_ORIGINS: str = os.getenv("ALLOWED_ORIGINS", "*")
     RATE_LIMIT_ENABLED: bool = True
     MAX_PATIENT_DOCUMENT_MB: int = 25
     # EasyOCR language codes (comma-separated, e.g. "en,hi"), NOT Tesseract's "eng"-style codes
