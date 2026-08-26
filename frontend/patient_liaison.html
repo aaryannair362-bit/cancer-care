@@ -113,12 +113,14 @@
             <div id="view-nexus" class="view-panel">
                 <h1 class="page-title">NEXUS</h1>
                 <p class="page-subtitle">Cross-stakeholder coordination state for the active patient.</p>
-                <div class="patient-banner" style="grid-template-columns: 1fr 1.4fr 1.4fr 1fr;">
-                    <div><div class="banner-label">Patient</div><div class="banner-value">Sunita Patil · CCA-02481</div></div>
-                    <div><div class="banner-label">Diagnosis</div><div class="banner-value" style="font-size:12.5px;">Left breast invasive ductal carcinoma</div></div>
-                    <div><div class="banner-label">Care Phase</div><div class="banner-value" style="font-size:12.5px;">Diagnostics / treatment</div></div>
-                    <div><div class="banner-label">Encounter</div><div class="banner-value">Today · 10:30</div></div>
+                <div class="patient-banner" id="nexus-patient-banner" style="grid-template-columns: 1fr 1.4fr 1.4fr 1fr 1fr;">
+                    <div><div class="banner-label">Patient</div><div class="banner-value" id="nexus-hdr-name">—</div></div>
+                    <div><div class="banner-label">Diagnosis</div><div class="banner-value" id="nexus-hdr-diagnosis" style="font-size:12.5px;">—</div></div>
+                    <div><div class="banner-label">Journey State</div><div class="banner-value" id="nexus-hdr-journey" style="font-size:12.5px;">—</div></div>
+                    <div><div class="banner-label">Care Team</div><div class="banner-value" id="nexus-hdr-team">—</div></div>
+                    <div style="display:flex; align-items:center;"><button class="btn-outline" onclick="showTab('patients')">Change Patient</button></div>
                 </div>
+                <div class="section-card" id="nexus-empty-state" style="display:none; text-align:center; padding:40px 20px; color:var(--ink-500); font-size:13.5px;">No patient selected. Open a patient from the Patients list to view their NEXUS coordination state.</div>
                 <div class="nexus-metrics-grid">
                     <div class="nexus-metric-tile"><div class="nexus-metric-label">Current Care Phase</div><div class="nexus-metric-value" style="font-size:16px;">Diagnostics / treatment</div></div>
                     <div class="nexus-metric-tile"><div class="nexus-metric-label">My Open Tasks</div><div class="nexus-metric-value">1</div></div>
@@ -144,6 +146,36 @@
             document.getElementById(`nav-${tab}`).classList.add('active');
             if (tab === 'patients') loadPatientQueue();
             if (tab === 'coordination') loadCoordinationQueue();
+            if (tab === 'nexus') loadNexusBanner();
+        }
+
+        async function loadNexusBanner() {
+            const bannerEl = document.getElementById('nexus-patient-banner');
+            const emptyEl = document.getElementById('nexus-empty-state');
+            if (!currentPatientId) {
+                bannerEl.style.display = 'none';
+                emptyEl.style.display = 'block';
+                return;
+            }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}`);
+                bannerEl.style.display = 'grid';
+                emptyEl.style.display = 'none';
+                document.getElementById('nexus-hdr-name').textContent = `${data.patient.name} · ${data.patient.mrn}`;
+                document.getElementById('nexus-hdr-journey').textContent = data.patient.journey_state || '—';
+                document.getElementById('nexus-hdr-team').textContent = data.patient.primary_oncologist || 'Unassigned';
+                document.getElementById('nexus-hdr-diagnosis').textContent = 'Loading…';
+                try {
+                    const summary = await Api.get(`${CCA_API}/patients/${currentPatientId}/summary`);
+                    const dxBlock = (summary.blocks || []).find(b => b.key === 'diagnosis');
+                    const dxVal = dxBlock && dxBlock.value && dxBlock.value !== '[NOT_RECORDED]' ? dxBlock.value : 'Pending diagnostic workup';
+                    document.getElementById('nexus-hdr-diagnosis').textContent = dxVal;
+                } catch (e) { document.getElementById('nexus-hdr-diagnosis').textContent = 'Pending diagnostic workup'; }
+            } catch (err) {
+                bannerEl.style.display = 'none';
+                emptyEl.style.display = 'block';
+                emptyEl.textContent = apiErrorMessage(err);
+            }
         }
 
         async function loadPatientQueue() {

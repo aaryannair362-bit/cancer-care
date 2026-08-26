@@ -115,12 +115,14 @@
             <div id="view-nexus" class="view-panel">
                 <h1 class="page-title">NEXUS</h1>
                 <p class="page-subtitle">Cross-stakeholder coordination state for the active patient.</p>
-                <div class="patient-banner" style="grid-template-columns: 1fr 1.4fr 1.4fr 1fr;">
-                    <div><div class="banner-label">Patient</div><div class="banner-value">Sunita Patil · CCA-02481</div></div>
-                    <div><div class="banner-label">Diagnosis</div><div class="banner-value" style="font-size:12.5px;">Left breast invasive ductal carcinoma</div></div>
-                    <div><div class="banner-label">MDT Status</div><div class="banner-value" style="font-size:12.5px;">Ready for MDT — awaiting board date</div></div>
-                    <div><div class="banner-label">Encounter</div><div class="banner-value">Today · 10:30</div></div>
+                <div class="patient-banner" id="nexus-patient-banner" style="grid-template-columns: 1fr 1.4fr 1.4fr 1fr 1fr;">
+                    <div><div class="banner-label">Patient</div><div class="banner-value" id="nexus-hdr-name">—</div></div>
+                    <div><div class="banner-label">Diagnosis</div><div class="banner-value" id="nexus-hdr-diagnosis" style="font-size:12.5px;">—</div></div>
+                    <div><div class="banner-label">Journey State</div><div class="banner-value" id="nexus-hdr-journey" style="font-size:12.5px;">—</div></div>
+                    <div><div class="banner-label">Care Team</div><div class="banner-value" id="nexus-hdr-team">—</div></div>
+                    <div style="display:flex; align-items:center;"><button class="btn-outline" onclick="showTab('patients')">Change Patient</button></div>
                 </div>
+                <div class="section-card" id="nexus-empty-state" style="display:none; text-align:center; padding:40px 20px; color:var(--ink-500); font-size:13.5px;">No patient selected. Open a patient from the Patients list to view their NEXUS coordination state.</div>
                 <div class="nexus-metrics-grid">
                     <div class="nexus-metric-tile"><div class="nexus-metric-label">Cases Awaiting Scheduling</div><div class="nexus-metric-value">2</div></div>
                     <div class="nexus-metric-tile"><div class="nexus-metric-label">Boards This Week</div><div class="nexus-metric-value">1</div></div>
@@ -137,6 +139,7 @@
     <script>
         const ccaUser = Auth.requirePage(['CCAMDTCoordinator', 'Admin']);
         const CCA_API = '/cca';
+        let currentPatientId = null;
 
         function showTab(tab) {
             document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
@@ -145,6 +148,36 @@
             document.getElementById(`nav-${tab}`).classList.add('active');
             if (tab === 'patients') loadPatientQueue();
             if (tab === 'mdt') loadMdtReferralQueue();
+            if (tab === 'nexus') loadNexusBanner();
+        }
+
+        async function loadNexusBanner() {
+            const bannerEl = document.getElementById('nexus-patient-banner');
+            const emptyEl = document.getElementById('nexus-empty-state');
+            if (!currentPatientId) {
+                bannerEl.style.display = 'none';
+                emptyEl.style.display = 'block';
+                return;
+            }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}`);
+                bannerEl.style.display = 'grid';
+                emptyEl.style.display = 'none';
+                document.getElementById('nexus-hdr-name').textContent = `${data.patient.name} · ${data.patient.mrn}`;
+                document.getElementById('nexus-hdr-journey').textContent = data.patient.journey_state || '—';
+                document.getElementById('nexus-hdr-team').textContent = data.patient.primary_oncologist || 'Unassigned';
+                document.getElementById('nexus-hdr-diagnosis').textContent = 'Loading…';
+                try {
+                    const summary = await Api.get(`${CCA_API}/patients/${currentPatientId}/summary`);
+                    const dxBlock = (summary.blocks || []).find(b => b.key === 'diagnosis');
+                    const dxVal = dxBlock && dxBlock.value && dxBlock.value !== '[NOT_RECORDED]' ? dxBlock.value : 'Pending diagnostic workup';
+                    document.getElementById('nexus-hdr-diagnosis').textContent = dxVal;
+                } catch (e) { document.getElementById('nexus-hdr-diagnosis').textContent = 'Pending diagnostic workup'; }
+            } catch (err) {
+                bannerEl.style.display = 'none';
+                emptyEl.style.display = 'block';
+                emptyEl.textContent = apiErrorMessage(err);
+            }
         }
 
         async function loadPatientQueue() {
@@ -158,7 +191,7 @@
                         <div><div class="wl-label">Age/Sex</div><div class="wl-value" style="font-size:13px;">${escapeHtml(String(p.age))}y / ${escapeHtml(p.sex)}</div></div>
                         <div><div class="wl-label">Journey</div><div class="wl-value" style="font-size:13px;">${escapeHtml(p.journey_state)}</div></div>
                         <div><span class="badge ${p.staging_state === 'CLINICIAN_CONFIRMED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(p.staging_state)}</span></div>
-                        <div><button class="btn-navy" onclick="showTab('mdt')">Open →</button></div>
+                        <div><button class="btn-navy" onclick="currentPatientId=${Number(p.id)}; showTab('mdt')">Open →</button></div>
                     </div>
                 `).join('') || '<p style="color:var(--ink-500); font-size:13px;">No patients.</p>';
             } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
@@ -175,14 +208,15 @@
                             <div><div class="wl-label">Question</div><div class="wl-value" style="font-size:12.5px; font-weight:600;">${escapeHtml((c.question || '').slice(0, 50))}</div></div>
                             <div><div class="wl-label">Board Date</div><div class="wl-value" style="font-size:13px;">${escapeHtml(c.board_date || 'Unscheduled')}</div></div>
                             <div><span class="badge ${c.readiness.overall === 'ReadyForMDT' ? 'badge-green' : 'badge-amber'}">${escapeHtml(c.readiness.overall)}</span></div>
-                            <div><button class="btn-navy" onclick="openMdtCase(${Number(c.id)})">Manage</button></div>
+                            <div><button class="btn-navy" onclick="openMdtCase(${Number(c.id)}, ${Number(c.patient_id)})">Manage</button></div>
                         </div>
                         <div id="mdt-case-detail-${c.id}"></div>
                     `).join('') : '<p style="color:var(--ink-500); font-size:13px;">No MDT referrals.</p>') + `</div>`;
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
         }
 
-        async function openMdtCase(caseId) {
+        async function openMdtCase(caseId, patientId) {
+            if (patientId) currentPatientId = patientId;
             const detail = document.getElementById(`mdt-case-detail-${caseId}`);
             try {
                 const readiness = await Api.get(`${CCA_API}/mdt/cases/${caseId}/readiness`);
@@ -208,6 +242,15 @@
                             <div class="form-group" style="margin-bottom:8px;"><input type="text" id="mdtc-prole-${caseId}" class="form-input" placeholder="Role, e.g. Radiologist" /></div>
                         </div>
                         <button class="btn-outline" onclick="submitAddParticipant(${caseId})">+ Add Participant</button>
+                        <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
+                        <div class="section-title" style="font-size:14px; margin-bottom:8px;">Grant External Specialist Access</div>
+                        <div class="section-sub" style="margin-bottom:10px;">Shares only this case with an outside specialist's email, time-limited. Never exposes the full patient population.</div>
+                        <div class="form-grid-2">
+                            <div class="form-group" style="margin-bottom:8px;"><input type="text" id="mdtc-extname-${caseId}" class="form-input" placeholder="Specialist name" /></div>
+                            <div class="form-group" style="margin-bottom:8px;"><input type="email" id="mdtc-extemail-${caseId}" class="form-input" placeholder="specialist@example.com" /></div>
+                        </div>
+                        <button class="btn-outline" onclick="submitGrantExternalAccess(${caseId})">🔗 Grant Access</button>
+                        <div id="mdtc-ext-status-${caseId}" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
                     </div>
                 `;
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
@@ -233,6 +276,18 @@
                 await Api.post(`${CCA_API}/mdt/cases/${caseId}/participants`, { specialist_name: name, specialist_role: role });
                 toast('Participant added', 'success');
                 openMdtCase(caseId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitGrantExternalAccess(caseId) {
+            const name = document.getElementById(`mdtc-extname-${caseId}`).value;
+            const email = document.getElementById(`mdtc-extemail-${caseId}`).value;
+            const statusEl = document.getElementById(`mdtc-ext-status-${caseId}`);
+            if (!name || !email) { toast('Specialist name and email are required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/mdt/cases/${caseId}/external-access`, { specialist_name: name, specialist_email: email });
+                statusEl.textContent = `✅ Access granted to ${email} (14 days).`;
+                toast('External access granted', 'success');
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

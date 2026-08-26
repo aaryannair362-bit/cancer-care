@@ -28,7 +28,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user, is_admin, is_head_nurse, is_nursing_station, log_audit
+from ..auth import get_current_user, is_admin, is_head_nurse, is_nursing_station, is_cca_front_desk, log_audit
 from ..database import get_db
 from ..models import Appointment, Consultation, Patient, QueueToken, User
 
@@ -36,13 +36,13 @@ router = APIRouter(tags=["appointments"])
 
 
 def _require_front_desk(user: dict) -> None:
-    if not (is_admin(user) or is_head_nurse(user) or is_nursing_station(user)):
-        raise HTTPException(403, "Only Admin, HeadNurse, or NursingStation can manage appointments/queue")
+    if not (is_admin(user) or is_head_nurse(user) or is_nursing_station(user) or is_cca_front_desk(user)):
+        raise HTTPException(403, "Only Admin, HeadNurse, NursingStation, or CCAFrontDesk can manage appointments/queue")
 
 
 def _require_view_access(user: dict) -> None:
     role = user.get("role")
-    if not (is_admin(user) or is_head_nurse(user) or is_nursing_station(user) or role == "Doctor"):
+    if not (is_admin(user) or is_head_nurse(user) or is_nursing_station(user) or is_cca_front_desk(user) or role == "Doctor"):
         raise HTTPException(403, "Not permitted to view the appointment/queue schedule")
 
 

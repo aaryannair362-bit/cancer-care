@@ -8,6 +8,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from ..models import User
@@ -17,6 +18,8 @@ from ..auth import (
 )
 from ..config import settings
 from ..ocr_service import extract_document
+from ..scribe import scribe
+from .. import drug_matcher
 from ..models_cca import (
     CCAPatient, CCAConsent, CCAQueueEvent, CCAEncounter, CCAIntakeAssessment,
     CCADocument, ClinicalFact, CCAContradiction, CCACancerDiagnosis,
@@ -861,6 +864,56 @@ async def complete_nurse_intake(
     }
 
 
+@router.post("/encounters/{id}/note/draft")
+async def draft_encounter_note(
+    id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """AI Scribe for oncology consultations: turns a recorded transcript into a structured
+    clinical note draft, mirroring Doctor OPD's POST /api/scribe. Lands on this CCAEncounter's
+    own note_content/raw_transcript fields rather than the general Consultation table, since
+    oncology encounters are keyed against CCAPatient, a separate patient population from the
+    general Patient table /api/scribe writes against."""
+    _require_clinician(current_user)
+    encounter = db.query(CCAEncounter).filter(CCAEncounter.id == id).first()
+    if not encounter:
+        raise HTTPException(404, "Encounter not found")
+    _check_patient_in_org(db, encounter.patient_id, _org_id(current_user))
+
+    body = await request.json()
+    transcript = body.get("transcript")
+    if not isinstance(transcript, str) or len(transcript.strip()) < 10:
+        raise HTTPException(400, "Transcript too short")
+
+    # Off the event loop -- scribe.scribe_transcript makes a blocking call to the LLM provider;
+    # see backend/app/main.py's POST /api/scribe for why this must not block the event loop.
+    result = await run_in_threadpool(scribe.scribe_transcript, transcript)
+    result["medications"] = drug_matcher.correct_medication_names(result.get("medications", []) or [])
+
+    encounter.raw_transcript = transcript
+    encounter.note_content = result
+    encounter.note_status = "AI_DRAFT"
+
+    actor = _actor(current_user)
+    j_ev = CCAJourneyEvent(
+        patient_id=encounter.patient_id,
+        event_type="NOTE_AI_DRAFTED",
+        event_title="AI Scribe Draft Generated",
+        event_category="CONSULTATION",
+        description=f"{actor} recorded a consultation and generated an AI-drafted clinical note for review.",
+        actor_name=actor,
+        actor_role=current_user.get("role")
+    )
+    db.add(j_ev)
+    db.commit()
+    db.refresh(encounter)
+    return {
+        "status": "success",
+        "encounter": {"id": encounter.id, "status": encounter.status, "note_status": encounter.note_status},
+        "note_content": encounter.note_content,
+    }
+
+
 @router.post("/encounters/{id}/note/finalise")
 async def finalise_encounter_note(
     id: int, request: Request, db: Session = Depends(get_cca_db),
@@ -873,6 +926,8 @@ async def finalise_encounter_note(
 
     body = await request.json()
     actor = _actor(current_user)
+    if body:
+        encounter.note_content = body
     encounter.note_status = "FINAL"
     encounter.status = "CLOSED"
     encounter.ended_at = datetime.utcnow()

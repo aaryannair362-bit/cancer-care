@@ -310,6 +310,26 @@
 
                 <div id="consult-form-area" style="display:none;">
                     <div class="section-card">
+                        <div class="section-head">
+                            <div>
+                                <div class="section-title">AI Scribe</div>
+                                <div class="section-sub">Record the consultation, then generate a structured draft below. Review and edit everything before finalising — nothing here is saved until you click Finalise.</div>
+                            </div>
+                        </div>
+                        <div style="display:flex; gap:10px; align-items:center; margin-bottom:12px;">
+                            <button class="btn-navy" id="scribe-start-btn" onclick="startScribeRecording()">🎤 Start Recording</button>
+                            <button class="btn-outline" id="scribe-stop-btn" onclick="stopScribeRecording()" style="display:none;">⏹ Stop &amp; Transcribe</button>
+                            <span id="scribe-mic-status" style="font-size:12px; color:var(--ink-500);"></span>
+                        </div>
+                        <div class="form-group" style="margin-bottom:10px;">
+                            <label class="form-label">Transcript</label>
+                            <textarea id="scribe-transcript" class="form-textarea" rows="4" placeholder="Speak using Start Recording, or type/paste the consultation transcript here..."></textarea>
+                        </div>
+                        <button class="btn-outline" onclick="generateAiDraft()">✨ Generate AI Draft</button>
+                        <div id="scribe-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                    </div>
+
+                    <div class="section-card">
                         <div class="section-title">History &amp; Assessment</div>
                         <div class="form-group" style="margin-bottom:14px;">
                             <label class="form-label">Chief complaint</label>
@@ -323,10 +343,19 @@
                             <label class="form-label">Physical examination</label>
                             <textarea id="consult-exam" class="form-textarea" rows="3"></textarea>
                         </div>
-                        <div class="form-group">
+                        <div class="form-group" style="margin-bottom:14px;">
+                            <label class="form-label">Primary diagnosis</label>
+                            <textarea id="consult-diagnosis" class="form-textarea" rows="2"></textarea>
+                        </div>
+                        <div class="form-group" style="margin-bottom:14px;">
                             <label class="form-label">Differential diagnosis</label>
                             <textarea id="consult-ddx" class="form-textarea" rows="2"></textarea>
                         </div>
+                        <div class="form-group">
+                            <label class="form-label">Advice / plan</label>
+                            <textarea id="consult-advice" class="form-textarea" rows="2"></textarea>
+                        </div>
+                        <div id="scribe-medications-note" style="font-size:12px; color:var(--ink-500); margin-top:6px;"></div>
                     </div>
 
                     <div class="section-card">
@@ -383,13 +412,14 @@
                 <h1 class="page-title">NEXUS</h1>
                 <p class="page-subtitle">Cross-stakeholder coordination state for the active patient.</p>
 
-                <div class="patient-banner" style="grid-template-columns: 1fr 1.4fr 1.4fr 1fr 1fr;">
-                    <div><div class="banner-label">Patient</div><div class="banner-value">Sunita Patil · CCA-02481</div></div>
-                    <div><div class="banner-label">Diagnosis</div><div class="banner-value" style="font-size:12.5px;">Left breast invasive ductal carcinoma</div></div>
-                    <div><div class="banner-label">Treatment</div><div class="banner-value" style="font-size:12.5px;">Adjuvant AC chemotherapy · Cycle 2 · Day 8</div></div>
-                    <div><div class="banner-label">Encounter</div><div class="banner-value">Today · 10:30</div></div>
-                    <div style="display:flex; align-items:center;"><button class="btn-outline">Change Patient</button></div>
+                <div class="patient-banner" id="nexus-patient-banner" style="grid-template-columns: 1fr 1.4fr 1.4fr 1fr 1fr;">
+                    <div><div class="banner-label">Patient</div><div class="banner-value" id="nexus-hdr-name">—</div></div>
+                    <div><div class="banner-label">Diagnosis</div><div class="banner-value" id="nexus-hdr-diagnosis" style="font-size:12.5px;">—</div></div>
+                    <div><div class="banner-label">Journey State</div><div class="banner-value" id="nexus-hdr-journey" style="font-size:12.5px;">—</div></div>
+                    <div><div class="banner-label">Care Team</div><div class="banner-value" id="nexus-hdr-team">—</div></div>
+                    <div style="display:flex; align-items:center;"><button class="btn-outline" onclick="showTab('patients')">Change Patient</button></div>
                 </div>
+                <div class="section-card" id="nexus-empty-state" style="display:none; text-align:center; padding:40px 20px; color:var(--ink-500); font-size:13.5px;">No patient selected. Open a patient from the Patients list to view their NEXUS coordination state.</div>
 
                 <div class="nexus-metrics-grid">
                     <div class="nexus-metric-tile"><div class="nexus-metric-label">Current Care Phase</div><div class="nexus-metric-value" style="font-size:16px;">Diagnostics / treatment</div></div>
@@ -478,6 +508,7 @@
     </div>
 
     <script src="/static/js/api.js"></script>
+    <script src="/static/js/voice-capture.js"></script>
     <script>
         const ccaUser = Auth.requirePage(['CCASurgicalOncologist', 'Doctor', 'Admin']);
         const CCA_API = '/cca';
@@ -487,6 +518,9 @@
         let currentCarePlanData = null;
         let selectedIntent = 'Curative';
         let selectedModality = 'Systemic therapy';
+        let scribeVoiceRecorder = null;
+        let scribeTranscriptionProvider = 'whisper';
+        let lastScribeMedications = [];
 
         function showTab(tab) {
             document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
@@ -500,6 +534,36 @@
             if (tab === 'guideline') loadGuidelinePathway();
             if (tab === 'staging') loadStagingWorkspace();
             if (tab === 'mdt') loadMdtWorkspace();
+            if (tab === 'nexus') loadNexusBanner();
+        }
+
+        async function loadNexusBanner() {
+            const bannerEl = document.getElementById('nexus-patient-banner');
+            const emptyEl = document.getElementById('nexus-empty-state');
+            if (!currentPatientId) {
+                bannerEl.style.display = 'none';
+                emptyEl.style.display = 'block';
+                return;
+            }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}`);
+                bannerEl.style.display = 'grid';
+                emptyEl.style.display = 'none';
+                document.getElementById('nexus-hdr-name').textContent = `${data.patient.name} · ${data.patient.mrn}`;
+                document.getElementById('nexus-hdr-journey').textContent = data.patient.journey_state || '—';
+                document.getElementById('nexus-hdr-team').textContent = data.patient.primary_oncologist || 'Unassigned';
+                document.getElementById('nexus-hdr-diagnosis').textContent = 'Loading…';
+                try {
+                    const summary = await Api.get(`${CCA_API}/patients/${currentPatientId}/summary`);
+                    const dxBlock = (summary.blocks || []).find(b => b.key === 'diagnosis');
+                    const dxVal = dxBlock && dxBlock.value && dxBlock.value !== '[NOT_RECORDED]' ? dxBlock.value : 'Pending diagnostic workup';
+                    document.getElementById('nexus-hdr-diagnosis').textContent = dxVal;
+                } catch (e) { document.getElementById('nexus-hdr-diagnosis').textContent = 'Pending diagnostic workup'; }
+            } catch (err) {
+                bannerEl.style.display = 'none';
+                emptyEl.style.display = 'block';
+                emptyEl.textContent = apiErrorMessage(err);
+            }
         }
 
         function setNexusTab(el) {
@@ -586,6 +650,71 @@
             return data.encounter.id;
         }
 
+        // ---------------------------------------------------------------
+        // AI Scribe (voice -> transcript -> structured draft), mirroring Doctor OPD's
+        // consultation scribe but landing on this CCAEncounter's own note fields.
+        // ---------------------------------------------------------------
+        async function startScribeRecording() {
+            const statusEl = document.getElementById('scribe-mic-status');
+            try {
+                const provider = await Api.get('/transcription-provider');
+                scribeTranscriptionProvider = provider.provider === 'sarvam' ? 'sarvam' : 'whisper';
+            } catch (err) { scribeTranscriptionProvider = 'whisper'; }
+
+            scribeVoiceRecorder = createVoiceRecorder({ apiBase: '/api', getAuthToken: () => Auth.getAccessToken(), provider: scribeTranscriptionProvider });
+            if (!scribeVoiceRecorder.isSupported()) {
+                statusEl.textContent = '⚠️ Recording not supported in this browser — type the transcript manually.';
+                return;
+            }
+            try {
+                await scribeVoiceRecorder.start();
+                document.getElementById('scribe-start-btn').style.display = 'none';
+                document.getElementById('scribe-stop-btn').style.display = 'inline-block';
+                statusEl.textContent = '🎤 Recording...';
+            } catch (err) {
+                statusEl.textContent = '⚠️ Microphone access denied — type the transcript manually.';
+            }
+        }
+
+        async function stopScribeRecording() {
+            const statusEl = document.getElementById('scribe-mic-status');
+            document.getElementById('scribe-start-btn').style.display = 'inline-block';
+            document.getElementById('scribe-stop-btn').style.display = 'none';
+            if (!scribeVoiceRecorder) return;
+            statusEl.textContent = 'Transcribing...';
+            try {
+                const transcript = await scribeVoiceRecorder.stop();
+                document.getElementById('scribe-transcript').value = transcript;
+                statusEl.textContent = transcript ? '✅ Transcribed. Review below, then Generate AI Draft.' : 'No speech detected — type manually.';
+            } catch (err) {
+                statusEl.textContent = `⚠️ ${err.message || 'Transcription failed'} — type the transcript manually.`;
+            }
+        }
+
+        async function generateAiDraft() {
+            const statusEl = document.getElementById('scribe-status');
+            const transcript = document.getElementById('scribe-transcript').value.trim();
+            if (transcript.length < 10) { toast('Transcript is too short to draft from', 'error'); return; }
+            statusEl.textContent = 'Generating AI draft...';
+            try {
+                const encId = await ensureEncounterId();
+                const data = await Api.post(`${CCA_API}/encounters/${encId}/note/draft`, { transcript });
+                const note = data.note_content || {};
+                document.getElementById('consult-cc').value = note.chiefComplaint || '';
+                document.getElementById('consult-hpi').value = note.hpi || '';
+                document.getElementById('consult-diagnosis').value = note.primaryDiagnosis || '';
+                document.getElementById('consult-ddx').value = note.differentialDiagnosis || '';
+                document.getElementById('consult-advice').value = note.advice || '';
+                lastScribeMedications = note.medications || [];
+                const medNote = document.getElementById('scribe-medications-note');
+                medNote.textContent = lastScribeMedications.length
+                    ? `AI also noted ${lastScribeMedications.length} medication(s) mentioned: ${lastScribeMedications.map(m => m.drugName).filter(Boolean).join(', ')}. Formal prescribing happens via Treatment Plan / MDT, not this note.`
+                    : '';
+                statusEl.textContent = '✅ AI draft generated — review and edit every field before finalising.';
+                toast('AI draft generated', 'success');
+            } catch (err) { statusEl.textContent = ''; toast(apiErrorMessage(err), 'error'); }
+        }
+
         async function submitConsultationNote() {
             const statusEl = document.getElementById('consult-status');
             statusEl.textContent = 'Finalising...';
@@ -595,9 +724,13 @@
                     chief_complaint: document.getElementById('consult-cc').value,
                     hpi: document.getElementById('consult-hpi').value,
                     physical_exam: document.getElementById('consult-exam').value,
+                    primary_diagnosis: document.getElementById('consult-diagnosis').value,
                     differential_diagnosis: document.getElementById('consult-ddx').value,
+                    advice: document.getElementById('consult-advice').value,
                     treatment_intent: selectedIntent,
                     treatment_modality: selectedModality,
+                    ai_scribe_medications: lastScribeMedications,
+                    raw_transcript: document.getElementById('scribe-transcript').value || undefined,
                 });
                 statusEl.textContent = '✅ Consultation note finalised.';
                 toast('Consultation note finalised', 'success');

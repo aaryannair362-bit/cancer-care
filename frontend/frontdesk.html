@@ -932,9 +932,11 @@
                                         </div>
                                         <div class="form-group">
                                             <label class="form-label">&nbsp;</label>
-                                            <button type="button" class="btn-outline" style="height:38px;">⬆ Upload document</button>
+                                            <input type="file" id="wiz-id-doc-file" accept=".pdf,.jpg,.jpeg,.png,.tiff" style="display:none;" onchange="handleSingleSlotFileSelected(this, 'id_proof', document.getElementById('wiz-id-doc-type').value, 'wiz-id-doc-status')" />
+                                            <button type="button" class="btn-outline" style="height:38px;" onclick="document.getElementById('wiz-id-doc-file').click()">⬆ Upload document</button>
                                         </div>
                                     </div>
+                                    <div id="wiz-id-doc-status" style="font-size:12px; color:var(--ink-500); margin-bottom:10px;"></div>
                                     <button type="button" class="btn-outline">🪪 Add another ID</button>
                                 </div>
 
@@ -984,7 +986,9 @@
                                     <hr style="margin: 20px 0; border: none; border-top: 1px solid var(--line);" />
                                     <div class="section-title" style="margin-bottom: 4px; font-size:14px;">Referral Letter</div>
                                     <div class="section-sub" style="margin-bottom: 10px;">Upload referral letter if provided</div>
-                                    <button type="button" class="btn-outline">⬆ Upload</button>
+                                    <input type="file" id="wiz-ref-letter-file" accept=".pdf,.jpg,.jpeg,.png,.tiff" style="display:none;" onchange="handleSingleSlotFileSelected(this, 'referral_letter', 'Referral Letter', 'wiz-ref-letter-status')" />
+                                    <button type="button" class="btn-outline" onclick="document.getElementById('wiz-ref-letter-file').click()">⬆ Upload</button>
+                                    <div id="wiz-ref-letter-status" style="font-size:12px; color:var(--ink-500); margin-top:8px;"></div>
                                 </div>
 
                                 <!-- Step 3: Visit & Appointment -->
@@ -1078,7 +1082,8 @@
                                             <option>Insurance card</option>
                                             <option>Other</option>
                                         </select>
-                                        <button type="button" class="btn-navy">⬆ Upload Document</button>
+                                        <input type="file" id="wiz-doc-file" accept=".pdf,.jpg,.jpeg,.png,.tiff" style="display:none;" onchange="handleAdditionalDocFileSelected(this)" />
+                                        <button type="button" class="btn-navy" onclick="document.getElementById('wiz-doc-file').click()">⬆ Upload Document</button>
                                     </div>
                                     <div id="wiz-doc-list" style="font-size:12.5px; color:var(--ink-500);">No additional documents uploaded.</div>
                                 </div>
@@ -1148,9 +1153,10 @@
                                     </select>
                                 </div>
 
-                                <div style="display: flex; gap: 12px; margin-top: 14px;">
+                                <div style="display: flex; gap: 12px; margin-top: 14px; align-items:center;">
                                     <button type="button" class="btn-outline" id="wizard-prev-btn" onclick="prevWizardStep()">← Previous</button>
                                     <button type="button" class="btn-navy" id="wizard-next-btn" onclick="nextWizardStep()">Next Step →</button>
+                                    <span id="wizard-submit-status" style="font-size:12px; color:var(--ink-500);"></span>
                                 </div>
                             </form>
                         </div>
@@ -1333,9 +1339,64 @@
         };
         let selectedExistingPatient = null;
         let availableDoctors = [];
+        let pendingRegistrationDocuments = []; // {file, label, slot}
+
+        function handleSingleSlotFileSelected(inputEl, slot, label, statusElId) {
+            const file = inputEl.files[0];
+            if (!file) return;
+            pendingRegistrationDocuments = pendingRegistrationDocuments.filter(d => d.slot !== slot);
+            pendingRegistrationDocuments.push({ file, label: label || 'Registration document', slot });
+            document.getElementById(statusElId).innerHTML = `✓ <strong>${escapeHtml(file.name)}</strong> attached`;
+            inputEl.value = '';
+        }
+
+        function handleAdditionalDocFileSelected(inputEl) {
+            const file = inputEl.files[0];
+            if (!file) return;
+            const label = document.getElementById('wiz-doc-type').value;
+            pendingRegistrationDocuments.push({ file, label, slot: 'other' });
+            inputEl.value = '';
+            renderPendingAdditionalDocs();
+        }
+
+        function renderPendingAdditionalDocs() {
+            const listEl = document.getElementById('wiz-doc-list');
+            const others = pendingRegistrationDocuments.filter(d => d.slot === 'other');
+            if (!others.length) { listEl.innerHTML = 'No additional documents uploaded.'; return; }
+            listEl.innerHTML = others.map(d => {
+                const globalIndex = pendingRegistrationDocuments.indexOf(d);
+                return `<div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--line);">
+                    <span>📄 ${escapeHtml(d.label)} — ${escapeHtml(d.file.name)}</span>
+                    <button type="button" class="btn-outline" style="padding:3px 10px; font-size:11px;" onclick="removePendingDocument(${globalIndex})">Remove</button>
+                </div>`;
+            }).join('');
+        }
+
+        function removePendingDocument(index) {
+            pendingRegistrationDocuments.splice(index, 1);
+            renderPendingAdditionalDocs();
+        }
+
+        async function uploadPendingRegistrationDocuments(patientId) {
+            for (const doc of pendingRegistrationDocuments) {
+                try {
+                    const formData = new FormData();
+                    formData.append('file', doc.file);
+                    formData.append('document_type', doc.label);
+                    await Api.upload(`/patients/${patientId}/documents`, formData);
+                } catch (err) {
+                    toast(`Could not upload ${doc.file.name}: ${apiErrorMessage(err)}`, 'error');
+                }
+            }
+            pendingRegistrationDocuments = [];
+        }
 
         async function startNewRegistrationWizard() {
             selectedExistingPatient = null;
+            pendingRegistrationDocuments = [];
+            document.getElementById('wiz-id-doc-status').textContent = '';
+            document.getElementById('wiz-ref-letter-status').textContent = '';
+            renderPendingAdditionalDocs();
             document.querySelector('#reg-wizard-mode .page-title').textContent = 'New Patient · New Registration';
             document.getElementById('reg-search-mode').style.display = 'none';
             document.getElementById('reg-wizard-mode').style.display = 'block';
@@ -1424,6 +1485,8 @@
         }
 
         async function submitFullRegistration() {
+            const statusEl = document.getElementById('wizard-submit-status');
+            const nextBtn = document.getElementById('wizard-next-btn');
             const name = document.getElementById('wiz-fullname').value;
             const mobile = document.getElementById('wiz-mobile').value;
             const age = document.getElementById('wiz-age').value;
@@ -1441,6 +1504,8 @@
                 return;
             }
 
+            nextBtn.disabled = true;
+            statusEl.textContent = 'Registering patient...';
             try {
                 const patient = await Api.post('/patients/register', {
                     name,
@@ -1458,11 +1523,20 @@
                     await Api.post('/queue/tokens', { patient_id: patient.id, doctor_id: Number(doctorId) });
                 }
 
+                if (pendingRegistrationDocuments.length) {
+                    statusEl.textContent = `Uploading ${pendingRegistrationDocuments.length} document(s) and running OCR — this can take a moment...`;
+                    await uploadPendingRegistrationDocuments(patient.id);
+                }
+
+                statusEl.textContent = '';
                 toast(`Patient ${name} registered with MRN ${patient.mrn}${doctorId ? ' and token issued' : ''}`, 'success');
                 exitRegistrationWizard();
                 showTab('overview');
             } catch (err) {
+                statusEl.textContent = '';
                 toast(apiErrorMessage(err), 'error');
+            } finally {
+                nextBtn.disabled = false;
             }
         }
 

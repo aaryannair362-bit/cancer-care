@@ -30,10 +30,7 @@ const ROLE_HOME = {
   CCAMDTCoordinator: '/mdt_coordinator.html',
   CCAPatientLiaison: '/patient_liaison.html',
   CCAFinancialCounsellor: '/patient_financial_services.html',
-  // No reference screenshots exist for this role (see plan) -- stays on the old dark-theme SPA,
-  // which already has a distinct read-only "Assigned Cases" view for it, rather than pointing
-  // at mdt_coordinator.html (whose Auth.requirePage doesn't allow this role and would redirect-loop).
-  CCAExternalMDTSpecialist: '/cca_os.html',
+  CCAExternalMDTSpecialist: '/external_mdt_specialist.html',
 };
 
 const NAV_ITEMS = [
@@ -51,6 +48,7 @@ const NAV_ITEMS = [
   { key: 'nurse_navigator', label: 'Nurse Navigator', href: '/nurse_navigator.html', roles: ['Admin', 'CCANurseNavigator'] },
   { key: 'patient_liaison', label: 'Patient Liaison', href: '/patient_liaison.html', roles: ['Admin', 'CCAPatientLiaison'] },
   { key: 'patient_financial_services', label: 'Financial Services', href: '/patient_financial_services.html', roles: ['Admin', 'CCAFinancialCounsellor'] },
+  { key: 'external_mdt_specialist', label: 'External MDT Specialist', href: '/external_mdt_specialist.html', roles: ['Admin', 'CCAExternalMDTSpecialist'] },
   { key: 'ipd', label: 'Ward', href: '/ipd.html', roles: ['Doctor', 'Nurse', 'NursingStation', 'HeadNurse'] },
   { key: 'headnurse', label: 'Ward Oversight', href: '/headnurse.html', roles: ['HeadNurse'] },
   { key: 'pharmacy', label: 'Pharmacy', href: '/pharmacy.html', roles: ['Pharmacist', 'Admin'] },
@@ -58,7 +56,11 @@ const NAV_ITEMS = [
   { key: 'billing', label: 'Billing', href: '/billing.html', roles: ['Billing', 'Admin'] },
   { key: 'tpa', label: 'Patient Search', href: '/tpa.html', roles: ['TPA'] },
   { key: 'admin', label: 'Admin', href: '/admin.html', roles: ['Admin'] },
-  { key: 'cca', label: '🎗️ Oncology OS', href: '/cca_os.html', roles: ['Doctor', 'Admin', 'HeadNurse', 'Nurse'] },
+  // Generic HMS roles that also carry oncology-adjacent access on specific CCA pages (see each
+  // page's own Auth.requirePage list) -- routed straight to the dedicated light-theme page they're
+  // actually allowed into, never to the retired dark-theme cca_os.html single-page app.
+  { key: 'cca_doctor', label: '🎗️ Oncology OS', href: '/medical_oncologist.html', roles: ['Doctor'] },
+  { key: 'cca_nurse', label: '🎗️ Oncology OS', href: '/infusion_nurse.html', roles: ['HeadNurse', 'Nurse'] },
 ];
 
 const Auth = {

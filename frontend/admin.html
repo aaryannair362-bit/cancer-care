@@ -4,26 +4,38 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Admin Panel</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,500&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
-                * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Inter', -apple-system, system-ui, sans-serif; background: #FBFAF7; color: #1C2621; padding: 20px; }
-        .container { max-width: 1000px; margin: 0 auto; }
-        h1 { color: #2F6F52; margin-bottom: 20px; }
+        :root {
+            --bg-page: #F1F5F9; --bg-surface: #FFFFFF; --bg-card-subtle: #F8FAFC;
+            --ink-900: #0F172A; --ink-800: #1E293B; --ink-700: #334155; --ink-600: #475569; --ink-500: #64748B; --ink-400: #94A3B8; --ink-300: #CBD5E1;
+            --line: #E2E8F0;
+            --navy-action: #2A4365; --navy-action-hover: #1E3A8A;
+            --green-badge-bg: #DCFCE7; --green-badge-text: #166534;
+            --rose-badge-bg: #FFE4E6; --rose-badge-text: #9F1239;
+            --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px;
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', -apple-system, system-ui, sans-serif; background: var(--bg-page); color: var(--ink-800); padding: 28px 36px; -webkit-font-smoothing: antialiased; }
+        .container { max-width: 1100px; margin: 0 auto; }
+        h1 { font-size: 22px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.3px; margin-bottom: 20px; }
         .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px; }
-        table { width: 100%; border-collapse: collapse; background: #FFFFFF; border-radius: 12px; overflow: hidden; }
-        th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid #E6E7E2; }
-        th { background: #F3F2EE; color: #667169; font-weight: 600; }
-        select, button, input { padding: 6px 12px; border-radius: 6px; border: 1px solid #E6E7E2; background: #F3F2EE; color: #1C2621; }
-        .btn-primary { background: linear-gradient(135deg, #2F6F52, #234E39); color: #FBFAF7; border: none; padding: 8px 16px; border-radius: 8px; cursor: pointer; }
-        .btn-primary:hover { opacity: 0.9; }
-        .btn-outline { background: transparent; border: 1px solid #E6E7E2; padding: 8px 16px; border-radius: 8px; color: #667169; cursor: pointer; }
-        .btn-outline:hover { border-color: #93998F; color: #1C2621; }
+        table { width: 100%; border-collapse: collapse; background: var(--bg-surface); border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-sm); }
+        th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--line); font-size: 13px; }
+        th { background: var(--bg-card-subtle); color: var(--ink-500); font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
+        select, button, input { padding: 8px 12px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--bg-surface); color: var(--ink-900); font-family: inherit; font-size: 13px; }
+        .btn-primary { background: var(--navy-action); color: #FFFFFF; border: none; padding: 9px 16px; border-radius: var(--radius-sm); cursor: pointer; font-weight: 600; }
+        .btn-primary:hover { background: var(--navy-action-hover); }
+        .btn-outline { background: var(--bg-surface); border: 1px solid var(--line); padding: 9px 16px; border-radius: var(--radius-sm); color: var(--ink-700); cursor: pointer; font-weight: 600; }
+        .btn-outline:hover { border-color: var(--ink-400); background: var(--bg-card-subtle); }
         .flex { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
         .flex input, .flex select { flex: 1; min-width: 150px; }
-        .message { margin: 8px 0; padding: 8px; border-radius: 6px; }
-        .success { color: #2F6F52; background: #E6F1EA; }
-        .error { color: #C1694F; background: #F7E4DE; }
+        .message { margin: 8px 0; padding: 10px 14px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; }
+        .success { color: var(--green-badge-text); background: var(--green-badge-bg); }
+        .error { color: var(--rose-badge-text); background: var(--rose-badge-bg); }
     </style>
 </head>
 <body>
@@ -68,7 +80,7 @@
         </select>
         <input type="text" id="new-password" placeholder="Password (or leave blank to auto-generate)" />
         <button id="create-user-btn" class="btn-primary">Create User</button>
-        <button id="refresh-btn" class="btn-primary" style="background:linear-gradient(135deg, #2F6F52, #234E39);">Refresh</button>
+        <button id="refresh-btn" class="btn-primary">Refresh</button>
     </div>
     <div id="message" class="message" style="display:none;"></div>
     <table>
@@ -77,7 +89,7 @@
     </table>
 
     <h1 style="margin-top:32px;">💊 Medicine List</h1>
-    <p style="color:#667169;margin-bottom:12px;">
+    <p style="color:var(--ink-500);margin-bottom:12px;">
         Prescriptions are auto-corrected against a ~249,000-entry medicine database. If a real
         product is missing (so it's never getting matched/corrected), add it here -- it's usable
         immediately, no restart needed.
@@ -92,7 +104,7 @@
     </table>
 
     <h1 style="margin-top:32px;">🧪 Lab Test List</h1>
-    <p style="color:#667169;margin-bottom:12px;">
+    <p style="color:var(--ink-500);margin-bottom:12px;">
         Recommended lab tests are auto-corrected against the 195-test lab master (test name +
         common alias, e.g. "CBC" -> "Complete Blood Count"). Add a missing test here.
     </p>
@@ -210,7 +222,7 @@ async function loadUsers() {
             const users = await res.json();
             const tbody = document.getElementById('user-table-body');
             if (!users || users.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:#93998F;">No users found</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--ink-400);">No users found</td></tr>`;
                 return;
             }
             tbody.innerHTML = users.map(u => `
@@ -291,10 +303,10 @@ document.getElementById('logout-btn').addEventListener('click', () => {
 async function loadCustomMedicines() {
     const res = await apiRequest('/admin/medicines');
     const tbody = document.getElementById('medicine-table-body');
-    if (!res.ok) { tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#93998F;">Failed to load</td></tr>`; return; }
+    if (!res.ok) { tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--ink-400);">Failed to load</td></tr>`; return; }
     const rows = await res.json();
     if (!rows.length) {
-        tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#93998F;">No custom medicines added yet</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:var(--ink-400);">No custom medicines added yet</td></tr>`;
         return;
     }
     tbody.innerHTML = rows.map(r => `
@@ -331,10 +343,10 @@ document.getElementById('add-medicine-btn').addEventListener('click', async () =
 async function loadCustomLabTests() {
     const res = await apiRequest('/admin/lab-tests');
     const tbody = document.getElementById('lab-test-table-body');
-    if (!res.ok) { tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#93998F;">Failed to load</td></tr>`; return; }
+    if (!res.ok) { tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--ink-400);">Failed to load</td></tr>`; return; }
     const rows = await res.json();
     if (!rows.length) {
-        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#93998F;">No custom lab tests added yet</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--ink-400);">No custom lab tests added yet</td></tr>`;
         return;
     }
     tbody.innerHTML = rows.map(r => `

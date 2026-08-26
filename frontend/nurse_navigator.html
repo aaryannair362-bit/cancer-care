@@ -1066,7 +1066,7 @@
                     </div>
 
                     <div class="form-label" style="margin-top:12px;">Reported Symptoms</div>
-                    <div class="symptom-checkbox-grid">
+                    <div class="symptom-checkbox-grid" id="symptom-checkbox-grid">
                         <label class="symptom-check-item"><input type="checkbox" checked /> Fatigue</label>
                         <label class="symptom-check-item"><input type="checkbox" checked /> Nausea</label>
                         <label class="symptom-check-item"><input type="checkbox" /> Vomiting</label>
@@ -1075,6 +1075,10 @@
                         <label class="symptom-check-item"><input type="checkbox" /> Loss of Appetite</label>
                         <label class="symptom-check-item"><input type="checkbox" /> Fever</label>
                         <label class="symptom-check-item"><input type="checkbox" /> Cough</label>
+                    </div>
+                    <div style="display:flex; gap:10px; align-items:center; margin-top:12px;">
+                        <input type="text" class="form-input" id="new-symptom-input" placeholder="Other symptom not listed above..." style="max-width:280px;" onkeydown="if(event.key==='Enter'){event.preventDefault(); addCustomSymptom();}" />
+                        <button type="button" class="btn-outline" onclick="addCustomSymptom()">+ Add Symptom</button>
                     </div>
 
                     <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:24px;">
@@ -1197,7 +1201,8 @@
                         <div class="allergy-alert-detail">Flushing, chest tightness, and wheeze · Known clinical allergy</div>
                         <div class="allergy-alert-meta">Clinical record · 02 Aug 2026 · existing verified record preserved</div>
                     </div>
-                    <button class="btn-outline" style="margin-bottom:14px;">+ Add newly reported allergy</button>
+                    <div id="new-allergy-rows-container"></div>
+                    <button class="btn-outline" style="margin-bottom:14px;" onclick="addAllergyRow()">+ Add newly reported allergy</button>
                     <label class="checkbox-required-row">
                         <input type="checkbox" id="chk-allergy-reviewed" onchange="updateHandoffChecklist()" />
                         Allergy status reviewed with patient <span class="req-star">*</span>
@@ -1332,16 +1337,19 @@
                         <div>
                             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
                                 <div class="readonly-card-header" style="margin-bottom:0;">Available Documents</div>
-                                <button class="btn-outline">⬆ Upload / Capture</button>
+                                <input type="file" id="nurse-doc-upload-input" accept=".pdf,.jpg,.jpeg,.png,.tiff" style="display:none;" onchange="handleNurseDocumentUpload(this)" />
+                                <button class="btn-outline" onclick="document.getElementById('nurse-doc-upload-input').click()">⬆ Upload / Capture</button>
                             </div>
-                            <div class="doc-list-item" onclick="selectDoc(this)">📄 Referral letter</div>
-                            <div class="doc-list-item" onclick="selectDoc(this)">📄 Pathology report</div>
-                            <div class="doc-list-item selected" onclick="selectDoc(this)">📄 Previous CBC</div>
-                            <div class="doc-list-item" onclick="selectDoc(this)">📄 Radiology report</div>
-                            <div class="doc-list-item" onclick="selectDoc(this)">📄 External prescription</div>
-                            <div class="doc-list-item" onclick="selectDoc(this)">📄 Previous treatment summary</div>
+                            <div id="nurse-doc-list-container">
+                                <div class="doc-list-item" onclick="selectDoc(this)">📄 Referral letter</div>
+                                <div class="doc-list-item" onclick="selectDoc(this)">📄 Pathology report</div>
+                                <div class="doc-list-item selected" onclick="selectDoc(this)">📄 Previous CBC</div>
+                                <div class="doc-list-item" onclick="selectDoc(this)">📄 Radiology report</div>
+                                <div class="doc-list-item" onclick="selectDoc(this)">📄 External prescription</div>
+                                <div class="doc-list-item" onclick="selectDoc(this)">📄 Previous treatment summary</div>
+                            </div>
                         </div>
-                        <div>
+                        <div id="nurse-doc-detail-panel">
                             <div class="readonly-card-header">Previous CBC</div>
                             <div class="readonly-card-source">Extracted information must be confirmed against the source document.</div>
                             <div class="lab-values-grid">
@@ -1770,9 +1778,74 @@
             container.appendChild(row);
         }
 
+        function addAllergyRow() {
+            const container = document.getElementById('new-allergy-rows-container');
+            const row = document.createElement('div');
+            row.className = 'allergy-alert-box';
+            row.style.background = '#F8FAFC';
+            row.style.border = '1px solid var(--line)';
+            row.innerHTML = `
+                <div style="display:flex; gap:10px; align-items:flex-start;">
+                    <div class="form-grid-3" style="flex:1; margin-bottom:0;">
+                        <div class="form-group" style="margin-bottom:0;">
+                            <label class="form-label">Allergen</label>
+                            <input type="text" class="form-input" placeholder="e.g. Penicillin" />
+                        </div>
+                        <div class="form-group" style="margin-bottom:0;">
+                            <label class="form-label">Severity</label>
+                            <select class="form-select">
+                                <option>Mild</option><option>Moderate</option><option>Severe</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="margin-bottom:0;">
+                            <label class="form-label">Reaction</label>
+                            <input type="text" class="form-input" placeholder="e.g. Rash, itching" />
+                        </div>
+                    </div>
+                    <button type="button" class="btn-outline" style="margin-top:20px; flex-shrink:0;" onclick="this.closest('.allergy-alert-box').remove()" title="Remove this allergy">− Remove</button>
+                </div>
+            `;
+            container.appendChild(row);
+        }
+
+        function addCustomSymptom() {
+            const input = document.getElementById('new-symptom-input');
+            const value = input.value.trim();
+            if (!value) return;
+            const grid = document.getElementById('symptom-checkbox-grid');
+            const label = document.createElement('label');
+            label.className = 'symptom-check-item';
+            label.innerHTML = `<input type="checkbox" checked /> ${escapeHtml(value)} <span style="margin-left:auto; cursor:pointer; color:var(--ink-500); font-weight:700;" onclick="this.closest('.symptom-check-item').remove()" title="Remove">&times;</span>`;
+            grid.appendChild(label);
+            input.value = '';
+            input.focus();
+        }
+
         function selectDoc(el) {
             document.querySelectorAll('.doc-list-item').forEach(d => d.classList.remove('selected'));
             el.classList.add('selected');
+        }
+
+        function handleNurseDocumentUpload(inputEl) {
+            const file = inputEl.files[0];
+            if (!file) return;
+            const container = document.getElementById('nurse-doc-list-container');
+            const item = document.createElement('div');
+            item.className = 'doc-list-item';
+            item.textContent = `📄 ${file.name}`;
+            item.onclick = () => selectUploadedDoc(item, file);
+            container.appendChild(item);
+            inputEl.value = '';
+            selectUploadedDoc(item, file);
+        }
+
+        function selectUploadedDoc(el, file) {
+            document.querySelectorAll('.doc-list-item').forEach(d => d.classList.remove('selected'));
+            el.classList.add('selected');
+            document.getElementById('nurse-doc-detail-panel').innerHTML = `
+                <div class="readonly-card-header">${escapeHtml(file.name)}</div>
+                <div class="readonly-card-source">Uploaded just now (${(file.size / 1024).toFixed(0)} KB) — awaiting OCR extraction and clinician review.</div>
+            `;
         }
 
         function toggleChip(el) {

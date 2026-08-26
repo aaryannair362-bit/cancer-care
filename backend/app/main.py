@@ -270,7 +270,7 @@ def seed_demo_logins(db: Session):
                 "email": "oncologist@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (Medical Oncologist)",
-                "target_url": "/cca_os.html",
+                "target_url": "/medical_oncologist.html",
                 "description": "Staging (AJCC), NCCN guideline readiness & chemo regimens",
             },
             {
@@ -278,7 +278,7 @@ def seed_demo_logins(db: Session):
                 "email": "navigator@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (Nurse Navigator)",
-                "target_url": "/cca_os.html",
+                "target_url": "/nurse_navigator.html",
                 "description": "Patient oncology journey, cycle clearances & toxicity logs",
             },
             {
@@ -286,7 +286,7 @@ def seed_demo_logins(db: Session):
                 "email": "mdtcoord@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (MDT Coordinator)",
-                "target_url": "/cca_os.html",
+                "target_url": "/mdt_coordinator.html",
                 "description": "Multidisciplinary tumor board scheduling & case discussion",
             },
             {
@@ -294,7 +294,7 @@ def seed_demo_logins(db: Session):
                 "email": "surgeon@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (Surgical Oncologist)",
-                "target_url": "/cca_os.html",
+                "target_url": "/surgical_oncologist.html",
                 "description": "Surgical resection notes & MDT panel input",
             },
             {
@@ -302,7 +302,7 @@ def seed_demo_logins(db: Session):
                 "email": "radonc@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (Radiation Oncologist)",
-                "target_url": "/cca_os.html",
+                "target_url": "/radiation_oncologist.html",
                 "description": "Radiation therapy plans & fractional treatment logs",
             },
             {
@@ -310,7 +310,7 @@ def seed_demo_logins(db: Session):
                 "email": "radiologist@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (Radiologist)",
-                "target_url": "/cca_os.html",
+                "target_url": "/radiologist.html",
                 "description": "Imaging review, lesion measurements & RECIST response",
             },
             {
@@ -318,7 +318,7 @@ def seed_demo_logins(db: Session):
                 "email": "pathologist@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (Pathologist)",
-                "target_url": "/cca_os.html",
+                "target_url": "/pathologist.html",
                 "description": "Histopathology, immunohistochemistry & biomarker sign-offs",
             },
             {
@@ -326,7 +326,7 @@ def seed_demo_logins(db: Session):
                 "email": "liaison@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (Patient Liaison)",
-                "target_url": "/cca_os.html",
+                "target_url": "/patient_liaison.html",
                 "description": "Patient communication, counseling & portal access",
             },
             {
@@ -334,7 +334,7 @@ def seed_demo_logins(db: Session):
                 "email": "counsellor@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (Financial Counsellor)",
-                "target_url": "/cca_os.html",
+                "target_url": "/patient_financial_services.html",
                 "description": "Cancer treatment estimates, government schemes & insurance",
             },
             {
@@ -342,7 +342,7 @@ def seed_demo_logins(db: Session):
                 "email": "radcoord@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (Radiology Coordinator)",
-                "target_url": "/cca_os.html",
+                "target_url": "/radiology_coordinator.html",
                 "description": "Radiology scheduling, image intake & scan review coordination",
             },
             {
@@ -350,7 +350,7 @@ def seed_demo_logins(db: Session):
                 "email": "lab@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (Lab / Phlebotomy)",
-                "target_url": "/cca_os.html",
+                "target_url": "/laboratory.html",
                 "description": "Sample collection, CBC/LFT/RFT pre-chemo clearances",
             },
             {
@@ -358,7 +358,7 @@ def seed_demo_logins(db: Session):
                 "email": "infusion@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (Oncology Day-Care / Infusion Nurse)",
-                "target_url": "/cca_os.html",
+                "target_url": "/infusion_nurse.html",
                 "description": "Daycare chemotherapy administration & chair monitoring",
             },
             {
@@ -366,7 +366,7 @@ def seed_demo_logins(db: Session):
                 "email": "externalmdt@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (External MDT Specialist)",
-                "target_url": "/cca_os.html",
+                "target_url": "/external_mdt_specialist.html",
                 "description": "Remote external oncologist consultation & second opinions",
             },
             {
@@ -374,7 +374,7 @@ def seed_demo_logins(db: Session):
                 "email": "ccafrontdesk@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (Front Desk / Registration)",
-                "target_url": "/cca_os.html",
+                "target_url": "/frontdesk.html",
                 "description": "Oncology intake, consent capture & appointment check-in",
             },
         ]

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user, is_admin, is_head_nurse, is_nursing_station, is_tpa, log_audit
+from ..auth import get_current_user, is_admin, is_head_nurse, is_nursing_station, is_cca_front_desk, is_tpa, log_audit
 from ..config import settings
 from ..database import get_db
 from ..models import Consultation, NursingNote, Patient, PatientDocument, ProcedureRecord, Vital
@@ -27,7 +27,7 @@ def _patient(db: Session, patient_id: int, user: dict) -> Patient:
 
 
 def _can_upload(user: dict) -> bool:
-    return is_admin(user) or is_head_nurse(user) or is_nursing_station(user)
+    return is_admin(user) or is_head_nurse(user) or is_nursing_station(user) or is_cca_front_desk(user)
 
 
 def _can_read(user: dict) -> bool:
