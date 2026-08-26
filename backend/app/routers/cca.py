@@ -425,44 +425,54 @@ async def upload_document(
     if duplicate:
         raise HTTPException(409, f"This file was already uploaded as document #{duplicate.id}")
 
+    actor = _actor(current_user)
+    ocr_failed_reason = None
     try:
         ocr_result = extract_document(content, content_type)
         ocr_text = ocr_result["text"]
         page_count = ocr_result["page_count"]
+        doc_class, confidence = classify_document(ocr_text)
     except Exception as exc:
-        raise HTTPException(422, f"Could not extract text from this document: {exc}")
-
-    doc_class, confidence = classify_document(ocr_text)
-    actor = _actor(current_user)
+        # A document that fails OCR (blank page, corrupted scan, unreadable image) is still a
+        # real file the front desk / clinician needs on record -- reject the file outright would
+        # lose it entirely. Save it for manual review instead, matching the general HMS module's
+        # PatientDocument upload (routers/patient_documents.py), which never hard-fails on OCR
+        # error either.
+        ocr_failed_reason = str(exc)
+        ocr_text, page_count, doc_class, confidence = None, 1, None, None
 
     doc = CCADocument(
         patient_id=patient_id, filename=filename, mime_type=content_type, page_count=page_count,
         file_hash=digest, file_content=content, classification_class=doc_class,
         classification_confidence=confidence, ocr_text=ocr_text, uploaded_by=actor,
-        status="EXTRACTED",
+        status="OCR_FAILED" if ocr_failed_reason else "EXTRACTED",
     )
     db.add(doc)
     db.flush()
 
-    drafted_facts = extract_clinical_facts(ocr_text)
     fact_rows = []
-    for f in drafted_facts:
-        fact = ClinicalFact(
-            patient_id=patient_id, document_id=doc.id, fact_type=f["fact_type"], value=f["value"],
-            verbatim_span=f["verbatim"], page_number=1, confidence=f["confidence"], status="PROPOSED",
-        )
-        db.add(fact)
-        fact_rows.append(fact)
-    db.flush()
-
-    detect_contradictions(db, patient_id)
+    if not ocr_failed_reason:
+        drafted_facts = extract_clinical_facts(ocr_text)
+        for f in drafted_facts:
+            fact = ClinicalFact(
+                patient_id=patient_id, document_id=doc.id, fact_type=f["fact_type"], value=f["value"],
+                verbatim_span=f["verbatim"], page_number=1, confidence=f["confidence"], status="PROPOSED",
+            )
+            db.add(fact)
+            fact_rows.append(fact)
+        db.flush()
+        detect_contradictions(db, patient_id)
 
     j_ev = CCAJourneyEvent(
         patient_id=patient_id,
         event_type="DOC_INGESTION",
         event_title=f"Document Ingested: {filename}",
         event_category="INVESTIGATION",
-        description=f"{actor} uploaded {filename}, classified as {doc_class}. {len(fact_rows)} candidate fact(s) drafted for review.",
+        description=(
+            f"{actor} uploaded {filename}, but text extraction failed ({ocr_failed_reason}). Saved for manual review."
+            if ocr_failed_reason else
+            f"{actor} uploaded {filename}, classified as {doc_class}. {len(fact_rows)} candidate fact(s) drafted for review."
+        ),
         actor_name=actor,
         actor_role=current_user.get("role"),
         provenance_doc_id=doc.id,
@@ -479,6 +489,7 @@ async def upload_document(
             "status": doc.status,
         },
         "facts_drafted": len(fact_rows),
+        "ocr_warning": ocr_failed_reason,
     }
 
 
