@@ -464,7 +464,14 @@ _DOCUMENT_CLASS_KEYWORDS = {
 def classify_document(text: str) -> Tuple[str, float]:
     """Deterministic keyword-based document classification -- matches ocr_service.py's own
     preference for regex/keyword heuristics over spending a second AI call on coarse
-    categorization the text itself already signals clearly enough."""
+    categorization the text itself already signals clearly enough.
+
+    Returns ("UNCLASSIFIED", 0.0) when zero keywords match anywhere in the text -- previously
+    this silently defaulted to ("CONSULT_NOTE", 0.4), which confidently mislabels a document
+    whenever OCR produced garbled/near-empty text (a non-Latin-script scan, a low-quality photo,
+    a blank page) as a specific, wrong category instead of flagging it for the clinician to
+    classify manually. The Patient History summary panel treats UNCLASSIFIED as its own state
+    rather than a real category."""
     lower = (text or "").lower()
     scored = []
     for cls, keywords in _DOCUMENT_CLASS_KEYWORDS.items():
@@ -472,7 +479,7 @@ def classify_document(text: str) -> Tuple[str, float]:
         if score:
             scored.append((score, cls))
     if not scored:
-        return "CONSULT_NOTE", 0.4
+        return "UNCLASSIFIED", 0.0
     scored.sort(reverse=True)
     top_score, top_cls = scored[0]
     return top_cls, min(0.95, 0.5 + 0.1 * top_score)
@@ -481,7 +488,7 @@ def classify_document(text: str) -> Tuple[str, float]:
 FACT_TYPES = (
     "PRIMARY_SITE", "LATERALITY", "HISTOLOGY", "GRADE", "T_EVIDENCE", "N_EVIDENCE",
     "M_EVIDENCE", "BIOMARKER_RESULT", "LAB_RESULT", "IMAGING_FINDING", "ECOG",
-    "COMORBIDITY", "MEDICATION",
+    "COMORBIDITY", "MEDICATION", "ALLERGY",
 )
 
 

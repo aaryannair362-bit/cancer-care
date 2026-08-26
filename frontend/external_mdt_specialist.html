@@ -66,6 +66,11 @@
         .form-textarea { height: auto; padding: 10px 12px; }
         .opinion-row { padding: 10px 0; border-bottom: 1px solid var(--line-subtle); font-size: 12.5px; color: var(--ink-700); }
         .disclaimer-banner { background: #FFFBEB; border: 1px solid #FDE68A; border-radius: var(--radius-md); padding: 12px 16px; font-size: 12.5px; color: #92400E; margin-bottom: 20px; }
+        .hms-toast { position: fixed; bottom: 24px; right: 24px; background: var(--ink-900); color: #fff; padding: 12px 18px; border-radius: var(--radius-md); font-size: 13px; box-shadow: var(--shadow-md); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 999; max-width: 360px; }
+        .hms-toast--visible { opacity: 1; transform: translateY(0); }
+        .hms-toast--success { background: var(--green-badge-text); }
+        .hms-toast--error { background: var(--rose-badge-text); }
+        .hms-toast--info { background: var(--blue-badge-text); }
     </style>
 </head>
 <body>

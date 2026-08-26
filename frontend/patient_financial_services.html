@@ -64,6 +64,11 @@
         .form-label { font-size: 12px; font-weight: 600; color: var(--ink-700); }
         .form-input, .form-select, .form-textarea { width: 100%; height: 38px; padding: 0 12px; background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; color: var(--ink-900); outline: none; }
         .form-textarea { height: auto; padding: 10px 12px; }
+        .hms-toast { position: fixed; bottom: 24px; right: 24px; background: var(--ink-900); color: #fff; padding: 12px 18px; border-radius: var(--radius-md); font-size: 13px; box-shadow: var(--shadow-md); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 999; max-width: 360px; }
+        .hms-toast--visible { opacity: 1; transform: translateY(0); }
+        .hms-toast--success { background: var(--green-badge-text); }
+        .hms-toast--error { background: var(--rose-badge-text); }
+        .hms-toast--info { background: var(--blue-badge-text); }
     </style>
 </head>
 <body>
@@ -105,6 +110,7 @@
     </div>
 
     <script src="/static/js/api.js"></script>
+    <script src="/static/js/cca-summary.js"></script>
     <script>
         const ccaUser = Auth.requirePage(['CCAFinancialCounsellor', 'Billing', 'Admin']);
         const CCA_API = '/cca';
@@ -171,6 +177,7 @@
                 const data = await Api.get(`${CCA_API}/financial/cases/${caseId}`);
                 const f = data.case;
                 detail.innerHTML = `
+                    <div id="fin-summary-${caseId}" style="margin-top:8px;"></div>
                     <div class="section-card" style="margin-top:8px;">
                         <div class="section-title" style="font-size:14px; margin-bottom:8px;">Counselling</div>
                         <div class="form-group"><textarea id="fin-notes-${caseId}" class="form-textarea" rows="2" placeholder="Counselling notes">${escapeHtml(f.counselling_notes || '')}</textarea></div>
@@ -193,6 +200,7 @@
                         <button class="btn-navy" onclick="submitClearance(${caseId})">✅ Save Clearance</button>
                     </div>
                 `;
+                renderCaseSummaryPanel(`fin-summary-${caseId}`, f.patient_id);
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

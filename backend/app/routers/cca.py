@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from ..models import User
@@ -136,9 +137,12 @@ def list_patients(
     org_id = _org_id(current_user)
     query = db.query(CCAPatient).filter(CCAPatient.organization_id == org_id)
     if q:
+        # "mobile" is in this search box's own placeholder text (frontdesk.html) but was never
+        # actually matched here -- searching by phone number silently always returned nothing.
         query = query.filter(
             (CCAPatient.name.ilike(f"%{q}%")) |
             (CCAPatient.mrn.ilike(f"%{q}%")) |
+            (CCAPatient.phone.ilike(f"%{q}%")) |
             (CCAPatient.journey_state.ilike(f"%{q}%"))
         )
     patients = query.order_by(CCAPatient.id.asc()).all()
@@ -152,6 +156,14 @@ def list_patients(
             "name": p.name,
             "age": p.age,
             "sex": p.sex,
+            "dob": p.dob,
+            # phone/address were missing here entirely -- frontdesk.html's "select existing
+            # patient to continue registration" flow (selectSearchResultPatient()) reads exactly
+            # these fields to prefill the wizard. Without phone, the mobile field silently came
+            # up blank; since mobile is required to submit, every "Continue Registration" for a
+            # patient found via search hit a validation alert and never actually saved anything.
+            "phone": p.phone,
+            "address": p.address,
             "photo_url": p.photo_url,
             "journey_state": p.journey_state,
             "primary_oncologist": p.primary_oncologist,
@@ -202,6 +214,11 @@ async def register_cca_patient(
         attender_name=body.get("attender_name") or None,
         attender_phone=body.get("attender_phone") or None,
         attender_relationship=body.get("attender_relationship") or None,
+        id_proof_type=body.get("id_proof_type") or None,
+        id_proof_number=body.get("id_proof_number") or None,
+        id_proof_name=body.get("id_proof_name") or None,
+        id_proof_dob=body.get("id_proof_dob") or None,
+        id_proof_verification_status=body.get("id_proof_verification_status") or None,
         organization_id=org_id,
         demo_flag=False,
     )
@@ -220,6 +237,82 @@ async def register_cca_patient(
         actor_role=current_user.get("role"),
     )
     db.add(j_ev)
+    db.commit()
+    db.refresh(patient)
+    return {
+        "status": "success",
+        "patient": {
+            "id": patient.id, "mrn": patient.mrn, "name": patient.name,
+            "age": patient.age, "sex": patient.sex, "journey_state": patient.journey_state,
+        },
+    }
+
+
+@router.patch("/patients/{patient_id}/visit")
+async def register_return_visit(
+    patient_id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Front Desk's registration wizard has a 'search and select existing patient' step
+    (selectSearchResultPatient() in frontdesk.html) specifically so a returning patient's new
+    visit/documents attach to their existing record instead of creating a duplicate -- but until
+    this endpoint existed, submitFullRegistration() had nothing to call for that case and always
+    POSTed /patients, silently creating a brand-new CCAPatient (and a new, unrelated MRN) every
+    time, orphaning that patient's actual prior history from GET .../case-summary. This is the
+    'continue registration' counterpart to POST /patients: same permission and field set, but it
+    updates the existing row and records a RETURN_VISIT journey event instead of minting a new
+    patient. Blank fields leave the existing value alone rather than overwriting it -- Front
+    Desk's wizard pre-fills from the selected patient, but a field left blank here should not be
+    read as 'clear this on file'."""
+    if not (is_cca_front_desk(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only CCA Front Desk or Admin can register a return visit")
+    patient = _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+
+    if body.get("name"):
+        patient.name = body["name"].strip()
+    if body.get("dob"):
+        patient.dob = body["dob"]
+    if body.get("age") not in (None, ""):
+        try:
+            patient.age = int(body["age"])
+        except (TypeError, ValueError):
+            pass
+    if body.get("sex"):
+        patient.sex = body["sex"]
+    if body.get("phone"):
+        patient.phone = body["phone"]
+    if body.get("address"):
+        patient.address = body["address"]
+    if body.get("primary_oncologist"):
+        patient.primary_oncologist = body["primary_oncologist"]
+    if body.get("attender_name"):
+        patient.attender_name = body["attender_name"]
+    if body.get("attender_phone"):
+        patient.attender_phone = body["attender_phone"]
+    if body.get("attender_relationship"):
+        patient.attender_relationship = body["attender_relationship"]
+    if body.get("id_proof_type"):
+        patient.id_proof_type = body["id_proof_type"]
+    if body.get("id_proof_number"):
+        patient.id_proof_number = body["id_proof_number"]
+    if body.get("id_proof_name"):
+        patient.id_proof_name = body["id_proof_name"]
+    if body.get("id_proof_dob"):
+        patient.id_proof_dob = body["id_proof_dob"]
+    if body.get("id_proof_verification_status"):
+        patient.id_proof_verification_status = body["id_proof_verification_status"]
+
+    actor = _actor(current_user)
+    db.add(CCAJourneyEvent(
+        patient_id=patient.id,
+        event_type="RETURN_VISIT",
+        event_title="Patient Returned for New Visit",
+        event_category="REGISTRATION",
+        description=f"{actor} registered a new front-desk visit for returning patient {patient.name} (MRN {patient.mrn}).",
+        actor_name=actor,
+        actor_role=current_user.get("role"),
+    ))
     db.commit()
     db.refresh(patient)
     return {
@@ -285,6 +378,11 @@ def get_patient(
             "attender_name": patient.attender_name,
             "attender_phone": patient.attender_phone,
             "attender_relationship": patient.attender_relationship,
+            "id_proof_type": patient.id_proof_type,
+            "id_proof_number": patient.id_proof_number,
+            "id_proof_name": patient.id_proof_name,
+            "id_proof_dob": patient.id_proof_dob,
+            "id_proof_verification_status": patient.id_proof_verification_status,
             "demo_flag": patient.demo_flag
         },
         "header": header
@@ -386,6 +484,112 @@ def get_patient_summary(
     ]
 
     return {"patient_id": patient_id, "context": context, "blocks": blocks}
+
+
+@router.get("/patients/{patient_id}/case-summary")
+def get_case_summary(
+    patient_id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Single aggregated read backing the "Patient History & Documents" panel (Medical/Surgical/
+    Radiation Oncologist pages, Financial Counsellor page): every document ever uploaded for this
+    patient (front desk or otherwise), the clinical facts extracted/verified from them, the
+    visit-by-visit encounter history, orders/results on record, and the journey timeline. This is
+    what makes a returning patient's prior history show up automatically -- the query is just
+    "everything in the database for patient_id", not scoped to the current visit/session.
+    """
+    org_id = _org_id(current_user)
+    patient = _get_org_patient(db, patient_id, org_id)
+
+    docs = db.query(CCADocument).filter(CCADocument.patient_id == patient_id).order_by(CCADocument.uploaded_at.desc()).all()
+    facts = db.query(ClinicalFact).filter(
+        ClinicalFact.patient_id == patient_id, ClinicalFact.status.in_(["VERIFIED", "PROPOSED"])
+    ).order_by(ClinicalFact.created_at.desc()).all()
+    encounters = db.query(CCAEncounter).filter(CCAEncounter.patient_id == patient_id).order_by(CCAEncounter.started_at.desc()).all()
+    orders = db.query(CCAOrder).filter(CCAOrder.patient_id == patient_id).order_by(CCAOrder.ordered_at.desc()).all()
+    results = db.query(CCAResult).filter(CCAResult.patient_id == patient_id).order_by(CCAResult.resulted_at.desc()).all()
+    events = db.query(CCAJourneyEvent).filter(CCAJourneyEvent.patient_id == patient_id).order_by(CCAJourneyEvent.timestamp.desc()).limit(30).all()
+
+    facts_by_type: Dict[str, List[dict]] = {}
+    facts_per_document: Dict[int, int] = {}
+    for f in facts:
+        facts_by_type.setdefault(f.fact_type, []).append({
+            "id": f.id, "value": f.value, "status": f.status, "document_id": f.document_id,
+            "confidence": f.confidence,
+        })
+        if f.document_id is not None:
+            facts_per_document[f.document_id] = facts_per_document.get(f.document_id, 0) + 1
+
+    def _note_field(note_content, key):
+        return note_content.get(key) if isinstance(note_content, dict) else None
+
+    return {
+        "generated_at": datetime.utcnow().isoformat(),
+        "patient": {
+            "id": patient.id, "mrn": patient.mrn, "name": patient.name, "age": patient.age,
+            "sex": patient.sex, "dob": patient.dob, "journey_state": patient.journey_state,
+            "primary_oncologist": patient.primary_oncologist,
+            "id_proof_type": patient.id_proof_type, "id_proof_number": patient.id_proof_number,
+            "id_proof_verification_status": patient.id_proof_verification_status,
+        },
+        "overview": {
+            "document_count": len(docs),
+            "verified_fact_count": sum(f.status == "VERIFIED" for f in facts),
+            "encounter_count": len(encounters),
+            "last_visit": encounters[0].started_at.isoformat() if encounters and encounters[0].started_at else None,
+            # A RETURN_VISIT journey event (register_return_visit, raised when Front Desk selects
+            # an existing patient to "Continue Registration") is itself proof this patient came
+            # back -- checking only encounters/docs missed exactly that case: a patient re-
+            # registered the same day with no new document or consultation yet would otherwise
+            # still show "No prior visits on record" right above a Journey Timeline that visibly
+            # contradicts it.
+            "is_returning_patient": (
+                len(encounters) > 1 or len(docs) > 0
+                or any(ev.event_type == "RETURN_VISIT" for ev in events)
+            ),
+        },
+        "documents": [
+            {
+                "id": d.id, "filename": d.filename, "classification": d.classification_class,
+                "status": d.status, "uploaded_by": d.uploaded_by,
+                "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
+                "excerpt": (d.ocr_text or "")[:400],
+                "fact_count": facts_per_document.get(d.id, 0),
+                "file_url": f"/api/cca/patients/{patient_id}/documents/{d.id}/file" if d.file_content else None,
+            }
+            for d in docs
+        ],
+        "clinical_facts": facts_by_type,
+        "encounters": [
+            {
+                "id": e.id, "started_at": e.started_at.isoformat() if e.started_at else None,
+                "specialty": e.specialty, "clinician": e.clinician, "note_status": e.note_status,
+                "chief_complaint": _note_field(e.note_content, "chief_complaint"),
+                "diagnosis": _note_field(e.note_content, "primary_diagnosis"),
+                "advice": _note_field(e.note_content, "advice"),
+                "medications": _note_field(e.note_content, "ai_scribe_medications") or [],
+            }
+            for e in encounters
+        ],
+        "orders": [
+            {"id": o.id, "order_type": o.order_type, "item_name": o.item_name, "status": o.status,
+             "ordered_at": o.ordered_at.isoformat() if o.ordered_at else None}
+            for o in orders
+        ],
+        "results": [
+            {"id": r.id, "result_type": r.result_type, "title": r.title, "is_critical": r.is_critical,
+             "status": r.status, "resulted_at": r.resulted_at.isoformat() if r.resulted_at else None}
+            for r in results
+        ],
+        "journey": [
+            {"event_type": ev.event_type, "title": ev.event_title, "description": ev.description,
+             "actor": ev.actor_name, "actor_role": ev.actor_role,
+             "timestamp": ev.timestamp.isoformat() if ev.timestamp else None}
+            for ev in events
+        ],
+        "disclaimer": "This summary combines hospital records with OCR-derived text. Verify clinical decisions against the original documents.",
+    }
 
 
 # ---------------------------------------------------------
@@ -519,6 +723,33 @@ def list_documents(
             "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None
         })
     return {"documents": results}
+
+
+@router.get("/patients/{patient_id}/documents/{document_id}/file")
+def view_cca_document(
+    patient_id: int, document_id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Stream the raw uploaded file so it can actually be opened/previewed -- until now
+    CCADocument.file_content was written on upload but nothing ever read it back. Mirrors
+    the general HMS module's equivalent (routers/patient_documents.py:view_document)."""
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    doc = db.query(CCADocument).filter(
+        CCADocument.id == document_id, CCADocument.patient_id == patient_id
+    ).first()
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    if not doc.file_content:
+        raise HTTPException(404, "No file stored for this document")
+    safe_name = doc.filename.replace('"', "")
+    return Response(
+        doc.file_content, media_type=doc.mime_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": f'inline; filename="{safe_name}"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/extractions/{document_id}")

@@ -22,6 +22,15 @@ class CCAPatient(Base):
     attender_name = Column(String(200))
     attender_phone = Column(String(30))
     attender_relationship = Column(String(50))
+    # Identity verification, captured by Front Desk during registration (frontend/frontdesk.html
+    # "Identity Verification" section). Previously entered into the form and never sent to the
+    # backend at all -- these columns plus the matching fields in register_cca_patient() are what
+    # actually persist them.
+    id_proof_type = Column(String(50))
+    id_proof_number = Column(String(100))
+    id_proof_name = Column(String(200))
+    id_proof_dob = Column(String(20))
+    id_proof_verification_status = Column(String(30))
     organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
     demo_flag = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -116,7 +125,7 @@ class ClinicalFact(Base):
     id = Column(Integer, primary_key=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     document_id = Column(Integer, ForeignKey("cca_documents.id"), nullable=True)
-    fact_type = Column(String(100), nullable=False)  # PRIMARY_SITE, LATERALITY, HISTOLOGY, GRADE, T_EVIDENCE, N_EVIDENCE, M_EVIDENCE, BIOMARKER_RESULT, LAB_RESULT, IMAGING_FINDING, ECOG, COMORBIDITY, MEDICATION
+    fact_type = Column(String(100), nullable=False)  # see cca_engine.FACT_TYPES for the authoritative, current list
     value = Column(String(500), nullable=False)
     verbatim_span = Column(Text)
     page_number = Column(Integer, default=1)

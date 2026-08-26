@@ -45,6 +45,13 @@ ADDITIVE_COLUMNS = [
     # Same gap on DrugBatch -- present on the model, never registered here.
     ("drug_batches", "location", "VARCHAR(100) DEFAULT 'Main Store'"),
     ("drug_batches", "purchase_order_line_id", "INTEGER"),
+    # CCAPatient identity-verification fields (models_cca.py) -- Front Desk's registration wizard
+    # captures these but they were never persisted anywhere.
+    ("cca_patients", "id_proof_type", "VARCHAR(50)"),
+    ("cca_patients", "id_proof_number", "VARCHAR(100)"),
+    ("cca_patients", "id_proof_name", "VARCHAR(200)"),
+    ("cca_patients", "id_proof_dob", "VARCHAR(20)"),
+    ("cca_patients", "id_proof_verification_status", "VARCHAR(30)"),
 ]
 
 

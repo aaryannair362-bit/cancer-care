@@ -239,6 +239,11 @@
         .timeline-stage-card.completed .timeline-stage-status { background: #FFFFFF; color: var(--green-badge-text); }
         .timeline-stage-card.current .timeline-stage-status { background: #FFFFFF; color: var(--blue-badge-text); }
         .timeline-stage-card.upcoming .timeline-stage-status { background: #FFFFFF; color: var(--ink-500); }
+        .hms-toast { position: fixed; bottom: 24px; right: 24px; background: var(--ink-900); color: #fff; padding: 12px 18px; border-radius: var(--radius-md); font-size: 13px; box-shadow: var(--shadow-md); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 999; max-width: 360px; }
+        .hms-toast--visible { opacity: 1; transform: translateY(0); }
+        .hms-toast--success { background: var(--green-badge-text); }
+        .hms-toast--error { background: var(--rose-badge-text); }
+        .hms-toast--info { background: var(--blue-badge-text); }
     </style>
 </head>
 <body>
@@ -260,6 +265,7 @@
         <aside class="sidebar">
             <div class="sidebar-section-title">CLINICAL</div>
             <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Patients</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-history" onclick="showTab('history')"><div class="nav-item-left"><span>🗂️</span><span>Patient History</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-consultation" onclick="showTab('consultation')"><div class="nav-item-left"><span>🩺</span><span>Consultation</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-careplan" onclick="showTab('careplan')"><div class="nav-item-left"><span>📋</span><span>Radiation Plan</span></div><span class="nav-chevron">›</span></a>
 
@@ -290,6 +296,13 @@
                     </div>
                     <div id="onc-patient-list"><!-- Populated via JS: loadPatientQueue() --></div>
                 </div>
+            </div>
+
+            <!-- ===== PATIENT HISTORY ===== -->
+            <div id="view-history" class="view-panel">
+                <h1 class="page-title">Patient History</h1>
+                <p class="page-subtitle">Documents ingested at Front Desk, extracted diagnoses/medications, and this patient's visit history — including prior visits if this patient has been seen before.</p>
+                <div id="history-content"><!-- Populated via JS: renderCaseSummaryPanel() --></div>
             </div>
 
             <!-- ===== CONSULTATION ===== -->
@@ -371,7 +384,7 @@
                         <div class="section-head">
                             <div>
                                 <div class="section-title">Raise Order</div>
-                                <div class="section-sub">Populated from the AI Scribe's detected lab tests — generate a draft above first. Review the item and indication before raising.</div>
+                                <div class="section-sub">Populated from the AI Scribe's detected lab tests — generate a draft above first. All checked tests below are raised as separate orders in one click; use the manual item field for anything not detected.</div>
                             </div>
                         </div>
                         <div id="order-detected-tests" style="margin-bottom:12px; font-size:12px; color:var(--ink-500);"></div>
@@ -381,8 +394,8 @@
                                 <select id="order-type" class="form-select"><option value="LAB">Lab</option></select>
                             </div>
                             <div class="form-group">
-                                <label class="form-label">Item</label>
-                                <input type="text" id="order-item" class="form-input" placeholder="Detected from transcript, e.g. CBC" />
+                                <label class="form-label">Item (manual / ad-hoc order)</label>
+                                <input type="text" id="order-item" class="form-input" placeholder="Only used if no detected tests are checked above" />
                             </div>
                             <div class="form-group">
                                 <label class="form-label">Priority</label>
@@ -514,6 +527,7 @@
     </div>
 
     <script src="/static/js/api.js"></script>
+    <script src="/static/js/cca-summary.js"></script>
     <script src="/static/js/voice-capture.js"></script>
     <script>
         const ccaUser = Auth.requirePage(['CCARadiationOncologist', 'Doctor', 'Admin']);
@@ -535,6 +549,7 @@
             document.getElementById(`nav-${tab}`).classList.add('active');
 
             if (tab === 'patients') loadPatientQueue();
+            if (tab === 'history') renderCaseSummaryPanel('history-content', currentPatientId);
             if (tab === 'consultation') refreshConsultationView();
             if (tab === 'careplan') loadCarePlanView();
             if (tab === 'guideline') loadGuidelinePathway();
@@ -725,18 +740,18 @@
         function renderDetectedLabTests(labTests, indicationContext) {
             const container = document.getElementById('order-detected-tests');
             if (!labTests.length) {
-                container.textContent = 'No lab tests detected in this transcript.';
+                container.innerHTML = 'No lab tests detected in this transcript.';
                 return;
             }
-            container.innerHTML = 'Detected from transcript — click to use: ' + labTests.map(t =>
-                `<span class="badge badge-blue" style="cursor:pointer; margin-right:6px;" onclick="useDetectedLabTest(this)">${escapeHtml(t)}</span>`
-            ).join('');
-            document.getElementById('order-item').value = labTests[0];
+            container.innerHTML = 'Detected from transcript — all checked tests are raised together when you click Raise Order:<br/>' +
+                '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-top:8px;">' +
+                labTests.map((t, i) => `
+                    <label style="display:inline-flex; align-items:center; gap:5px; background:#EFF6FF; border:1px solid var(--blue-badge-bg); border-radius:999px; padding:5px 12px; cursor:pointer;">
+                        <input type="checkbox" class="detected-lab-test-checkbox" value="${escapeHtml(t)}" checked />
+                        ${escapeHtml(t)}
+                    </label>
+                `).join('') + '</div>';
             document.getElementById('order-indication').value = indicationContext;
-        }
-
-        function useDetectedLabTest(el) {
-            document.getElementById('order-item').value = el.textContent;
         }
 
         async function submitConsultationNote() {
@@ -765,19 +780,39 @@
             const statusEl = document.getElementById('order-status');
             const indication = document.getElementById('order-indication').value;
             if (!indication) { toast('Clinical indication is required', 'error'); return; }
-            try {
-                await Api.post(`${CCA_API}/orders`, {
-                    patient_id: currentPatientId,
-                    order_type: document.getElementById('order-type').value,
-                    item_name: document.getElementById('order-item').value || undefined,
-                    clinical_indication: indication,
-                    priority: document.getElementById('order-priority').value,
-                });
-                statusEl.textContent = '✅ Order raised.';
-                toast('Order raised', 'success');
+
+            const checkedTests = Array.from(document.querySelectorAll('.detected-lab-test-checkbox:checked')).map(cb => cb.value);
+            const manualItem = document.getElementById('order-item').value.trim();
+            const items = checkedTests.length ? checkedTests : (manualItem ? [manualItem] : []);
+            if (!items.length) { toast('Check at least one detected test, or enter an item manually', 'error'); return; }
+
+            const orderType = document.getElementById('order-type').value;
+            const priority = document.getElementById('order-priority').value;
+            let raised = 0;
+            const failures = [];
+            for (const item of items) {
+                try {
+                    await Api.post(`${CCA_API}/orders`, {
+                        patient_id: currentPatientId,
+                        order_type: orderType,
+                        item_name: item,
+                        clinical_indication: indication,
+                        priority,
+                    });
+                    raised++;
+                } catch (err) {
+                    failures.push(`${item}: ${apiErrorMessage(err)}`);
+                }
+            }
+
+            if (raised) {
+                statusEl.textContent = `✅ ${raised} order${raised > 1 ? 's' : ''} raised.`;
+                toast(`${raised} order${raised > 1 ? 's' : ''} raised`, 'success');
                 document.getElementById('order-item').value = '';
                 document.getElementById('order-indication').value = '';
-            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+                document.getElementById('order-detected-tests').innerHTML = '';
+            }
+            if (failures.length) toast(`Could not raise: ${failures.join('; ')}`, 'error');
         }
 
         // ---------------------------------------------------------------

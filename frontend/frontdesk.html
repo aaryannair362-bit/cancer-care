@@ -574,6 +574,11 @@
         .fd-patient-item:hover { border-color: var(--ink-300); background: #FFFFFF; }
         .fd-col-label { font-size: 11.5px; color: var(--ink-500); margin-bottom: 4px; }
         .fd-col-value { font-size: 13.5px; font-weight: 700; color: var(--ink-900); }
+        .hms-toast { position: fixed; bottom: 24px; right: 24px; background: var(--ink-900); color: #fff; padding: 12px 18px; border-radius: var(--radius-md); font-size: 13px; box-shadow: var(--shadow-md); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 999; max-width: 360px; }
+        .hms-toast--visible { opacity: 1; transform: translateY(0); }
+        .hms-toast--success { background: var(--green-badge-text); }
+        .hms-toast--error { background: var(--rose-badge-text); }
+        .hms-toast--info { background: var(--blue-badge-text); }
     </style>
 </head>
 <body>
@@ -784,7 +789,11 @@
                                             <div class="section-title">Basic Identity</div>
                                             <div class="section-sub">Mandatory demographic and contact information</div>
                                         </div>
-                                        <button type="button" class="btn-outline" style="font-size:11px;">📷 Add patient photo</button>
+                                        <div style="display:flex; align-items:center; gap:10px;">
+                                            <div id="wiz-photo-preview"></div>
+                                            <input type="file" id="wiz-photo-file" accept="image/*" style="display:none;" onchange="handlePatientPhotoSelected(this)" />
+                                            <button type="button" class="btn-outline" style="font-size:11px;" onclick="document.getElementById('wiz-photo-file').click()">📷 Add patient photo</button>
+                                        </div>
                                     </div>
                                     <div class="form-grid-3">
                                         <div class="form-group">
@@ -1350,6 +1359,17 @@
             inputEl.value = '';
         }
 
+        function handlePatientPhotoSelected(inputEl) {
+            const file = inputEl.files[0];
+            if (!file) return;
+            pendingRegistrationDocuments = pendingRegistrationDocuments.filter(d => d.slot !== 'patient_photo');
+            pendingRegistrationDocuments.push({ file, label: 'Patient Photo', slot: 'patient_photo' });
+            const url = URL.createObjectURL(file);
+            document.getElementById('wiz-photo-preview').innerHTML =
+                `<img src="${url}" alt="Patient photo preview" style="width:36px; height:36px; border-radius:50%; object-fit:cover; border:1px solid var(--line); vertical-align:middle;" /> <span style="font-size:11.5px; color:var(--ink-500);">✓ attached</span>`;
+            inputEl.value = '';
+        }
+
         function handleAdditionalDocFileSelected(inputEl) {
             const file = inputEl.files[0];
             if (!file) return;
@@ -1378,16 +1398,26 @@
         }
 
         async function uploadPendingRegistrationDocuments(patientId) {
+            let ocrFailures = 0;
             for (const doc of pendingRegistrationDocuments) {
                 try {
                     const formData = new FormData();
                     formData.append('file', doc.file);
-                    await Api.upload(`/cca/documents?patient_id=${patientId}`, formData);
+                    const result = await Api.upload(`/cca/documents?patient_id=${patientId}`, formData);
+                    // Upload can "succeed" (201) while OCR itself failed on this specific file --
+                    // the file is still saved, but it won't contribute anything to the Patient
+                    // History summary until it's re-scanned. Front desk needs to know that now,
+                    // not discover it later when a doctor asks why a report isn't showing up.
+                    if (result?.ocr_warning || result?.document?.status === 'OCR_FAILED') {
+                        ocrFailures++;
+                        toast(`${doc.file.name} was saved, but OCR could not read it — try a clearer scan or a text-based PDF`, 'error');
+                    }
                 } catch (err) {
                     toast(`Could not upload ${doc.file.name}: ${apiErrorMessage(err)}`, 'error');
                 }
             }
             pendingRegistrationDocuments = [];
+            return ocrFailures;
         }
 
         async function startNewRegistrationWizard() {
@@ -1395,6 +1425,7 @@
             pendingRegistrationDocuments = [];
             document.getElementById('wiz-id-doc-status').textContent = '';
             document.getElementById('wiz-ref-letter-status').textContent = '';
+            document.getElementById('wiz-photo-preview').innerHTML = '';
             renderPendingAdditionalDocs();
             document.querySelector('#reg-wizard-mode .page-title').textContent = 'New Patient · New Registration';
             document.getElementById('reg-search-mode').style.display = 'none';
@@ -1504,10 +1535,11 @@
             }
 
             nextBtn.disabled = true;
-            statusEl.textContent = 'Registering patient...';
+            statusEl.textContent = selectedExistingPatient ? 'Registering return visit...' : 'Registering patient...';
             try {
                 const dept = document.getElementById('wiz-dept').value;
-                const result = await Api.post('/cca/patients', {
+                const idDocNumber = document.getElementById('wiz-id-doc-number').value;
+                const patientPayload = {
                     name,
                     age: age ? Number(age) : undefined,
                     dob: dob || undefined,
@@ -1515,7 +1547,19 @@
                     phone: mobile,
                     address: document.getElementById('wiz-address').value || undefined,
                     primary_oncologist: dept ? `${dept} Team (unassigned)` : undefined,
-                });
+                    id_proof_type: idDocNumber ? document.getElementById('wiz-id-doc-type').value : undefined,
+                    id_proof_number: idDocNumber || undefined,
+                    id_proof_name: document.getElementById('wiz-id-doc-name').value || undefined,
+                    id_proof_dob: document.getElementById('wiz-id-doc-dob').value || undefined,
+                    id_proof_verification_status: idDocNumber ? document.getElementById('wiz-id-verification-status').value : undefined,
+                };
+                // Continuing a patient found via search must reuse their existing patient_id --
+                // otherwise this visit's documents and facts attach to a brand-new, unrelated
+                // record and their entire prior history becomes invisible on the Patient History
+                // tab. Only a genuinely new patient gets a POST (new row, new MRN).
+                const result = selectedExistingPatient
+                    ? await Api.patch(`/cca/patients/${selectedExistingPatient.id}/visit`, patientPayload)
+                    : await Api.post('/cca/patients', patientPayload);
                 const patient = result.patient;
 
                 if (pendingRegistrationDocuments.length) {
@@ -1524,7 +1568,10 @@
                 }
 
                 statusEl.textContent = '';
-                toast(`Patient ${name} registered with MRN ${patient.mrn}`, 'success');
+                toast(selectedExistingPatient
+                    ? `Return visit registered for ${name} (MRN ${patient.mrn})`
+                    : `Patient ${name} registered with MRN ${patient.mrn}`, 'success');
+                selectedExistingPatient = null;
                 exitRegistrationWizard();
                 showTab('overview');
             } catch (err) {
@@ -1552,7 +1599,7 @@
                     <div class="search-result-card">
                         <div>
                             <div class="search-result-name">${escapeHtml(p.name)}</div>
-                            <div class="search-result-meta">${escapeHtml(p.mrn || 'No MRN')} · ${p.age ?? '-'} years · ${escapeHtml(p.sex || '-')} · ${escapeHtml(p.journey_state || '-')}</div>
+                            <div class="search-result-meta">${escapeHtml(p.mrn || 'No MRN')} · ${p.age ?? '-'} years · ${escapeHtml(p.sex || '-')} · ${escapeHtml(p.phone || 'No mobile on file')} · ${escapeHtml(p.journey_state || '-')}</div>
                         </div>
                         <button class="btn-outline" onclick='selectSearchResultPatient(${JSON.stringify(p)})'>Select Patient</button>
                     </div>
@@ -1571,6 +1618,7 @@
             await loadDoctorsIntoClinicianSelect();
 
             document.getElementById('wiz-fullname').value = patient.name || '';
+            document.getElementById('wiz-dob').value = patient.dob || '';
             document.getElementById('wiz-age').value = patient.age || '';
             document.getElementById('wiz-mobile').value = patient.phone || '';
             document.getElementById('wiz-sex').value = patient.sex || '';
