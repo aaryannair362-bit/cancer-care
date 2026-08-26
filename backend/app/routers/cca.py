@@ -751,6 +751,52 @@ def get_patient_journey(
 # 4. Nurse Intake & Doctor OPD Consultation (SCR-08/09)
 # ---------------------------------------------------------
 
+@router.post("/patients/{patient_id}/encounters", status_code=201)
+async def open_encounter(
+    patient_id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Idempotent: returns the patient's existing OPEN encounter if one exists, else opens a new
+    one. Nurse Intake and Doctor OPD Consultation both write against an encounter id (see
+    /encounters/{id}/intake and /encounters/{id}/note/finalise below) but previously had no way
+    to obtain one outside cca_seed.py's demo seeder."""
+    org_id = _org_id(current_user)
+    _get_org_patient(db, patient_id, org_id)
+    body = await request.json()
+
+    existing = db.query(CCAEncounter).filter(
+        CCAEncounter.patient_id == patient_id,
+        CCAEncounter.status == "OPEN"
+    ).order_by(CCAEncounter.id.desc()).first()
+    if existing:
+        return {"encounter": {"id": existing.id, "status": existing.status, "note_status": existing.note_status}}
+
+    actor = _actor(current_user)
+    encounter = CCAEncounter(
+        patient_id=patient_id,
+        encounter_type=body.get("encounter_type", "OPD_CONSULTATION"),
+        specialty=body.get("specialty", "Medical Oncology"),
+        clinician=actor,
+        status="OPEN",
+        note_status="TRANSCRIPT"
+    )
+    db.add(encounter)
+
+    j_ev = CCAJourneyEvent(
+        patient_id=patient_id,
+        event_type="ENCOUNTER_OPENED",
+        event_title=f"Encounter Opened ({encounter.encounter_type})",
+        event_category="CONSULTATION",
+        description=f"{actor} opened a new {encounter.encounter_type} encounter.",
+        actor_name=actor,
+        actor_role=current_user.get("role")
+    )
+    db.add(j_ev)
+    db.commit()
+    db.refresh(encounter)
+    return {"encounter": {"id": encounter.id, "status": encounter.status, "note_status": encounter.note_status}}
+
+
 @router.post("/encounters/{id}/intake")
 async def complete_nurse_intake(
     id: int, request: Request, db: Session = Depends(get_cca_db),
@@ -1319,6 +1365,35 @@ def get_care_plan_prefill(
 ):
     _get_org_patient(db, patient_id, _org_id(current_user))
     return generate_care_plan_prefill(db, patient_id)
+
+
+@router.get("/care-plans/current")
+def get_current_care_plan(
+    patient_id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """The Live Care Plan Hub needs the active plan's id/version to open a real amendment
+    against it (PUT /care-plans/{id} below) -- previously only /care-plans/prefill (pre-MDT
+    draft generation) and POST/PUT existed, with no way to read back an already-created plan."""
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    plan = db.query(CarePlan).filter(
+        CarePlan.patient_id == patient_id
+    ).order_by(CarePlan.id.desc()).first()
+    if not plan:
+        return {"care_plan": None}
+    return {
+        "care_plan": {
+            "id": plan.id,
+            "intent": plan.intent,
+            "goals": plan.goals,
+            "components": plan.components,
+            "monitoring_plan": plan.monitoring_plan,
+            "follow_up_plan": plan.follow_up_plan,
+            "next_decision_point": plan.next_decision_point,
+            "version_no": plan.version_no,
+            "status": plan.status
+        }
+    }
 
 
 @router.post("/care-plans")

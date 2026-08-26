@@ -29,6 +29,15 @@ ADDITIVE_COLUMNS = [
     ("consultations", "objective_findings", "TEXT"),
     ("consultations", "allergy_warnings", "JSON"),
     ("billing_claims", "pre_authorization_id", "INTEGER"),
+    # Master Patient Index fields (routers/patients.py) -- added to the Patient model but never
+    # registered here, so any pre-existing database never got them and every call to
+    # POST /api/patients/register failed with "table patients has no column named mrn".
+    ("patients", "mrn", "VARCHAR(30)"),
+    ("patients", "phone", "VARCHAR(20)"),
+    ("patients", "date_of_birth", "DATE"),
+    ("patients", "address", "TEXT"),
+    ("patients", "id_proof_type", "VARCHAR(50)"),
+    ("patients", "id_proof_number", "VARCHAR(100)"),
 ]
 
 

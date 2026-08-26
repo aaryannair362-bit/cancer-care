@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aivana — Radiation Oncologist</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-page: #F1F5F9;
+            --bg-sidebar: #EEF2F6;
+            --bg-surface: #FFFFFF;
+            --bg-card-subtle: #F8FAFC;
+
+            --ink-900: #0F172A;
+            --ink-800: #1E293B;
+            --ink-700: #334155;
+            --ink-600: #475569;
+            --ink-500: #64748B;
+            --ink-400: #94A3B8;
+            --ink-300: #CBD5E1;
+
+            --line: #E2E8F0;
+            --line-subtle: #F1F5F9;
+
+            --brand-primary: #3B82F6;
+            --brand-dark: #1E3A8A;
+            --navy-action: #2A4365;
+            --navy-action-hover: #1E3A8A;
+
+            --green-badge-bg: #DCFCE7;
+            --green-badge-text: #166534;
+            --amber-badge-bg: #FEF3C7;
+            --amber-badge-text: #92400E;
+            --rose-badge-bg: #FFE4E6;
+            --rose-badge-text: #9F1239;
+            --blue-badge-bg: #E0E7FF;
+            --blue-badge-text: #3730A3;
+
+            --radius-sm: 6px;
+            --radius-md: 10px;
+            --radius-lg: 14px;
+            --radius-full: 9999px;
+
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+            --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg-page);
+            color: var(--ink-800);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .topbar {
+            height: 64px;
+            background: var(--bg-surface);
+            border-bottom: 1px solid var(--line);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 24px;
+            flex-shrink: 0;
+            z-index: 20;
+        }
+        .brand-logo { font-size: 20px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; display: flex; align-items: center; gap: 8px; text-decoration: none; }
+        .search-pill-container { flex: 1; max-width: 520px; margin: 0 32px; position: relative; }
+        .search-pill-input {
+            width: 100%; height: 40px; background: #F8FAFC; border: 1px solid var(--line); border-radius: var(--radius-full);
+            padding: 0 16px 0 42px; font-size: 13.5px; color: var(--ink-900); outline: none; transition: all 0.15s ease;
+        }
+        .search-pill-input:focus { background: #FFFFFF; border-color: var(--brand-primary); box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12); }
+        .search-icon-fixed { position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: var(--ink-400); font-size: 15px; pointer-events: none; }
+        .header-actions { display: flex; align-items: center; gap: 12px; }
+        .icon-circle-btn {
+            width: 38px; height: 38px; border-radius: var(--radius-full); border: 1px solid var(--line); background: var(--bg-surface);
+            display: flex; align-items: center; justify-content: center; color: var(--ink-600); cursor: pointer; transition: background 0.15s;
+        }
+        .icon-circle-btn:hover { background: #F1F5F9; }
+        .role-badge-pill {
+            display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: #F8FAFC; border: 1px solid var(--line);
+            border-radius: var(--radius-full); font-size: 13px; font-weight: 500; color: var(--ink-800); cursor: pointer;
+        }
+        .avatar-pill {
+            width: 38px; height: 38px; border-radius: var(--radius-full); background: #E2E8F0; color: var(--ink-800);
+            display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; border: 1px solid var(--line); cursor: pointer;
+        }
+
+        .app-body { flex: 1; display: flex; overflow: hidden; }
+
+        .sidebar { width: 240px; background: var(--bg-sidebar); border-right: 1px solid var(--line); padding: 20px 14px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; overflow-y: auto; }
+        .sidebar-section-title { font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: var(--ink-400); text-transform: uppercase; padding: 10px 12px 6px; }
+        .sidebar-nav-item {
+            display: flex; align-items: center; justify-content: space-between; padding: 11px 14px; border-radius: var(--radius-md);
+            font-size: 13.5px; font-weight: 500; color: var(--ink-700); text-decoration: none; cursor: pointer; transition: all 0.15s ease;
+        }
+        .sidebar-nav-item:hover { background: rgba(255, 255, 255, 0.6); color: var(--ink-900); }
+        .sidebar-nav-item.active { background: #FFFFFF; color: var(--ink-900); font-weight: 600; box-shadow: var(--shadow-sm); border: 1px solid rgba(226, 232, 240, 0.8); }
+        .nav-item-left { display: flex; align-items: center; gap: 10px; }
+        .nav-chevron { color: var(--ink-400); font-size: 12px; }
+
+        .canvas { flex: 1; overflow-y: auto; padding: 28px 36px; }
+        .view-panel { display: none; }
+        .view-panel.active { display: block; }
+
+        .page-title { font-size: 26px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; margin-bottom: 4px; }
+        .page-subtitle { font-size: 13.5px; color: var(--ink-500); margin-bottom: 20px; }
+
+        .filter-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; flex-wrap: wrap; }
+        .filter-input, .filter-select {
+            height: 38px; padding: 0 12px; background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-sm);
+            font-size: 13px; color: var(--ink-800); outline: none;
+        }
+        .filter-input { padding-left: 34px; min-width: 200px; }
+        .filter-select { cursor: pointer; color: var(--ink-700); }
+
+        .section-card { background: var(--bg-surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 20px; box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+        .section-title { font-size: 16px; font-weight: 700; color: var(--ink-900); }
+        .section-sub { font-size: 12px; color: var(--ink-500); margin-top: 2px; }
+
+        .badge { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: var(--radius-sm); display: inline-flex; align-items: center; }
+        .badge-green { background: var(--green-badge-bg); color: var(--green-badge-text); }
+        .badge-amber { background: var(--amber-badge-bg); color: var(--amber-badge-text); }
+        .badge-rose { background: var(--rose-badge-bg); color: var(--rose-badge-text); }
+        .badge-blue { background: var(--blue-badge-bg); color: var(--blue-badge-text); }
+
+        .btn-navy {
+            background: var(--navy-action); color: #FFFFFF; font-size: 12.5px; font-weight: 600; padding: 9px 16px; border-radius: var(--radius-sm);
+            border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: background 0.15s;
+        }
+        .btn-navy:hover { background: var(--navy-action-hover); }
+        .btn-navy:disabled { background: #94A3B8; cursor: not-allowed; }
+        .btn-outline {
+            background: #FFFFFF; border: 1px solid var(--line); color: var(--ink-700); font-size: 12.5px; font-weight: 600; padding: 9px 14px;
+            border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: all 0.15s;
+        }
+        .btn-outline:hover { border-color: var(--ink-400); background: #F8FAFC; }
+
+        /* Patient queue card */
+        .onc-patient-card { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 18px; margin-bottom: 12px; }
+        .onc-card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+        .onc-patient-name { font-size: 15.5px; font-weight: 700; color: var(--ink-900); }
+        .onc-patient-meta { font-size: 12px; color: var(--ink-500); margin-top: 2px; }
+        .onc-card-mid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; margin-bottom: 12px; }
+        .onc-col-label { font-size: 11px; color: var(--ink-500); text-transform: uppercase; margin-bottom: 3px; }
+        .onc-col-value { font-size: 13.5px; font-weight: 700; color: var(--ink-900); }
+        .onc-col-sub { font-size: 12px; color: var(--ink-600); margin-top: 2px; }
+        .attention-list { background: #FFFBEB; border: 1px solid #FDE68A; border-radius: var(--radius-sm); padding: 10px 14px; margin-bottom: 12px; font-size: 12.5px; color: #92400E; }
+        .attention-list span { display: block; margin-bottom: 2px; }
+        .attention-list span:last-child { margin-bottom: 0; }
+
+        /* Patient banner (shared across detail screens) */
+        .patient-banner { background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 16px 20px; display: grid; grid-template-columns: 1.2fr 1.3fr 1.3fr 1fr; gap: 16px; margin-bottom: 20px; }
+        .banner-label { font-size: 11px; color: var(--ink-400); font-weight: 600; text-transform: uppercase; margin-bottom: 4px; }
+        .banner-value { font-size: 13.5px; font-weight: 600; color: var(--ink-900); }
+        .banner-sub { font-size: 12px; color: var(--ink-500); margin-top: 2px; }
+
+        .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+        .form-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+        .form-group { display: flex; flex-direction: column; gap: 6px; }
+        .form-label { font-size: 12px; font-weight: 600; color: var(--ink-700); }
+        .form-input, .form-select, .form-textarea { width: 100%; height: 38px; padding: 0 12px; background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; color: var(--ink-900); outline: none; }
+        .form-input:focus, .form-select:focus, .form-textarea:focus { border-color: var(--brand-primary); box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15); }
+        .form-textarea { height: auto; padding: 10px 12px; }
+
+        /* Pill-toggle group (Treatment intent/modality) */
+        .pill-toggle-row { display: flex; flex-wrap: wrap; gap: 8px; }
+        .pill-toggle {
+            background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-full); padding: 8px 16px; font-size: 12.5px;
+            font-weight: 600; color: var(--ink-700); cursor: pointer; transition: all 0.15s;
+        }
+        .pill-toggle.selected { background: var(--navy-action); color: #FFFFFF; border-color: var(--navy-action); }
+
+        .checklist-row { display: flex; align-items: center; gap: 10px; padding: 11px 14px; background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; margin-bottom: 8px; }
+
+        /* Staging cards */
+        .stage-card { background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; }
+        .stage-card-title { font-size: 13px; font-weight: 700; color: var(--ink-900); margin-bottom: 8px; }
+        .stage-evidence-item { font-size: 12.5px; color: var(--ink-600); padding: 6px 0; border-bottom: 1px solid var(--line-subtle); }
+        .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+
+        /* Guideline pathway */
+        .pathway-chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+        .pathway-chip { background: var(--blue-badge-bg); color: var(--blue-badge-text); font-size: 12px; font-weight: 600; padding: 6px 14px; border-radius: var(--radius-full); }
+        .pathway-option-card { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; margin-bottom: 10px; }
+        .pathway-option-title { font-size: 13.5px; font-weight: 700; color: var(--brand-dark); margin-bottom: 4px; }
+        .disclaimer-banner { background: #FFFBEB; border: 1px solid #FDE68A; border-radius: var(--radius-md); padding: 12px 16px; font-size: 12.5px; color: #92400E; margin-top: 16px; }
+        .locked-card { text-align: center; padding: 48px 24px; }
+
+        /* MDT */
+        .mdt-team-card { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 14px; }
+        .mdt-case-row { padding: 12px 0; border-bottom: 1px solid var(--line-subtle); display: flex; justify-content: space-between; align-items: center; }
+
+        /* NEXUS (static demo hub, shared shape across roles) */
+        .nexus-metrics-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; margin-bottom: 20px; }
+        .nexus-metric-tile { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; }
+        .nexus-metric-label { font-size: 12px; color: var(--ink-500); margin-bottom: 8px; }
+        .nexus-metric-value { font-size: 20px; font-weight: 700; color: var(--ink-900); }
+        .nexus-lower-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
+        .nexus-tabs { display: flex; gap: 8px; }
+        .nexus-tab-btn { background: #F1F5F9; border: none; color: var(--ink-600); font-size: 13px; font-weight: 600; padding: 8px 16px; border-radius: var(--radius-sm); cursor: pointer; }
+        .nexus-tab-btn.active { background: var(--navy-action); color: #FFFFFF; }
+        .nexus-task-card { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; margin-bottom: 12px; }
+        .nexus-task-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; }
+        .nexus-task-title { font-size: 14.5px; font-weight: 700; color: var(--ink-900); }
+        .nexus-task-owner { font-size: 12px; color: var(--ink-500); margin-bottom: 6px; }
+        .nexus-task-desc { font-size: 13px; color: var(--ink-700); margin-bottom: 12px; }
+        .owner-badge { font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: var(--radius-sm); background: var(--blue-badge-bg); color: var(--blue-badge-text); white-space: nowrap; }
+        .nexus-task-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+        .nexus-mini-btn { background: #FFFFFF; border: 1px solid var(--line); color: var(--ink-700); font-size: 12.5px; font-weight: 600; padding: 7px 14px; border-radius: var(--radius-sm); cursor: pointer; }
+        .nexus-mini-btn.primary { background: var(--navy-action); color: #FFFFFF; border-color: var(--navy-action); }
+        .care-team-list-item { padding: 12px 0; border-bottom: 1px solid var(--line-subtle); font-size: 13.5px; font-weight: 600; color: var(--ink-800); }
+        .priority-focus-card { border-radius: var(--radius-md); padding: 14px 16px; margin-bottom: 12px; }
+        .priority-focus-card.critical { background: var(--rose-badge-bg); }
+        .priority-focus-card.warn { background: var(--amber-badge-bg); }
+        .priority-focus-card.info { background: var(--blue-badge-bg); }
+        .priority-focus-title { font-size: 13.5px; font-weight: 700; color: var(--ink-900); margin-bottom: 4px; }
+        .priority-focus-tag { font-size: 11.5px; font-weight: 700; }
+        .priority-focus-card.critical .priority-focus-tag { color: var(--rose-badge-text); }
+        .priority-focus-card.warn .priority-focus-tag { color: var(--amber-badge-text); }
+        .priority-focus-card.info .priority-focus-tag { color: var(--blue-badge-text); }
+        .timeline-grid-6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
+        .timeline-stage-card { border-radius: var(--radius-md); padding: 14px 12px; text-align: left; }
+        .timeline-stage-card.completed { background: var(--green-badge-bg); }
+        .timeline-stage-card.current { background: var(--blue-badge-bg); }
+        .timeline-stage-card.upcoming { background: var(--bg-card-subtle); border: 1px solid var(--line); }
+        .timeline-stage-name { font-size: 13.5px; font-weight: 700; color: var(--ink-900); margin-bottom: 8px; }
+        .timeline-stage-status { font-size: 11.5px; font-weight: 700; padding: 3px 9px; border-radius: var(--radius-sm); display: inline-block; }
+        .timeline-stage-card.completed .timeline-stage-status { background: #FFFFFF; color: var(--green-badge-text); }
+        .timeline-stage-card.current .timeline-stage-status { background: #FFFFFF; color: var(--blue-badge-text); }
+        .timeline-stage-card.upcoming .timeline-stage-status { background: #FFFFFF; color: var(--ink-500); }
+    </style>
+</head>
+<body>
+
+    <header class="topbar">
+        <a href="/radiation_oncologist.html" class="brand-logo">Aivana</a>
+        <div class="search-pill-container">
+            <span class="search-icon-fixed">🔍</span>
+            <input type="text" class="search-pill-input" placeholder="Search patient or workflow" />
+        </div>
+        <div class="header-actions">
+            <button class="icon-circle-btn" title="Notifications">🔔</button>
+            <div class="role-badge-pill" onclick="location.href='/index.html'"><span>Radiation Oncologist</span><span>▾</span></div>
+            <div class="avatar-pill" title="Logged in">RO ▾</div>
+        </div>
+    </header>
+
+    <div class="app-body">
+        <aside class="sidebar">
+            <div class="sidebar-section-title">CLINICAL</div>
+            <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Patients</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-consultation" onclick="showTab('consultation')"><div class="nav-item-left"><span>🩺</span><span>Consultation</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-careplan" onclick="showTab('careplan')"><div class="nav-item-left"><span>📋</span><span>Radiation Plan</span></div><span class="nav-chevron">›</span></a>
+
+            <div class="sidebar-section-title">CLINICAL INTELLIGENCE / COORDINATION</div>
+            <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-guideline" onclick="showTab('guideline')"><div class="nav-item-left"><span>📖</span><span>Guideline Pathway</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-staging" onclick="showTab('staging')"><div class="nav-item-left"><span>🎯</span><span>Staging</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-mdt" onclick="showTab('mdt')"><div class="nav-item-left"><span>👥</span><span>MDT / Tumour Board</span></div><span class="nav-chevron">›</span></a>
+        </aside>
+
+        <main class="canvas">
+
+            <!-- ===== PATIENTS ===== -->
+            <div id="view-patients" class="view-panel active">
+                <h1 class="page-title">Patients</h1>
+                <p class="page-subtitle">Radiation Oncology worklist and patients requiring review</p>
+                <div class="filter-toolbar">
+                    <input type="text" class="filter-input" placeholder="Name, MRN, mobile..." />
+                    <select class="filter-select"><option>All statuses</option></select>
+                    <select class="filter-select"><option>All appointments</option></select>
+                    <select class="filter-select"><option>All priorities</option></select>
+                    <select class="filter-select"><option>All clinical states</option></select>
+                </div>
+                <div class="section-card">
+                    <div class="section-head">
+                        <div class="section-title">Radiation Oncology Queue</div>
+                        <span class="badge badge-blue" id="onc-patient-count">0 patients</span>
+                    </div>
+                    <div id="onc-patient-list"><!-- Populated via JS: loadPatientQueue() --></div>
+                </div>
+            </div>
+
+            <!-- ===== CONSULTATION ===== -->
+            <div id="view-consultation" class="view-panel">
+                <h1 class="page-title">Consultation</h1>
+                <p class="page-subtitle">Structured consultation note. Finalising raises staging investigation orders and moves the patient into Under Investigation.</p>
+                <div class="patient-banner" id="consult-patient-banner" style="display:none;">
+                    <div><div class="banner-label">Patient</div><div class="banner-value" id="consult-hdr-name">—</div><div class="banner-sub" id="consult-hdr-mrn"></div></div>
+                    <div><div class="banner-label">Diagnosis</div><div class="banner-value" id="consult-hdr-journey" style="font-size:12.5px;">—</div></div>
+                    <div><div class="banner-label">Oncologist</div><div class="banner-value" id="consult-hdr-onc" style="font-size:12.5px;">—</div></div>
+                    <div><button class="btn-outline" onclick="showTab('patients')">Change Patient</button></div>
+                </div>
+
+                <div class="section-card" id="consult-no-patient-card">
+                    <p style="font-size:13px; color:var(--ink-500);">Select a patient from the Patients queue first.</p>
+                    <button class="btn-navy" style="margin-top:10px;" onclick="showTab('patients')">Go to Patients</button>
+                </div>
+
+                <div id="consult-form-area" style="display:none;">
+                    <div class="section-card">
+                        <div class="section-title">History &amp; Assessment</div>
+                        <div class="form-group" style="margin-bottom:14px;">
+                            <label class="form-label">Chief complaint</label>
+                            <textarea id="consult-cc" class="form-textarea" rows="2"></textarea>
+                        </div>
+                        <div class="form-group" style="margin-bottom:14px;">
+                            <label class="form-label">History of presenting illness</label>
+                            <textarea id="consult-hpi" class="form-textarea" rows="3"></textarea>
+                        </div>
+                        <div class="form-group" style="margin-bottom:14px;">
+                            <label class="form-label">Physical examination</label>
+                            <textarea id="consult-exam" class="form-textarea" rows="3"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Differential diagnosis</label>
+                            <textarea id="consult-ddx" class="form-textarea" rows="2"></textarea>
+                        </div>
+                    </div>
+
+                    <div class="section-card">
+                        <div class="section-title">Treatment Intent &amp; Modality</div>
+                        <div class="section-sub" style="margin-bottom:12px;">For reference during discussion — recorded formally via Treatment Plan / MDT.</div>
+                        <div class="form-label" style="margin-bottom:8px;">Intent</div>
+                        <div class="pill-toggle-row" id="intent-pills" style="margin-bottom:16px;"></div>
+                        <div class="form-label" style="margin-bottom:8px;">Modality</div>
+                        <div class="pill-toggle-row" id="modality-pills"></div>
+                    </div>
+
+                    <div class="section-card">
+                        <div class="section-head"><div class="section-title">Raise Order</div></div>
+                        <div class="form-grid-3">
+                            <div class="form-group">
+                                <label class="form-label">Order type</label>
+                                <select id="order-type" class="form-select"><option value="RADIOLOGY">Radiology</option><option value="LAB">Lab</option><option value="PATHOLOGY">Pathology</option></select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Item</label>
+                                <input type="text" id="order-item" class="form-input" placeholder="e.g. CECT Chest/Abdomen/Pelvis" />
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Priority</label>
+                                <select id="order-priority" class="form-select"><option value="ROUTINE">Routine</option><option value="URGENT">Urgent</option><option value="STAT">Stat</option></select>
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:14px;">
+                            <label class="form-label">Clinical indication</label>
+                            <textarea id="order-indication" class="form-textarea" rows="2"></textarea>
+                        </div>
+                        <button class="btn-outline" onclick="submitOrder()">📤 Raise Order</button>
+                        <div id="order-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                    </div>
+
+                    <div class="section-card">
+                        <div style="display:flex; justify-content:flex-end;">
+                            <button class="btn-navy" onclick="submitConsultationNote()">✍️ Finalise Consultation Note</button>
+                        </div>
+                        <div id="consult-status" style="font-size:12px; margin-top:8px; color:var(--ink-500); text-align:right;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== TREATMENT PLAN ===== -->
+            <div id="view-careplan" class="view-panel">
+                <h1 class="page-title">Radiation Plan</h1>
+                <p class="page-subtitle">Live, versioned radiation treatment plan. Amendments require a documented change reason.</p>
+                <div id="careplan-content"><!-- Populated via JS: loadCarePlanView() --></div>
+            </div>
+
+            <!-- ===== NEXUS (static demo hub) ===== -->
+            <div id="view-nexus" class="view-panel">
+                <h1 class="page-title">NEXUS</h1>
+                <p class="page-subtitle">Cross-stakeholder coordination state for the active patient.</p>
+
+                <div class="patient-banner" style="grid-template-columns: 1fr 1.4fr 1.4fr 1fr 1fr;">
+                    <div><div class="banner-label">Patient</div><div class="banner-value">Sunita Patil · CCA-02481</div></div>
+                    <div><div class="banner-label">Diagnosis</div><div class="banner-value" style="font-size:12.5px;">Left breast invasive ductal carcinoma</div></div>
+                    <div><div class="banner-label">Treatment</div><div class="banner-value" style="font-size:12.5px;">Adjuvant AC chemotherapy · Cycle 2 · Day 8</div></div>
+                    <div><div class="banner-label">Encounter</div><div class="banner-value">Today · 10:30</div></div>
+                    <div style="display:flex; align-items:center;"><button class="btn-outline">Change Patient</button></div>
+                </div>
+
+                <div class="nexus-metrics-grid">
+                    <div class="nexus-metric-tile"><div class="nexus-metric-label">Current Care Phase</div><div class="nexus-metric-value" style="font-size:16px;">Diagnostics / treatment</div></div>
+                    <div class="nexus-metric-tile"><div class="nexus-metric-label">My Open Tasks</div><div class="nexus-metric-value">2</div></div>
+                    <div class="nexus-metric-tile"><div class="nexus-metric-label">Team Open Tasks</div><div class="nexus-metric-value">2</div></div>
+                    <div class="nexus-metric-tile"><div class="nexus-metric-label">Pending Diagnostics</div><div class="nexus-metric-value">2</div></div>
+                    <div class="nexus-metric-tile"><div class="nexus-metric-label">Next Milestone</div><div class="nexus-metric-value" style="font-size:16px;">MDT Review</div></div>
+                </div>
+
+                <div class="nexus-lower-grid">
+                    <div class="section-card">
+                        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:6px;">
+                            <div class="section-title">Coordinated Actions</div>
+                            <div class="nexus-tabs">
+                                <button class="nexus-tab-btn active" onclick="setNexusTab(this)">My Tasks</button>
+                                <button class="nexus-tab-btn" onclick="setNexusTab(this)">All Team Tasks</button>
+                                <button class="nexus-tab-btn" onclick="setNexusTab(this)">Completed</button>
+                            </div>
+                        </div>
+                        <div class="section-sub" style="margin-bottom:14px;">Ownership determines available actions.</div>
+                        <div class="nexus-task-card">
+                            <div class="nexus-task-top"><div class="nexus-task-title">Review pending CBC/ANC</div><span class="owner-badge">Clinician-owned</span></div>
+                            <div class="nexus-task-owner">Radiation Oncologist · Open</div>
+                            <div class="nexus-task-desc">Pre-cycle labs uploaded, awaiting clinician review before clearance.</div>
+                            <div class="nexus-task-actions"><button class="nexus-mini-btn">Start</button><button class="nexus-mini-btn primary">Complete</button><button class="nexus-mini-btn">Add Note</button><button class="nexus-mini-btn">Escalate</button></div>
+                        </div>
+                        <div class="nexus-task-card">
+                            <div class="nexus-task-top"><div class="nexus-task-title">Confirm MDT recommendation acceptance</div><span class="owner-badge">Clinician-owned</span></div>
+                            <div class="nexus-task-owner">Radiation Oncologist · In progress</div>
+                            <div class="nexus-task-desc">Tumour board recommended dose-dense AC-T; confirm in chart.</div>
+                            <div class="nexus-task-actions"><button class="nexus-mini-btn">Start</button><button class="nexus-mini-btn primary">Complete</button><button class="nexus-mini-btn">Add Note</button><button class="nexus-mini-btn">Escalate</button></div>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="section-card">
+                            <div class="section-title" style="font-size:15px;">Assigned Care Team</div>
+                            <div class="care-team-list-item">Radiation Oncologist</div>
+                            <div class="care-team-list-item">Nurse Navigator</div>
+                            <div class="care-team-list-item">MDT Coordinator</div>
+                            <div class="care-team-list-item" style="border-bottom:none;">Care Coordinator</div>
+                        </div>
+                        <div class="section-card">
+                            <div class="section-title" style="font-size:15px;">Priority Focus</div>
+                            <div class="priority-focus-card critical"><div class="priority-focus-title">Critical ANC</div><span class="priority-focus-tag">Clinician-owned</span></div>
+                            <div class="priority-focus-card warn"><div class="priority-focus-title">Nausea / reduced intake</div><span class="priority-focus-tag">Nurse-owned</span></div>
+                            <div class="priority-focus-card info" style="margin-bottom:0;"><div class="priority-focus-title">MDT pack pending</div><span class="priority-focus-tag">Shared</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Care Coordination Timeline</div>
+                    <div class="timeline-grid-6" style="margin-top:14px;">
+                        <div class="timeline-stage-card completed"><div class="timeline-stage-name">Registration</div><span class="timeline-stage-status">Completed</span></div>
+                        <div class="timeline-stage-card completed"><div class="timeline-stage-name">Nurse Intake</div><span class="timeline-stage-status">Completed</span></div>
+                        <div class="timeline-stage-card completed"><div class="timeline-stage-name">Doctor OPD</div><span class="timeline-stage-status">Completed</span></div>
+                        <div class="timeline-stage-card current"><div class="timeline-stage-name">Diagnostics</div><span class="timeline-stage-status">Current</span></div>
+                        <div class="timeline-stage-card upcoming"><div class="timeline-stage-name">Treatment Readiness</div><span class="timeline-stage-status">Upcoming</span></div>
+                        <div class="timeline-stage-card upcoming"><div class="timeline-stage-name">Follow-up / MDT</div><span class="timeline-stage-status">Upcoming</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== GUIDELINE PATHWAY ===== -->
+            <div id="view-guideline" class="view-panel">
+                <h1 class="page-title">Guideline Pathway</h1>
+                <p class="page-subtitle">Automated pathway alignment. Gated behind Clinician-Confirmed Staging.</p>
+                <div id="guideline-content"><!-- Populated via JS: loadGuidelinePathway() --></div>
+            </div>
+
+            <!-- ===== STAGING ===== -->
+            <div id="view-staging" class="view-panel">
+                <h1 class="page-title">Staging</h1>
+                <p class="page-subtitle">Evidence-driven AJCC staging with a mandatory clinician confirmation gate.</p>
+                <div id="staging-content"><!-- Populated via JS: loadStagingWorkspace() --></div>
+            </div>
+
+            <!-- ===== MDT / TUMOUR BOARD ===== -->
+            <div id="view-mdt" class="view-panel">
+                <h1 class="page-title">MDT / Tumour Board</h1>
+                <p class="page-subtitle">Case submission, multidisciplinary team, and recorded recommendation.</p>
+                <div id="mdt-content"><!-- Populated via JS: loadMdtWorkspace() --></div>
+            </div>
+
+        </main>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script>
+        const ccaUser = Auth.requirePage(['CCARadiationOncologist', 'Doctor', 'Admin']);
+        const CCA_API = '/cca';
+        let currentPatientId = null;
+        let currentPatientData = null;
+        let currentCarePlanId = null;
+        let currentCarePlanData = null;
+        let selectedIntent = 'Curative';
+        let selectedModality = 'Systemic therapy';
+
+        function showTab(tab) {
+            document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.sidebar-nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(`view-${tab}`).classList.add('active');
+            document.getElementById(`nav-${tab}`).classList.add('active');
+
+            if (tab === 'patients') loadPatientQueue();
+            if (tab === 'consultation') refreshConsultationView();
+            if (tab === 'careplan') loadCarePlanView();
+            if (tab === 'guideline') loadGuidelinePathway();
+            if (tab === 'staging') loadStagingWorkspace();
+            if (tab === 'mdt') loadMdtWorkspace();
+        }
+
+        function setNexusTab(el) {
+            el.parentElement.querySelectorAll('.nexus-tab-btn').forEach(b => b.classList.remove('active'));
+            el.classList.add('active');
+        }
+
+        // ---------------------------------------------------------------
+        // Patients queue
+        // ---------------------------------------------------------------
+        async function loadPatientQueue() {
+            const listEl = document.getElementById('onc-patient-list');
+            try {
+                const data = await Api.get(`${CCA_API}/patients`);
+                document.getElementById('onc-patient-count').textContent = `${data.results.length} patients`;
+                listEl.innerHTML = data.results.map(p => `
+                    <div class="onc-patient-card">
+                        <div class="onc-card-top">
+                            <div>
+                                <div class="onc-patient-name">${escapeHtml(p.name)}</div>
+                                <div class="onc-patient-meta">${escapeHtml(p.mrn)} · ${escapeHtml(String(p.age))}y / ${escapeHtml(p.sex)}</div>
+                            </div>
+                            <span class="badge ${p.staging_state === 'CLINICIAN_CONFIRMED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(p.staging_state)}</span>
+                        </div>
+                        <div class="onc-card-mid">
+                            <div><div class="onc-col-label">Journey State</div><div class="onc-col-value">${escapeHtml(p.journey_state)}</div></div>
+                            <div><div class="onc-col-label">Primary Team</div><div class="onc-col-value" style="font-size:12.5px;">${escapeHtml(p.primary_oncologist || 'Oncology Care Team')}</div></div>
+                        </div>
+                        <div style="display:flex; justify-content:flex-end;">
+                            <button class="btn-navy" onclick="openPatientFromQueue(${Number(p.id)})">Open Patient →</button>
+                        </div>
+                    </div>
+                `).join('') || '<p style="color:var(--ink-500); font-size:13px;">No patients in this queue.</p>';
+            } catch (err) {
+                listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`;
+            }
+        }
+
+        async function openPatientFromQueue(patientId) {
+            currentPatientId = patientId;
+            try { currentPatientData = await Api.get(`${CCA_API}/patients/${patientId}`); } catch (err) { /* handled per-tab */ }
+            showTab('consultation');
+        }
+
+        // ---------------------------------------------------------------
+        // Consultation
+        // ---------------------------------------------------------------
+        function renderPillRow(containerId, options, selectedRef) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = options.map(opt => `
+                <div class="pill-toggle ${opt === selectedRef.value ? 'selected' : ''}" onclick="selectPill('${containerId}', '${opt}', this)">${opt}</div>
+            `).join('');
+        }
+        function selectPill(containerId, value, el) {
+            document.getElementById(containerId).querySelectorAll('.pill-toggle').forEach(p => p.classList.remove('selected'));
+            el.classList.add('selected');
+            if (containerId === 'intent-pills') selectedIntent = value; else selectedModality = value;
+        }
+
+        async function refreshConsultationView() {
+            const bannerEl = document.getElementById('consult-patient-banner');
+            const noPatientEl = document.getElementById('consult-no-patient-card');
+            const formEl = document.getElementById('consult-form-area');
+            if (!currentPatientId) {
+                bannerEl.style.display = 'none'; formEl.style.display = 'none'; noPatientEl.style.display = 'block';
+                return;
+            }
+            noPatientEl.style.display = 'none'; bannerEl.style.display = 'grid'; formEl.style.display = 'block';
+            try {
+                currentPatientData = await Api.get(`${CCA_API}/patients/${currentPatientId}`);
+                const p = currentPatientData.patient;
+                document.getElementById('consult-hdr-name').textContent = `${p.name} · ${p.mrn}`;
+                document.getElementById('consult-hdr-mrn').textContent = `${p.age}y / ${p.sex}`;
+                document.getElementById('consult-hdr-journey').textContent = p.journey_state;
+                document.getElementById('consult-hdr-onc').textContent = p.primary_oncologist || 'Unassigned';
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+
+            renderPillRow('intent-pills', ['Curative', 'Adjuvant', 'Neoadjuvant', 'Palliative', 'Supportive'], { value: selectedIntent });
+            renderPillRow('modality-pills', ['Surgery', 'Systemic therapy', 'Radiation', 'Combined modality', 'Other'], { value: selectedModality });
+        }
+
+        async function ensureEncounterId() {
+            const data = await Api.post(`${CCA_API}/patients/${currentPatientId}/encounters`, {});
+            return data.encounter.id;
+        }
+
+        async function submitConsultationNote() {
+            const statusEl = document.getElementById('consult-status');
+            statusEl.textContent = 'Finalising...';
+            try {
+                const encId = await ensureEncounterId();
+                await Api.post(`${CCA_API}/encounters/${encId}/note/finalise`, {
+                    chief_complaint: document.getElementById('consult-cc').value,
+                    hpi: document.getElementById('consult-hpi').value,
+                    physical_exam: document.getElementById('consult-exam').value,
+                    differential_diagnosis: document.getElementById('consult-ddx').value,
+                    treatment_intent: selectedIntent,
+                    treatment_modality: selectedModality,
+                });
+                statusEl.textContent = '✅ Consultation note finalised.';
+                toast('Consultation note finalised', 'success');
+            } catch (err) { statusEl.textContent = ''; toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitOrder() {
+            const statusEl = document.getElementById('order-status');
+            const indication = document.getElementById('order-indication').value;
+            if (!indication) { toast('Clinical indication is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/orders`, {
+                    patient_id: currentPatientId,
+                    order_type: document.getElementById('order-type').value,
+                    item_name: document.getElementById('order-item').value || undefined,
+                    clinical_indication: indication,
+                    priority: document.getElementById('order-priority').value,
+                });
+                statusEl.textContent = '✅ Order raised.';
+                toast('Order raised', 'success');
+                document.getElementById('order-item').value = '';
+                document.getElementById('order-indication').value = '';
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---------------------------------------------------------------
+        // Treatment Plan (Care Plan) -- inline amend, no modal
+        // ---------------------------------------------------------------
+        async function loadCarePlanView() {
+            const container = document.getElementById('careplan-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/care-plans/current?patient_id=${currentPatientId}`);
+                currentCarePlanData = data.care_plan;
+                currentCarePlanId = data.care_plan ? data.care_plan.id : null;
+
+                if (!currentCarePlanData) {
+                    container.innerHTML = `<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">No active treatment plan on record yet for this patient.</p></div>`;
+                    return;
+                }
+                const comps = currentCarePlanData.components || {};
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-head"><div><div class="section-title">Regimen Protocols (v${currentCarePlanData.version_no})</div><div class="section-sub">Intent: ${escapeHtml(currentCarePlanData.intent || 'NOT_RECORDED')}</div></div></div>
+                        <div class="grid-3">
+                            ${['systemic', 'surgical', 'radiation'].map(k => `
+                                <div class="stage-card">
+                                    <div class="stage-card-title">${k[0].toUpperCase()}${k.slice(1)} Therapy</div>
+                                    <div style="font-size:12.5px; color:var(--ink-600);">${comps[k] ? escapeHtml(comps[k]) : '<span class=\"badge badge-amber\">Not recorded</span>'}</div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title">Amend Care Plan</div>
+                        <div class="section-sub" style="margin-bottom:12px;">Amendments require a documented change reason (Rule E-36).</div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Systemic Therapy</label><textarea id="amend-systemic" class="form-textarea" rows="2">${escapeHtml(comps.systemic || '')}</textarea></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Surgical Therapy</label><textarea id="amend-surgical" class="form-textarea" rows="2">${escapeHtml(comps.surgical || '')}</textarea></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Radiation Therapy</label><textarea id="amend-radiation" class="form-textarea" rows="2">${escapeHtml(comps.radiation || '')}</textarea></div>
+                        <div class="form-group" style="margin-bottom:14px;"><label class="form-label">Change reason (required)</label><textarea id="amend-reason" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-navy" onclick="submitCarePlanAmendment()">Submit Amendment</button>
+                        <div id="careplan-amend-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                    </div>
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitCarePlanAmendment() {
+            const reason = document.getElementById('amend-reason').value;
+            if (!reason) { toast('Change reason is required', 'error'); return; }
+            try {
+                await Api.put(`${CCA_API}/care-plans/${currentCarePlanId}`, {
+                    components: {
+                        systemic: document.getElementById('amend-systemic').value,
+                        surgical: document.getElementById('amend-surgical').value,
+                        radiation: document.getElementById('amend-radiation').value,
+                    },
+                    change_reason: reason,
+                });
+                toast('Care plan amended', 'success');
+                loadCarePlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---------------------------------------------------------------
+        // Guideline Pathway
+        // ---------------------------------------------------------------
+        async function loadGuidelinePathway() {
+            const container = document.getElementById('guideline-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/guidelines/context`);
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-head"><div class="section-title">${escapeHtml(data.pathway_node)}</div><span class="badge badge-green">${escapeHtml(data.guideline_version)}</span></div>
+                        <div class="pathway-chip-row" style="margin-bottom:16px;">
+                            ${data.variables_matched.map(v => `<span class="pathway-chip">${escapeHtml(v.variable)}: ${escapeHtml(v.value)}</span>`).join('')}
+                        </div>
+                        ${data.pathway_options.map(opt => `
+                            <div class="pathway-option-card">
+                                <div class="pathway-option-title">${escapeHtml(opt.sequence)}</div>
+                                <div style="font-size:13px; color:var(--ink-800);"><strong>Protocol:</strong> ${escapeHtml(opt.recommendation)}</div>
+                                <div style="font-size:12.5px; color:var(--ink-600); margin-top:2px;"><em>${escapeHtml(opt.clinical_intent)}</em></div>
+                            </div>
+                        `).join('')}
+                        <div class="disclaimer-banner">⚠️ ${escapeHtml(data.disclaimer)}</div>
+                    </div>
+                `;
+            } catch (err) {
+                if (err instanceof ApiError && err.status === 404) {
+                    container.innerHTML = `
+                        <div class="section-card locked-card">
+                            <div style="font-size:36px; margin-bottom:12px;">🔒</div>
+                            <div class="section-title">Guideline Pathway Locked</div>
+                            <p style="font-size:13px; color:var(--ink-500); max-width:480px; margin:8px auto 16px;">Guideline recommendations remain locked until AJCC stage is formally confirmed by the treating oncologist.</p>
+                            <button class="btn-navy" onclick="showTab('staging')">Go to Staging</button>
+                        </div>
+                    `;
+                } else {
+                    container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`;
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // Staging
+        // ---------------------------------------------------------------
+        async function loadStagingWorkspace() {
+            const container = document.getElementById('staging-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/staging`);
+                const r = data.readiness;
+                const confirmed = r.state === 'CLINICIAN_CONFIRMED';
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-title">Cancer Context</div>
+                        <div class="grid-3" style="margin-top:10px;">
+                            <div><div class="onc-col-label">Site</div><div class="onc-col-value" style="font-size:13px;">${escapeHtml(data.cancer_context.site)}</div></div>
+                            <div><div class="onc-col-label">Histology</div><div class="onc-col-value" style="font-size:13px;">${escapeHtml(data.cancer_context.histology)}</div></div>
+                            <div><div class="onc-col-label">Grade</div><div class="onc-col-value" style="font-size:13px;">${escapeHtml(data.cancer_context.grade)}</div></div>
+                        </div>
+                    </div>
+                    <div class="section-card">
+                        <div class="section-head">
+                            <div class="section-title">Readiness: ${escapeHtml(r.state.replace(/_/g, ' '))}</div>
+                            <span class="badge ${confirmed ? 'badge-green' : 'badge-amber'}">${confirmed ? 'Confirmed' : 'Pending'}</span>
+                        </div>
+                        <div class="grid-3">
+                            ${['T', 'N', 'M'].map(k => `
+                                <div class="stage-card">
+                                    <div class="stage-card-title">${k}-Category Evidence</div>
+                                    ${(data.evidence_cards[k] || []).map(e => `<div class="stage-evidence-item">${escapeHtml(e.value)}</div>`).join('') || '<div class="stage-evidence-item">No verified evidence yet.</div>'}
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title">Confirm Clinical Stage</div>
+                        <div class="section-sub" style="margin-bottom:12px;">Formal AJCC staging sign-off. Irreversible action, logged to the patient journey.</div>
+                        <div class="form-grid-3">
+                            <div class="form-group"><label class="form-label">T stage</label><input type="text" id="stg-t" class="form-input" placeholder="cT2" /></div>
+                            <div class="form-group"><label class="form-label">N stage</label><input type="text" id="stg-n" class="form-input" placeholder="cN0" /></div>
+                            <div class="form-group"><label class="form-label">M stage</label><input type="text" id="stg-m" class="form-input" placeholder="cM0" /></div>
+                        </div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Overall stage value</label><input type="text" id="stg-value" class="form-input" placeholder="cT2 cN0 cM0" /></div>
+                            <div class="form-group"><label class="form-label">Stage group</label><input type="text" id="stg-group" class="form-input" placeholder="Stage IIA" /></div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:14px;"><label class="form-label">Clinical basis</label><textarea id="stg-reason" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-navy" onclick="submitStagingConfirm()">✍️ Confirm Stage</button>
+                        <div id="staging-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title">Stage History</div>
+                        ${data.history.length ? data.history.map(h => `<div class="checklist-row">${escapeHtml(h.stage_value)} · ${escapeHtml(h.status)} · v${h.version_no} ${h.confirmed_by ? '· ' + escapeHtml(h.confirmed_by) : ''}</div>`).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No staging history yet.</p>'}
+                    </div>
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitStagingConfirm() {
+            const statusEl = document.getElementById('staging-status');
+            const stageValue = document.getElementById('stg-value').value;
+            const t = document.getElementById('stg-t').value, n = document.getElementById('stg-n').value, m = document.getElementById('stg-m').value;
+            const group = document.getElementById('stg-group').value;
+            if (!stageValue || !t || !n || !m || !group) { toast('T/N/M, overall stage, and stage group are all required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/staging/confirm`, {
+                    stage_value: stageValue, t_stage: t, n_stage: n, m_stage: m, stage_group: group,
+                    change_reason: document.getElementById('stg-reason').value || undefined,
+                });
+                statusEl.textContent = '✅ Stage confirmed.';
+                toast('Stage confirmed', 'success');
+                loadStagingWorkspace();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---------------------------------------------------------------
+        // MDT / Tumour Board
+        // ---------------------------------------------------------------
+        async function loadMdtWorkspace() {
+            const container = document.getElementById('mdt-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/mdt/cases?patient_id=${currentPatientId}`);
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-title">Submit New Case</div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Clinical question</label><textarea id="mdt-question" class="form-textarea" rows="2" placeholder="e.g. Neoadjuvant chemotherapy vs upfront surgery?"></textarea></div>
+                        <button class="btn-navy" onclick="submitMdtCase()">🚀 Submit to Tumour Board</button>
+                        <div id="mdt-submit-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title">Case History</div>
+                        ${data.mdt_cases.length ? data.mdt_cases.map(c => `
+                            <div class="mdt-case-row">
+                                <div><div style="font-size:13.5px; font-weight:600;">${escapeHtml(c.question)}</div><div style="font-size:12px; color:var(--ink-500);">${escapeHtml(c.tumor_board)} · ${escapeHtml(c.status)}</div></div>
+                                ${c.status !== 'FINAL' ? `<button class="btn-outline" onclick="openRecommendationForm(${c.id})">Record Recommendation</button>` : '<span class="badge badge-green">Recorded</span>'}
+                            </div>
+                            <div id="mdt-rec-form-${c.id}"></div>
+                        `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No MDT cases yet.</p>'}
+                    </div>
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitMdtCase() {
+            const question = document.getElementById('mdt-question').value;
+            if (!question) { toast('Clinical question is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/mdt/cases`, { patient_id: currentPatientId, question });
+                toast('Case submitted to tumour board', 'success');
+                loadMdtWorkspace();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function openRecommendationForm(caseId) {
+            document.getElementById(`mdt-rec-form-${caseId}`).innerHTML = `
+                <div class="section-card" style="margin-top:10px;">
+                    <textarea id="mdt-rec-text-${caseId}" class="form-textarea" rows="2" placeholder="Recommendation..."></textarea>
+                    <button class="btn-navy" style="margin-top:8px;" onclick="submitMdtRecommendation(${caseId})">Record Consensus</button>
+                </div>
+            `;
+        }
+
+        async function submitMdtRecommendation(caseId) {
+            const text = document.getElementById(`mdt-rec-text-${caseId}`).value;
+            if (!text) { toast('Recommendation text is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/mdt/cases/${caseId}/recommendation`, { recommendation: text });
+                toast('Recommendation recorded', 'success');
+                loadMdtWorkspace();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            loadPatientQueue();
+        });
+    </script>
+</body>
+</html>

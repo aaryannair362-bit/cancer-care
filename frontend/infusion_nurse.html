@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aivana — Infusion Nurse</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-page: #F1F5F9; --bg-sidebar: #EEF2F6; --bg-surface: #FFFFFF; --bg-card-subtle: #F8FAFC;
+            --ink-900: #0F172A; --ink-800: #1E293B; --ink-700: #334155; --ink-600: #475569; --ink-500: #64748B; --ink-400: #94A3B8; --ink-300: #CBD5E1;
+            --line: #E2E8F0; --line-subtle: #F1F5F9;
+            --brand-primary: #3B82F6; --brand-dark: #1E3A8A; --navy-action: #2A4365; --navy-action-hover: #1E3A8A;
+            --green-badge-bg: #DCFCE7; --green-badge-text: #166534;
+            --amber-badge-bg: #FEF3C7; --amber-badge-text: #92400E;
+            --rose-badge-bg: #FFE4E6; --rose-badge-text: #9F1239;
+            --blue-badge-bg: #E0E7FF; --blue-badge-text: #3730A3;
+            --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px; --radius-full: 9999px;
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05); --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', -apple-system, sans-serif; background: var(--bg-page); color: var(--ink-800); height: 100vh; display: flex; flex-direction: column; overflow: hidden; -webkit-font-smoothing: antialiased; }
+        .topbar { height: 64px; background: var(--bg-surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; flex-shrink: 0; z-index: 20; }
+        .brand-logo { font-size: 20px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; display: flex; align-items: center; gap: 8px; text-decoration: none; }
+        .search-pill-container { flex: 1; max-width: 520px; margin: 0 32px; position: relative; }
+        .search-pill-input { width: 100%; height: 40px; background: #F8FAFC; border: 1px solid var(--line); border-radius: var(--radius-full); padding: 0 16px 0 42px; font-size: 13.5px; color: var(--ink-900); outline: none; }
+        .search-icon-fixed { position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: var(--ink-400); font-size: 15px; pointer-events: none; }
+        .header-actions { display: flex; align-items: center; gap: 12px; }
+        .icon-circle-btn { width: 38px; height: 38px; border-radius: var(--radius-full); border: 1px solid var(--line); background: var(--bg-surface); display: flex; align-items: center; justify-content: center; color: var(--ink-600); cursor: pointer; }
+        .role-badge-pill { display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: #F8FAFC; border: 1px solid var(--line); border-radius: var(--radius-full); font-size: 13px; font-weight: 500; color: var(--ink-800); cursor: pointer; }
+        .avatar-pill { width: 38px; height: 38px; border-radius: var(--radius-full); background: #E2E8F0; color: var(--ink-800); display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; border: 1px solid var(--line); cursor: pointer; }
+        .app-body { flex: 1; display: flex; overflow: hidden; }
+        .sidebar { width: 240px; background: var(--bg-sidebar); border-right: 1px solid var(--line); padding: 20px 14px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; overflow-y: auto; }
+        .sidebar-section-title { font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: var(--ink-400); text-transform: uppercase; padding: 10px 12px 6px; }
+        .sidebar-nav-item { display: flex; align-items: center; justify-content: space-between; padding: 11px 14px; border-radius: var(--radius-md); font-size: 13.5px; font-weight: 500; color: var(--ink-700); text-decoration: none; cursor: pointer; }
+        .sidebar-nav-item:hover { background: rgba(255, 255, 255, 0.6); color: var(--ink-900); }
+        .sidebar-nav-item.active { background: #FFFFFF; color: var(--ink-900); font-weight: 600; box-shadow: var(--shadow-sm); border: 1px solid rgba(226, 232, 240, 0.8); }
+        .nav-item-left { display: flex; align-items: center; gap: 10px; }
+        .nav-chevron { color: var(--ink-400); font-size: 12px; }
+        .canvas { flex: 1; overflow-y: auto; padding: 28px 36px; }
+        .view-panel { display: none; }
+        .view-panel.active { display: block; }
+        .page-title { font-size: 26px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; margin-bottom: 4px; }
+        .page-subtitle { font-size: 13.5px; color: var(--ink-500); margin-bottom: 20px; }
+        .section-card { background: var(--bg-surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 20px; box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+        .section-title { font-size: 16px; font-weight: 700; color: var(--ink-900); }
+        .section-sub { font-size: 12px; color: var(--ink-500); margin-top: 2px; }
+        .badge { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: var(--radius-sm); display: inline-flex; align-items: center; }
+        .badge-green { background: var(--green-badge-bg); color: var(--green-badge-text); }
+        .badge-amber { background: var(--amber-badge-bg); color: var(--amber-badge-text); }
+        .badge-rose { background: var(--rose-badge-bg); color: var(--rose-badge-text); }
+        .badge-blue { background: var(--blue-badge-bg); color: var(--blue-badge-text); }
+        .btn-navy { background: var(--navy-action); color: #FFFFFF; font-size: 12.5px; font-weight: 600; padding: 9px 16px; border-radius: var(--radius-sm); border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-navy:hover { background: var(--navy-action-hover); }
+        .btn-navy:disabled { background: #94A3B8; cursor: not-allowed; }
+        .btn-outline { background: #FFFFFF; border: 1px solid var(--line); color: var(--ink-700); font-size: 12.5px; font-weight: 600; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-outline:hover { border-color: var(--ink-400); background: #F8FAFC; }
+        .worklist-row { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; margin-bottom: 10px; display: grid; grid-template-columns: 1.3fr 1fr 1fr 0.8fr auto; gap: 14px; align-items: center; }
+        .wl-label { font-size: 11px; color: var(--ink-500); text-transform: uppercase; margin-bottom: 2px; }
+        .wl-value { font-size: 13.5px; font-weight: 700; color: var(--ink-900); }
+        .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+        .form-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+        .form-label { font-size: 12px; font-weight: 600; color: var(--ink-700); }
+        .form-input, .form-select, .form-textarea { width: 100%; height: 38px; padding: 0 12px; background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; color: var(--ink-900); outline: none; }
+        .form-textarea { height: auto; padding: 10px 12px; }
+        .patient-banner { background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 16px 20px; display: grid; grid-template-columns: 1.2fr 1.3fr 1.3fr 1fr; gap: 16px; margin-bottom: 20px; }
+        .banner-label { font-size: 11px; color: var(--ink-400); font-weight: 600; text-transform: uppercase; margin-bottom: 4px; }
+        .banner-value { font-size: 13.5px; font-weight: 600; color: var(--ink-900); }
+        .tox-row { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px 14px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+        .nexus-metrics-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; margin-bottom: 20px; }
+        .nexus-metric-tile { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; }
+        .nexus-metric-label { font-size: 12px; color: var(--ink-500); margin-bottom: 8px; }
+        .nexus-metric-value { font-size: 20px; font-weight: 700; color: var(--ink-900); }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <a href="/infusion_nurse.html" class="brand-logo">Aivana</a>
+        <div class="search-pill-container"><span class="search-icon-fixed">🔍</span><input type="text" class="search-pill-input" placeholder="Search patient or workflow" /></div>
+        <div class="header-actions">
+            <button class="icon-circle-btn" title="Notifications">🔔</button>
+            <div class="role-badge-pill" onclick="location.href='/index.html'"><span>Infusion Nurse</span><span>▾</span></div>
+            <div class="avatar-pill" title="Logged in">IN ▾</div>
+        </div>
+    </header>
+    <div class="app-body">
+        <aside class="sidebar">
+            <div class="sidebar-section-title">TREATMENT DELIVERY</div>
+            <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Patients</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-treatment_day" onclick="showTab('treatment_day')"><div class="nav-item-left"><span>💉</span><span>Treatment Day / Infusion</span></div><span class="nav-chevron">›</span></a>
+            <div class="sidebar-section-title">CLINICAL SUPPORT</div>
+            <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
+        </aside>
+        <main class="canvas">
+
+            <div id="view-patients" class="view-panel active">
+                <h1 class="page-title">Patients</h1>
+                <p class="page-subtitle">Today's day-care / infusion patient queue</p>
+                <div class="section-card">
+                    <div class="section-head"><div class="section-title">Treatment Day Patient Queue</div><span class="badge badge-blue" id="patient-count">0 patients</span></div>
+                    <div id="patient-list"></div>
+                </div>
+            </div>
+
+            <div id="view-treatment_day" class="view-panel">
+                <h1 class="page-title">Treatment Day / Infusion</h1>
+                <p class="page-subtitle">Pre-cycle organ toxicity evaluation and structured clearance exits.</p>
+                <div id="treatment-content"><!-- Populated via JS: loadTreatmentDayAssessment() --></div>
+            </div>
+
+            <div id="view-nexus" class="view-panel">
+                <h1 class="page-title">NEXUS</h1>
+                <p class="page-subtitle">Cross-stakeholder coordination state for the active patient.</p>
+                <div class="patient-banner" style="grid-template-columns: 1fr 1.4fr 1.4fr 1fr;">
+                    <div><div class="banner-label">Patient</div><div class="banner-value">Sunita Patil · CCA-02481</div></div>
+                    <div><div class="banner-label">Diagnosis</div><div class="banner-value" style="font-size:12.5px;">Left breast invasive ductal carcinoma</div></div>
+                    <div><div class="banner-label">Treatment</div><div class="banner-value" style="font-size:12.5px;">Adjuvant AC chemotherapy · Cycle 2 · Day 8</div></div>
+                    <div><div class="banner-label">Encounter</div><div class="banner-value">Today · 10:30</div></div>
+                </div>
+                <div class="nexus-metrics-grid">
+                    <div class="nexus-metric-tile"><div class="nexus-metric-label">Current Care Phase</div><div class="nexus-metric-value" style="font-size:16px;">On Treatment</div></div>
+                    <div class="nexus-metric-tile"><div class="nexus-metric-label">My Open Tasks</div><div class="nexus-metric-value">1</div></div>
+                    <div class="nexus-metric-tile"><div class="nexus-metric-label">Pending Clearances</div><div class="nexus-metric-value">1</div></div>
+                    <div class="nexus-metric-tile"><div class="nexus-metric-label">Toxicity Events (Active)</div><div class="nexus-metric-value">0</div></div>
+                    <div class="nexus-metric-tile"><div class="nexus-metric-label">Next Milestone</div><div class="nexus-metric-value" style="font-size:16px;">Cycle Complete</div></div>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script>
+        const ccaUser = Auth.requirePage(['CCAInfusionNurse', 'HeadNurse', 'Nurse', 'Admin']);
+        const CCA_API = '/cca';
+        let currentPatientId = null;
+        let currentClearanceExits = [];
+
+        function showTab(tab) {
+            document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.sidebar-nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(`view-${tab}`).classList.add('active');
+            document.getElementById(`nav-${tab}`).classList.add('active');
+            if (tab === 'patients') loadPatientQueue();
+            if (tab === 'treatment_day') loadTreatmentDayAssessment();
+        }
+
+        async function loadPatientQueue() {
+            const listEl = document.getElementById('patient-list');
+            try {
+                const data = await Api.get(`${CCA_API}/patients`);
+                document.getElementById('patient-count').textContent = `${data.results.length} patients`;
+                listEl.innerHTML = data.results.map(p => `
+                    <div class="worklist-row">
+                        <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(p.name)}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(p.mrn)}</div></div>
+                        <div><div class="wl-label">Age/Sex</div><div class="wl-value" style="font-size:13px;">${escapeHtml(String(p.age))}y / ${escapeHtml(p.sex)}</div></div>
+                        <div><div class="wl-label">Journey</div><div class="wl-value" style="font-size:13px;">${escapeHtml(p.journey_state)}</div></div>
+                        <div><span class="badge ${p.staging_state === 'CLINICIAN_CONFIRMED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(p.staging_state)}</span></div>
+                        <div><button class="btn-navy" onclick="openPatient(${Number(p.id)})">Open →</button></div>
+                    </div>
+                `).join('') || '<p style="color:var(--ink-500); font-size:13px;">No patients.</p>';
+            } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        function openPatient(id) { currentPatientId = id; showTab('treatment_day'); }
+
+        async function loadTreatmentDayAssessment() {
+            const container = document.getElementById('treatment-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/treatment/day-assessment?patient_id=${currentPatientId}`);
+                currentClearanceExits = data.clearance_exits || [];
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-title">${escapeHtml(data.patient.name)} · ${escapeHtml(data.patient.mrn)}</div>
+                        <div class="section-sub">Protocol: ${escapeHtml(data.protocol)} · ${escapeHtml(data.cycle_info)}</div>
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title">Pre-Chemotherapy Lab Tolerability</div>
+                        <p style="font-size:12.5px; color:var(--ink-500); margin-top:8px;">${escapeHtml(data.lab_parameters_note || 'No lab parameters on file.')}</p>
+                    </div>
+                    <div class="section-card">
+                        <div class="section-head"><div class="section-title">CTCAE v5.0 Toxicity Assessment</div></div>
+                        <div id="tox-list">
+                            ${(data.toxicity_history || []).map(t => `<div class="tox-row"><strong>${escapeHtml(t.term)}</strong><span class="badge ${Number(t.grade) === 0 ? 'badge-green' : 'badge-amber'}">Grade ${Number(t.grade)}</span></div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No toxicity events recorded.</p>'}
+                        </div>
+                        <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Term</label><input type="text" id="tox-term" list="tox-term-options" class="form-input" placeholder="e.g. Peripheral Sensory Neuropathy" /></div>
+                            <div class="form-group"><label class="form-label">CTCAE Grade</label>
+                                <select id="tox-grade" class="form-select"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select>
+                            </div>
+                        </div>
+                        <datalist id="tox-term-options"><option value="Peripheral Sensory Neuropathy"></option><option value="Diarrhea"></option><option value="Neutropenia"></option><option value="Fatigue"></option><option value="Nausea"></option></datalist>
+                        <div class="form-group"><label class="form-label">Baseline / description</label><input type="text" id="tox-baseline" class="form-input" placeholder="e.g. Grade 1 — mild numbness in fingertips" /></div>
+                        <button class="btn-outline" onclick="submitToxicity()">+ Record Toxicity</button>
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title">Decide Treatment Clearance</div>
+                        <div class="form-group"><label class="form-label">Decision</label>
+                            <select id="clearance-decision" class="form-select">${currentClearanceExits.map(c => `<option value="${escapeHtml(c.code)}">${escapeHtml(c.label)}</option>`).join('')}</select>
+                        </div>
+                        <div class="form-group"><label class="form-label">Reason / clinical basis (required)</label><textarea id="clearance-reason" class="form-textarea" rows="2" placeholder="Reference the lab tolerability check and toxicity history above."></textarea></div>
+                        <button class="btn-navy" onclick="submitClearance()">🎯 Confirm Decision</button>
+                        <div id="clearance-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                    </div>
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitToxicity() {
+            const term = document.getElementById('tox-term').value;
+            const baseline = document.getElementById('tox-baseline').value;
+            if (!term || !baseline) { toast('Term and baseline/description are required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/treatment/toxicity`, { patient_id: currentPatientId, term, grade: parseInt(document.getElementById('tox-grade').value, 10), baseline_value: baseline });
+                toast('Toxicity recorded', 'success');
+                loadTreatmentDayAssessment();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitClearance() {
+            const reason = document.getElementById('clearance-reason').value;
+            if (!reason) { toast('Reason is required', 'error'); return; }
+            const statusEl = document.getElementById('clearance-status');
+            try {
+                await Api.post(`${CCA_API}/treatment/clearance`, { patient_id: currentPatientId, decision: document.getElementById('clearance-decision').value, reason });
+                statusEl.textContent = '✅ Clearance recorded.';
+                toast('Treatment clearance recorded', 'success');
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => { loadPatientQueue(); });
+    </script>
+</body>
+</html>

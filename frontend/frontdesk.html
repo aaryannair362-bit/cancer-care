@@ -532,6 +532,48 @@
             font-size: 12.5px;
             color: var(--ink-700);
         }
+
+        .wizard-step-subtitle { font-size: 13.5px; color: var(--brand-dark); font-weight: 600; margin-bottom: 14px; }
+
+        /* Search results (Find Existing Patient) */
+        .search-result-card {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: var(--bg-card-subtle);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-md);
+            padding: 16px 18px;
+            margin-top: 18px;
+        }
+        .search-result-name { font-size: 15px; font-weight: 700; color: var(--ink-900); margin-bottom: 3px; }
+        .search-result-meta { font-size: 12.5px; color: var(--ink-500); }
+        .search-result-meta.last-visit { margin-top: 2px; }
+
+        /* Consent / document cards (step 4) */
+        .consent-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+        .consent-card-title { font-size: 13.5px; font-weight: 700; color: var(--ink-900); margin-bottom: 8px; }
+
+        /* Review summary (step 5) */
+        .review-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px 32px; }
+        .review-field-label { font-size: 12.5px; color: var(--ink-500); margin-bottom: 2px; }
+        .review-field-value { font-size: 14px; font-weight: 700; color: var(--ink-900); margin-bottom: 16px; }
+
+        /* Front Desk Patient List (queue-style, replaces the old table) */
+        .fd-patient-item {
+            background: var(--bg-card-subtle);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-md);
+            padding: 18px;
+            margin-bottom: 12px;
+            display: grid;
+            grid-template-columns: 1.4fr 1.3fr 1.3fr 1fr;
+            gap: 16px;
+            align-items: center;
+        }
+        .fd-patient-item:hover { border-color: var(--ink-300); background: #FFFFFF; }
+        .fd-col-label { font-size: 11.5px; color: var(--ink-500); margin-bottom: 4px; }
+        .fd-col-value { font-size: 13.5px; font-weight: 700; color: var(--ink-900); }
     </style>
 </head>
 <body>
@@ -707,29 +749,28 @@
                             <button class="btn-outline" style="height: 42px; padding: 0 16px;" onclick="startNewRegistrationWizard()">👤+ New Patient</button>
                         </div>
 
-                        <div id="registration-search-results" style="margin-top: 20px; display:none;">
-                            <!-- Search Table -->
-                        </div>
+                        <div id="registration-search-results" style="display:none;"></div>
                     </div>
                 </div>
 
                 <!-- Multi-Step Registration Wizard Form -->
                 <div id="reg-wizard-mode" style="display: none;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px;">
                         <div>
-                            <h1 class="page-title">Registration</h1>
-                            <div class="section-sub">Current patient: <strong>New Patient · New Registration</strong></div>
+                            <div class="section-sub">Current patient</div>
+                            <h1 class="page-title" style="margin-bottom:2px;">New Patient · New Registration</h1>
                         </div>
                         <button class="btn-outline" onclick="exitRegistrationWizard()">← Back to Patient Search</button>
                     </div>
+                    <div class="wizard-step-subtitle" id="wizard-step-subtitle">Step 1 of 5 — Patient</div>
 
                     <!-- Wizard Stepper -->
                     <div class="wizard-stepper">
-                        <div class="step-tab active" id="step-tab-1" onclick="goToWizardStep(1)">1 Patient</div>
-                        <div class="step-tab" id="step-tab-2" onclick="goToWizardStep(2)">2 Referral</div>
-                        <div class="step-tab" id="step-tab-3" onclick="goToWizardStep(3)">3 Visit &amp; Appointment</div>
-                        <div class="step-tab" id="step-tab-4" onclick="goToWizardStep(4)">4 Documents &amp; Consent</div>
-                        <div class="step-tab" id="step-tab-5" onclick="goToWizardStep(5)">5 Review</div>
+                        <div class="step-tab active" id="step-tab-1" data-label="Patient" onclick="goToWizardStep(1)">1 Patient</div>
+                        <div class="step-tab" id="step-tab-2" data-label="Referral" onclick="goToWizardStep(2)">2 Referral</div>
+                        <div class="step-tab" id="step-tab-3" data-label="Visit &amp; Appointment" onclick="goToWizardStep(3)">3 Visit &amp; Appointment</div>
+                        <div class="step-tab" id="step-tab-4" data-label="Documents &amp; Consent" onclick="goToWizardStep(4)">4 Documents &amp; Consent</div>
+                        <div class="step-tab" id="step-tab-5" data-label="Review" onclick="goToWizardStep(5)">5 Review</div>
                     </div>
 
                     <div class="operational-layout">
@@ -858,15 +899,52 @@
                                             <input type="tel" id="wiz-em-mobile" class="form-input" placeholder="+91 XXXXX XXXXX" />
                                         </div>
                                     </div>
+
+                                    <hr style="margin: 20px 0; border: none; border-top: 1px solid var(--line);" />
+
+                                    <div class="section-title" style="margin-bottom: 4px; font-size:14px;">Identity Verification</div>
+                                    <div class="form-grid-3" style="margin-top: 12px;">
+                                        <div class="form-group">
+                                            <label class="form-label">Document type</label>
+                                            <select id="wiz-id-doc-type" class="form-select">
+                                                <option>Aadhaar</option><option>PAN</option><option>Passport</option><option>Voter ID</option><option>Driving License</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">Document number</label>
+                                            <input type="text" id="wiz-id-doc-number" class="form-input" />
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">Name on document</label>
+                                            <input type="text" id="wiz-id-doc-name" class="form-input" />
+                                        </div>
+                                    </div>
+                                    <div class="form-grid-3">
+                                        <div class="form-group">
+                                            <label class="form-label">Date of birth</label>
+                                            <input type="date" id="wiz-id-doc-dob" class="form-input" />
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">Verification status</label>
+                                            <select id="wiz-id-verification-status" class="form-select">
+                                                <option>Pending</option><option>Verified</option><option>Could not verify</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">&nbsp;</label>
+                                            <button type="button" class="btn-outline" style="height:38px;">⬆ Upload document</button>
+                                        </div>
+                                    </div>
+                                    <button type="button" class="btn-outline">🪪 Add another ID</button>
                                 </div>
 
                                 <!-- Step 2: Referral Details -->
                                 <div class="section-card" id="wizard-section-2" style="display:none;">
-                                    <div class="section-title">Referral &amp; Source Details</div>
+                                    <div class="section-title">Referral</div>
                                     <div class="section-sub" style="margin-bottom: 16px;">Source hospital, doctor, and attached referral letters</div>
-                                    <div class="form-grid-2">
+                                    <div class="form-grid-3">
                                         <div class="form-group">
-                                            <label class="form-label">Referral Source Type</label>
+                                            <label class="form-label">Referral type</label>
                                             <select id="wiz-ref-type" class="form-select">
                                                 <option>Self referral</option>
                                                 <option>External hospital · Letter attached</option>
@@ -875,23 +953,46 @@
                                             </select>
                                         </div>
                                         <div class="form-group">
-                                            <label class="form-label">Referring Doctor / Hospital Name</label>
-                                            <input type="text" id="wiz-ref-doctor" class="form-input" placeholder="Dr. S. Mehta / Apollo Hospital" />
+                                            <label class="form-label">Referring organization</label>
+                                            <input type="text" id="wiz-ref-org" class="form-input" />
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">Department</label>
+                                            <input type="text" id="wiz-ref-department" class="form-input" />
+                                        </div>
+                                    </div>
+                                    <div class="form-grid-3">
+                                        <div class="form-group">
+                                            <label class="form-label">Referring clinician</label>
+                                            <input type="text" id="wiz-ref-doctor" class="form-input" placeholder="Dr. S. Mehta" />
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">Contact information</label>
+                                            <input type="text" id="wiz-ref-contact" class="form-input" />
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">Reason for referral</label>
+                                            <input type="text" id="wiz-ref-reason" class="form-input" />
                                         </div>
                                     </div>
                                     <div class="form-group">
-                                        <label class="form-label">Suspected Diagnosis / Clinical Impression</label>
-                                        <textarea id="wiz-ref-diagnosis" class="form-textarea" rows="3" placeholder="e.g. Gastrointestinal lesion, biopsy pending..."></textarea>
+                                        <label class="form-label">Referral diagnosis / suspected cancer</label>
+                                        <input type="text" id="wiz-ref-diagnosis" class="form-input" placeholder="e.g. Gastrointestinal lesion, biopsy pending..." />
+                                        <div style="font-size:11.5px; color:var(--ink-500);">Based on referral information; not yet clinically confirmed.</div>
                                     </div>
+
+                                    <hr style="margin: 20px 0; border: none; border-top: 1px solid var(--line);" />
+                                    <div class="section-title" style="margin-bottom: 4px; font-size:14px;">Referral Letter</div>
+                                    <div class="section-sub" style="margin-bottom: 10px;">Upload referral letter if provided</div>
+                                    <button type="button" class="btn-outline">⬆ Upload</button>
                                 </div>
 
                                 <!-- Step 3: Visit & Appointment -->
                                 <div class="section-card" id="wizard-section-3" style="display:none;">
-                                    <div class="section-title">Visit &amp; Appointment</div>
-                                    <div class="section-sub" style="margin-bottom: 16px;">Department, specialty, assigned clinician, and queue assignment</div>
+                                    <div class="section-title">Visit</div>
                                     <div class="form-grid-3">
                                         <div class="form-group">
-                                            <label class="form-label">Visit Type</label>
+                                            <label class="form-label">Visit type</label>
                                             <select id="wiz-visit-type" class="form-select">
                                                 <option>New consultation</option>
                                                 <option>Follow-up</option>
@@ -899,7 +1000,7 @@
                                             </select>
                                         </div>
                                         <div class="form-group">
-                                            <label class="form-label">Arrival Type</label>
+                                            <label class="form-label">Arrival type</label>
                                             <select id="wiz-arrival-type" class="form-select">
                                                 <option>Scheduled</option>
                                                 <option>Walk-in</option>
@@ -907,7 +1008,7 @@
                                             </select>
                                         </div>
                                         <div class="form-group">
-                                            <label class="form-label">Department / Specialty</label>
+                                            <label class="form-label">Department</label>
                                             <select id="wiz-dept" class="form-select">
                                                 <option>Medical Oncology</option>
                                                 <option>Surgical Oncology</option>
@@ -915,25 +1016,141 @@
                                             </select>
                                         </div>
                                     </div>
-                                    <div class="form-grid-2">
+                                    <div class="form-grid-3">
                                         <div class="form-group">
-                                            <label class="form-label">Assigned Clinician</label>
+                                            <label class="form-label">Specialty</label>
+                                            <input type="text" id="wiz-specialty" class="form-input" placeholder="Medical Oncology" />
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">Assigned clinician</label>
                                             <select id="wiz-clinician" class="form-select">
-                                                <option>Dr. Sarah Varma (Medical Oncology)</option>
-                                                <option>Dr. Ramesh Kumar (Surgical Oncology)</option>
-                                                <option>Dr. Anjali Gupta (Radiation Oncology)</option>
+                                                <option value="">Select if known</option>
                                             </select>
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">Visit reason</label>
+                                            <input type="text" id="wiz-visit-reason" class="form-input" />
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="section-card" id="wizard-section-3b" style="display:none;">
+                                    <div class="section-title">Appointment &amp; Queue</div>
+                                    <div class="form-grid-3">
+                                        <div class="form-group">
+                                            <label class="form-label">Date</label>
+                                            <input type="date" id="wiz-appt-date" class="form-input" />
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">Time</label>
+                                            <input type="time" id="wiz-appt-time" class="form-input" />
                                         </div>
                                         <div class="form-group">
                                             <label class="form-label">Location</label>
                                             <input type="text" class="form-input" value="OPD-2" readonly />
                                         </div>
                                     </div>
+                                    <div class="form-grid-2">
+                                        <div class="form-group">
+                                            <label class="form-label">Appointment status</label>
+                                            <select id="wiz-appt-status" class="form-select">
+                                                <option>Pending</option><option>Confirmed</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <div class="form-label" style="margin-bottom:6px;">System assigned</div>
+                                            <div style="background:var(--bg-card-subtle); border:1px solid var(--line); border-radius:var(--radius-sm); padding:10px 14px;">
+                                                <div style="font-size:12px; color:var(--ink-500);">Queue number</div>
+                                                <div style="font-size:16px; font-weight:700; color:var(--ink-900);" id="wiz-queue-preview">Assigned on completion</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Step 4: Documents & Consent -->
+                                <div class="section-card" id="wizard-section-4" style="display:none;">
+                                    <div class="section-title">Documents</div>
+                                    <div class="section-sub" style="margin-bottom: 16px;">Patient-provided registration documents</div>
+                                    <div style="display:flex; gap:12px; align-items:center; margin-bottom:14px;">
+                                        <select id="wiz-doc-type" class="form-select" style="max-width:260px;">
+                                            <option>Previous pathology report</option>
+                                            <option>Previous radiology report</option>
+                                            <option>Insurance card</option>
+                                            <option>Other</option>
+                                        </select>
+                                        <button type="button" class="btn-navy">⬆ Upload Document</button>
+                                    </div>
+                                    <div id="wiz-doc-list" style="font-size:12.5px; color:var(--ink-500);">No additional documents uploaded.</div>
+                                </div>
+
+                                <div class="section-card" id="wizard-section-4b" style="display:none;">
+                                    <div class="section-title">Consent</div>
+                                    <div class="consent-grid-3" style="margin-top:14px;">
+                                        <div>
+                                            <div class="consent-card-title">Registration consent</div>
+                                            <span class="badge badge-amber" id="wiz-consent-reg-badge" style="margin-bottom:8px; display:inline-block;">Pending</span>
+                                            <select class="form-select" id="wiz-consent-reg" onchange="updateConsentStatus()">
+                                                <option>Pending</option><option>Given</option><option>Declined</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <div class="consent-card-title">Privacy / data consent</div>
+                                            <span class="badge badge-amber" id="wiz-consent-privacy-badge" style="margin-bottom:8px; display:inline-block;">Pending</span>
+                                            <select class="form-select" id="wiz-consent-privacy" onchange="updateConsentStatus()">
+                                                <option>Pending</option><option>Given</option><option>Declined</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <div class="consent-card-title">Communication consent</div>
+                                            <span class="badge badge-amber" id="wiz-consent-comm-badge" style="margin-bottom:8px; display:inline-block;">Pending</span>
+                                            <select class="form-select" id="wiz-consent-comm" onchange="updateConsentStatus()">
+                                                <option>Pending</option><option>Given</option><option>Declined</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Step 5: Review -->
+                                <div class="section-card" id="wizard-section-5" style="display:none;">
+                                    <div class="section-title">Registration Review</div>
+                                    <div class="review-grid-2" style="margin-top:16px;">
+                                        <div>
+                                            <div class="review-field-label">Patient</div>
+                                            <div class="review-field-value" id="review-patient">Not entered · No mobile</div>
+                                        </div>
+                                        <div>
+                                            <div class="review-field-label">Address</div>
+                                            <div class="review-field-value">Review patient-entered address</div>
+                                        </div>
+                                        <div>
+                                            <div class="review-field-label">Referral</div>
+                                            <div class="review-field-value" id="review-referral">Self referral · Letter not attached</div>
+                                        </div>
+                                        <div>
+                                            <div class="review-field-label">Visit</div>
+                                            <div class="review-field-value" id="review-visit">Medical Oncology</div>
+                                        </div>
+                                        <div>
+                                            <div class="review-field-label">Documents &amp; Consent</div>
+                                            <div class="review-field-value" id="review-docs-consent">0 uploaded · 0/3 consents completed</div>
+                                        </div>
+                                        <div>
+                                            <div class="review-field-label">Queue</div>
+                                            <div class="review-field-value" id="review-queue">System assigned</div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="section-card" id="wizard-section-5b" style="display:none;">
+                                    <div class="section-title">Payer / Basic Financial Route</div>
+                                    <select id="wiz-payer-route" class="form-select" style="margin-top:12px;">
+                                        <option>Self-pay</option><option>Private insurance</option><option>Corporate/TPA</option><option>Government scheme</option>
+                                    </select>
                                 </div>
 
                                 <div style="display: flex; gap: 12px; margin-top: 14px;">
-                                    <button type="button" class="btn-outline" onclick="prevWizardStep()">← Previous</button>
-                                    <button type="button" class="btn-navy" onclick="nextWizardStep()">Next Step →</button>
+                                    <button type="button" class="btn-outline" id="wizard-prev-btn" onclick="prevWizardStep()">← Previous</button>
+                                    <button type="button" class="btn-navy" id="wizard-next-btn" onclick="nextWizardStep()">Next Step →</button>
                                 </div>
                             </form>
                         </div>
@@ -981,32 +1198,34 @@
                 </div>
             </div>
 
-            <!-- ===== VIEW 3: PATIENTS DIRECTORY ===== -->
+            <!-- ===== VIEW 3: PATIENTS ===== -->
             <div id="view-patients" class="view-panel">
-                <h1 class="page-title">Patients Directory</h1>
-                <p class="page-subtitle">Master hospital patient records and OPD queue issuance</p>
+                <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                    <div>
+                        <h1 class="page-title">Patients</h1>
+                        <p class="page-subtitle">Registered patients and today's front-desk workflow</p>
+                    </div>
+                    <button class="btn-navy" onclick="showTab('registration'); startNewRegistrationWizard();">👤+ New Registration</button>
+                </div>
+
+                <div class="section-card" style="margin-bottom:20px;">
+                    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                        <input type="text" id="patient-dir-search" class="form-input" placeholder="Name, MRN, mobile..." style="max-width:220px;" />
+                        <select class="form-select"><option>All registration status</option></select>
+                        <select class="form-select"><option>All appointment status</option></select>
+                        <select class="form-select"><option>All departments</option></select>
+                        <select class="form-select"><option>All arrival status</option></select>
+                        <select class="form-select"><option>All referral types</option></select>
+                        <select class="form-select"><option>All dates</option></select>
+                    </div>
+                </div>
 
                 <div class="section-card">
-                    <div style="display:flex; justify-content:space-between; margin-bottom:16px;">
-                        <input type="text" id="patient-dir-search" class="form-input" placeholder="Filter patients by name or MRN..." style="max-width:360px;" />
-                        <button class="btn-navy" onclick="showTab('registration'); startNewRegistrationWizard();">👤+ New Patient Registration</button>
+                    <div class="section-head">
+                        <div class="section-title">Front Desk Patient List</div>
+                        <span class="badge badge-blue" id="fd-patient-count">8 patients</span>
                     </div>
-
-                    <table style="width:100%; border-collapse:collapse; font-size:13px;">
-                        <thead>
-                            <tr style="border-bottom:2px solid var(--line); text-align:left; color:var(--ink-600);">
-                                <th style="padding:10px;">MRN</th>
-                                <th style="padding:10px;">Patient Name</th>
-                                <th style="padding:10px;">Age / Gender</th>
-                                <th style="padding:10px;">Phone</th>
-                                <th style="padding:10px;">Diagnosis / Context</th>
-                                <th style="padding:10px;">Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id="patient-dir-table-body">
-                            <!-- Populated via API -->
-                        </tbody>
-                    </table>
+                    <div id="fd-patient-list"><!-- Populated via JS: loadFrontDeskPatientList() --></div>
                 </div>
             </div>
 
@@ -1029,7 +1248,7 @@
             if (targetNav) targetNav.classList.add('active');
 
             if (tabName === 'overview') loadOverviewData();
-            if (tabName === 'patients') loadPatientsDirectory();
+            if (tabName === 'patients') loadFrontDeskPatientList();
         }
 
         async function loadOverviewData() {
@@ -1037,13 +1256,9 @@
             queueContainer.innerHTML = '<p style="color:var(--ink-500); padding:20px 0;">Loading today\'s queue...</p>';
 
             try {
-                const res = await apiRequest('/queue/tokens');
-                if (res.ok) {
-                    allQueueTokens = await res.json();
-                    renderQueueItems(allQueueTokens);
-                } else {
-                    renderSampleQueue();
-                }
+                allQueueTokens = await Api.get('/queue/tokens');
+                if (allQueueTokens.length) renderQueueItems(allQueueTokens);
+                else renderSampleQueue();
             } catch (err) {
                 renderSampleQueue();
             }
@@ -1078,7 +1293,7 @@
                         </div>
 
                         <div class="queue-item-details" style="min-width: 140px;">
-                            <div class="queue-item-time">${p.time || 'Today · 10:30'}</div>
+                            <div class="queue-item-time">${p.time || (p.issued_at ? fmtDateTime(p.issued_at) : 'Today · 10:30')}</div>
                             <div class="queue-item-spec">${p.spec || p.doctor_name || 'Medical Oncology'}</div>
                         </div>
 
@@ -1089,7 +1304,7 @@
                         </div>
 
                         <div>
-                            <button class="${isPrimary ? 'btn-navy' : 'btn-outline'}" onclick="handleQueueAction('${p.action || 'Send to Nurse'}', ${p.id})">
+                            <button class="${isPrimary ? 'btn-navy' : 'btn-outline'}" onclick="handleQueueAction('${p.action || 'Send to Nurse'}', '${escapeHtml(p.name || p.patient_name || 'Patient')}')">
                                 ${p.action || 'Send to Nurse'} →
                             </button>
                         </div>
@@ -1098,20 +1313,33 @@
             }).join('');
         }
 
-        function handleQueueAction(action, id) {
+        function handleQueueAction(action, label) {
             if (action.includes('Registration')) {
                 showTab('registration');
                 startNewRegistrationWizard();
             } else if (action === 'Send to Nurse') {
-                alert(`Patient #${id} handed off to Nurse Navigator queue successfully.`);
+                toast(`${label} handed off to Nurse Navigator queue`, 'success');
             } else {
-                alert(`Action "${action}" triggered for Patient #${id}.`);
+                toast(`"${action}" triggered for ${label}`, 'info');
             }
         }
 
-        function startNewRegistrationWizard() {
+        const WIZARD_STEP_SECTION_IDS = {
+            1: ['wizard-section-1'],
+            2: ['wizard-section-2'],
+            3: ['wizard-section-3', 'wizard-section-3b'],
+            4: ['wizard-section-4', 'wizard-section-4b'],
+            5: ['wizard-section-5', 'wizard-section-5b'],
+        };
+        let selectedExistingPatient = null;
+        let availableDoctors = [];
+
+        async function startNewRegistrationWizard() {
+            selectedExistingPatient = null;
+            document.querySelector('#reg-wizard-mode .page-title').textContent = 'New Patient · New Registration';
             document.getElementById('reg-search-mode').style.display = 'none';
             document.getElementById('reg-wizard-mode').style.display = 'block';
+            await loadDoctorsIntoClinicianSelect();
             goToWizardStep(1);
         }
 
@@ -1120,20 +1348,45 @@
             document.getElementById('reg-search-mode').style.display = 'block';
         }
 
+        async function loadDoctorsIntoClinicianSelect() {
+            const select = document.getElementById('wiz-clinician');
+            try {
+                availableDoctors = await Api.get('/appointments/doctors');
+            } catch (err) {
+                availableDoctors = [];
+            }
+            select.innerHTML = '<option value="">Select if known</option>' +
+                availableDoctors.map(d => `<option value="${d.id}">${escapeHtml(d.email)}</option>`).join('');
+        }
+
         function goToWizardStep(stepNum) {
             currentWizardStep = stepNum;
-            for (let i = 1; i <= 3; i++) {
-                const sec = document.getElementById(`wizard-section-${i}`);
-                if (sec) sec.style.display = i === stepNum ? 'block' : 'none';
-            }
-            document.querySelectorAll('.step-tab').forEach((tab, idx) => {
-                tab.classList.remove('active');
-                if (idx + 1 === stepNum) tab.classList.add('active');
+            Object.entries(WIZARD_STEP_SECTION_IDS).forEach(([step, ids]) => {
+                ids.forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.style.display = Number(step) === stepNum ? 'block' : 'none';
+                });
             });
+
+            const labels = ['Patient', 'Referral', 'Visit & Appointment', 'Documents & Consent', 'Review'];
+            document.getElementById('wizard-step-subtitle').textContent = `Step ${stepNum} of 5 — ${labels[stepNum - 1]}`;
+
+            document.querySelectorAll('.step-tab').forEach((tab, idx) => {
+                const n = idx + 1;
+                tab.classList.remove('active', 'completed');
+                if (n === stepNum) { tab.classList.add('active'); tab.innerHTML = `${n} ${tab.dataset.label}`; }
+                else if (n < stepNum) { tab.classList.add('completed'); tab.innerHTML = `✓ ${tab.dataset.label}`; }
+                else { tab.innerHTML = `${n} ${tab.dataset.label}`; }
+            });
+
+            document.getElementById('wizard-prev-btn').style.visibility = stepNum === 1 ? 'hidden' : 'visible';
+            document.getElementById('wizard-next-btn').textContent = stepNum === 5 ? 'Complete Registration' : 'Next Step →';
+
+            if (stepNum === 5) updateReviewSummary();
         }
 
         function nextWizardStep() {
-            if (currentWizardStep < 3) goToWizardStep(currentWizardStep + 1);
+            if (currentWizardStep < 5) goToWizardStep(currentWizardStep + 1);
             else submitFullRegistration();
         }
 
@@ -1141,96 +1394,167 @@
             if (currentWizardStep > 1) goToWizardStep(currentWizardStep - 1);
         }
 
+        function updateConsentStatus() {
+            [['reg', 'wiz-consent-reg'], ['privacy', 'wiz-consent-privacy'], ['comm', 'wiz-consent-comm']].forEach(([key, id]) => {
+                const value = document.getElementById(id).value;
+                const badge = document.getElementById(`wiz-consent-${key}-badge`);
+                badge.textContent = value;
+                badge.className = `badge ${value === 'Given' ? 'badge-green' : value === 'Declined' ? 'badge-rose' : 'badge-amber'}`;
+            });
+        }
+
+        function updateReviewSummary() {
+            const name = document.getElementById('wiz-fullname').value;
+            const mobile = document.getElementById('wiz-mobile').value;
+            document.getElementById('review-patient').textContent = `${name || 'Not entered'} · ${mobile ? mobile : 'No mobile'}`;
+
+            const refType = document.getElementById('wiz-ref-type').value;
+            const hasLetter = document.getElementById('wiz-ref-org').value || document.getElementById('wiz-ref-doctor').value;
+            document.getElementById('review-referral').textContent = `${refType} · ${hasLetter ? 'Letter attached' : 'Letter not attached'}`;
+
+            const dept = document.getElementById('wiz-dept').value;
+            const apptDate = document.getElementById('wiz-appt-date').value;
+            const apptTime = document.getElementById('wiz-appt-time').value;
+            document.getElementById('review-visit').textContent = `${dept}${apptDate ? ' · ' + apptDate : ''}${apptTime ? ' ' + apptTime : ''} · OPD-2`;
+
+            const consentValues = ['wiz-consent-reg', 'wiz-consent-privacy', 'wiz-consent-comm'].map(id => document.getElementById(id).value);
+            const consentsGiven = consentValues.filter(v => v === 'Given').length;
+            const docCount = document.getElementById('wiz-doc-list').children.length;
+            document.getElementById('review-docs-consent').textContent = `${docCount} uploaded · ${consentsGiven}/3 consents completed`;
+        }
+
         async function submitFullRegistration() {
             const name = document.getElementById('wiz-fullname').value;
             const mobile = document.getElementById('wiz-mobile').value;
-            const age = document.getElementById('wiz-age').value || 45;
-            const gender = document.getElementById('wiz-sex').value || 'Other';
+            const age = document.getElementById('wiz-age').value;
+            const dob = document.getElementById('wiz-dob').value;
+            const gender = document.getElementById('wiz-sex').value || undefined;
 
             if (!name || !mobile) {
                 alert('Please enter mandatory patient name and mobile number.');
+                goToWizardStep(1);
+                return;
+            }
+            if (!age && !dob) {
+                alert('Either date of birth or age is required.');
+                goToWizardStep(1);
                 return;
             }
 
             try {
-                const res = await apiRequest('/patients', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        name: name,
-                        age: Number(age),
-                        gender: gender,
-                        phone: mobile,
-                        address: document.getElementById('wiz-address').value || '',
-                        diagnosis: document.getElementById('wiz-ref-diagnosis').value || 'Oncology consultation pending',
-                        ward: 'OPD'
-                    })
+                const patient = await Api.post('/patients/register', {
+                    name,
+                    age: age ? Number(age) : undefined,
+                    date_of_birth: dob || undefined,
+                    gender,
+                    phone: mobile,
+                    address: document.getElementById('wiz-address').value || undefined,
+                    id_proof_type: document.getElementById('wiz-id-doc-type').value || undefined,
+                    id_proof_number: document.getElementById('wiz-id-doc-number').value || undefined,
                 });
 
-                if (res.ok) {
-                    const data = await res.json();
-                    // Issue OPD token
-                    await apiRequest('/queue/tokens', {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            patient_id: data.id,
-                            doctor_name: document.getElementById('wiz-clinician').value
-                        })
-                    });
-
-                    alert(`✅ Patient ${name} successfully registered with MRN ${data.mrn || 'CCA-NEW'} and token issued!`);
-                    exitRegistrationWizard();
-                    showTab('overview');
-                } else {
-                    alert('Registration failed. Please verify the input.');
+                const doctorId = document.getElementById('wiz-clinician').value;
+                if (doctorId) {
+                    await Api.post('/queue/tokens', { patient_id: patient.id, doctor_id: Number(doctorId) });
                 }
-            } catch (err) {
-                alert(`✅ Demo Mode: Registration saved for ${name}.`);
+
+                toast(`Patient ${name} registered with MRN ${patient.mrn}${doctorId ? ' and token issued' : ''}`, 'success');
                 exitRegistrationWizard();
                 showTab('overview');
+            } catch (err) {
+                toast(apiErrorMessage(err), 'error');
             }
         }
 
         function saveRegistrationDraft() {
-            alert('💾 Draft saved successfully.');
+            toast('Draft saved', 'success');
         }
 
-        async function loadPatientsDirectory() {
-            const tbody = document.getElementById('patient-dir-table-body');
-            tbody.innerHTML = '<tr><td colspan="6" style="padding:20px; text-align:center; color:var(--ink-500);">Loading patient directory...</td></tr>';
+        async function searchPatients() {
+            const q = document.getElementById('find-patient-input').value.trim();
+            const resultsEl = document.getElementById('registration-search-results');
+            if (!q) { resultsEl.style.display = 'none'; return; }
 
             try {
-                const res = await apiRequest('/patients/search?limit=50');
-                if (res.ok) {
-                    const list = await res.json();
-                    tbody.innerHTML = list.map(p => `
-                        <tr style="border-bottom:1px solid var(--line);">
-                            <td style="padding:10px; font-weight:600; color:var(--brand-dark);">${p.mrn || 'CCA-' + p.id}</td>
-                            <td style="padding:10px; font-weight:600;">${p.name}</td>
-                            <td style="padding:10px;">${p.age ?? '-'}y / ${p.gender || '-'}</td>
-                            <td style="padding:10px;">${p.phone || '-'}</td>
-                            <td style="padding:10px; color:var(--ink-600);">${p.diagnosis || 'General Checkup'}</td>
-                            <td style="padding:10px;">
-                                <button class="btn-navy" style="padding:4px 10px; font-size:11px;" onclick="issueTokenForPatient(${p.id}, '${p.name}')">Issue Token</button>
-                            </td>
-                        </tr>
-                    `).join('');
-                }
-            } catch(e) {
-                tbody.innerHTML = '<tr><td colspan="6" style="padding:20px; text-align:center;">Could not load patients.</td></tr>';
+                const results = await Api.get(`/patients/search?q=${encodeURIComponent(q)}`);
+                resultsEl.style.display = 'block';
+                resultsEl.innerHTML = results.length ? results.map(p => `
+                    <div class="search-result-card">
+                        <div>
+                            <div class="search-result-name">${escapeHtml(p.name)}</div>
+                            <div class="search-result-meta">${escapeHtml(p.mrn || 'No MRN')} · ${p.age ?? '-'} years · ${escapeHtml(p.gender || '-')} · ${escapeHtml(p.phone || '-')}</div>
+                        </div>
+                        <button class="btn-outline" onclick='selectSearchResultPatient(${JSON.stringify(p)})'>Select Patient</button>
+                    </div>
+                `).join('') : `<div style="padding:16px; color:var(--ink-500); font-size:13px;">No matching patients found.</div>`;
+            } catch (err) {
+                resultsEl.style.display = 'block';
+                resultsEl.innerHTML = `<div style="padding:16px; color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</div>`;
             }
         }
 
-        async function issueTokenForPatient(patientId, name) {
-            try {
-                await apiRequest('/queue/tokens', {
-                    method: 'POST',
-                    body: JSON.stringify({ patient_id: patientId })
-                });
-                alert(`🎟️ Token issued for ${name}!`);
-                showTab('overview');
-            } catch(e) {
-                alert('Token issued.');
-            }
+        async function selectSearchResultPatient(patient) {
+            selectedExistingPatient = patient;
+            document.getElementById('reg-search-mode').style.display = 'none';
+            document.getElementById('reg-wizard-mode').style.display = 'block';
+            document.querySelector('#reg-wizard-mode .page-title').textContent = `${patient.name} · Continue Registration`;
+            await loadDoctorsIntoClinicianSelect();
+
+            document.getElementById('wiz-fullname').value = patient.name || '';
+            document.getElementById('wiz-age').value = patient.age || '';
+            document.getElementById('wiz-mobile').value = patient.phone || '';
+            document.getElementById('wiz-sex').value = patient.gender || '';
+            document.getElementById('wiz-address').value = patient.address || '';
+            goToWizardStep(1);
+        }
+
+        async function loadFrontDeskPatientList() {
+            // Demo data matching the reference design -- the backend has no per-patient
+            // registration/referral-workflow-status model (Patient has no such fields), so
+            // this mirrors nurse_navigator.html's precedent of realistic static demo content
+            // rather than fabricating fields the schema doesn't track.
+            const patients = [
+                { name: 'Sunita Patil', mrn: 'CCA-02481', age: 39, sex: 'Female', phone: '+91 98765 41028', dept: 'Medical Oncology', clinician: 'Dr. Kavya Menon', time: 'Today · 10:30', reg: 'Complete', ref: 'External hospital', letter: 'Letter attached', opStatus: 'Arrived', next: 'Send to Nurse' },
+                { name: 'Arun Shah', mrn: 'New Patient', age: 57, sex: 'Male', phone: '+91 98201 11440', dept: 'Surgical Oncology', clinician: 'Dr. Sameer Kulkarni', time: 'Today · 10:45', reg: 'Incomplete', ref: 'Self referral', letter: 'Letter not attached', opStatus: 'Waiting', next: 'Continue Registration' },
+                { name: 'Meena Rao', mrn: 'CCA-02516', age: 48, sex: 'Female', phone: '+91 98450 22118', dept: 'Radiation Oncology', clinician: 'Dr. Nisha Thomas', time: 'Today · 11:00', reg: 'Complete', ref: 'External doctor', letter: 'Letter attached', opStatus: 'Expected', next: 'Await Arrival' },
+                { name: 'Priya Nair', mrn: 'CCA-02174', age: 44, sex: 'Female', phone: '+91 99860 31007', dept: 'Medical Oncology', clinician: 'Dr. Kavya Menon', time: 'Today · 11:30', reg: 'Complete', ref: 'Self referral', letter: 'Letter attached', opStatus: 'No-show', next: 'Contact / Reschedule' },
+                { name: 'Ravi Kumar', mrn: 'CCA-02519', age: 61, sex: 'Male', phone: '+91 98111 73642', dept: 'Medical Oncology', clinician: 'Dr. Kavya Menon', time: 'Today · 12:00', reg: 'In progress', ref: 'External hospital', letter: 'Letter attached', opStatus: 'Checked in', next: 'Complete Registration' },
+                { name: 'Fatima Sheikh', mrn: 'CCA-02388', age: 35, sex: 'Female', phone: '+91 99020 66311', dept: 'Medical Oncology', clinician: 'Dr. Kavya Menon', time: 'Today · 12:30', reg: 'Complete', ref: 'Internal referral', letter: 'Letter attached', opStatus: 'Sent to Nurse', next: 'View Patient' },
+                { name: 'Deepak Verma', mrn: 'CCA-02602', age: 52, sex: 'Male', phone: '+91 98220 55019', dept: 'Surgical Oncology', clinician: 'Dr. Sameer Kulkarni', time: 'Today · 13:00', reg: 'Complete', ref: 'External hospital', letter: 'Letter attached', opStatus: 'Expected', next: 'Await Arrival' },
+                { name: 'Anjali Reddy', mrn: 'CCA-02611', age: 41, sex: 'Female', phone: '+91 99440 20871', dept: 'Radiation Oncology', clinician: 'Dr. Nisha Thomas', time: 'Today · 13:30', reg: 'Complete', ref: 'Self referral', letter: 'Letter attached', opStatus: 'Arrived', next: 'Send to Nurse' },
+            ];
+
+            document.getElementById('fd-patient-count').textContent = `${patients.length} patients`;
+            document.getElementById('fd-patient-list').innerHTML = patients.map(p => {
+                const regBadge = p.reg === 'Complete' ? 'badge-green' : p.reg === 'Incomplete' ? 'badge-rose' : 'badge-amber';
+                const opBadge = p.opStatus === 'Arrived' || p.opStatus === 'Checked in' || p.opStatus === 'Sent to Nurse' ? 'badge-green' : p.opStatus === 'Waiting' ? 'badge-amber' : p.opStatus === 'No-show' ? 'badge-rose' : 'badge-blue';
+                return `
+                    <div class="fd-patient-item">
+                        <div>
+                            <div class="fd-col-value">${escapeHtml(p.name)}</div>
+                            <div class="fd-col-label" style="margin-top:4px;">${escapeHtml(p.mrn)} · ${p.age} years · ${escapeHtml(p.sex)}</div>
+                            <div class="fd-col-label">${escapeHtml(p.phone)}</div>
+                        </div>
+                        <div>
+                            <div class="fd-col-label">Visit</div>
+                            <div class="fd-col-value">${escapeHtml(p.dept)}</div>
+                            <div class="fd-col-label">${escapeHtml(p.time)} · ${escapeHtml(p.clinician)}</div>
+                        </div>
+                        <div>
+                            <div class="fd-col-label">Registration / referral</div>
+                            <span class="badge ${regBadge}" style="margin-right:6px;">${escapeHtml(p.reg)}</span>
+                            <span class="badge badge-blue">${escapeHtml(p.ref)}</span>
+                            <div class="fd-col-label" style="margin-top:4px;">${escapeHtml(p.letter)}</div>
+                        </div>
+                        <div>
+                            <div class="fd-col-label">Operational status</div>
+                            <span class="badge ${opBadge}">${escapeHtml(p.opStatus)}</span>
+                            <div class="fd-col-label" style="margin-top:6px; font-weight:700; color:var(--ink-800);">Next: ${escapeHtml(p.next)}</div>
+                            <button class="btn-navy" style="margin-top:8px;" onclick="handleQueueAction('${p.next}', '${escapeHtml(p.name)}')">Open Patient →</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
         }
 
         document.addEventListener('DOMContentLoaded', () => {

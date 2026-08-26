@@ -193,6 +193,49 @@ def test_act_4_doctor_consultation_and_note_finalisation(client, headers, db_ses
     assert res.json()["encounter"]["note_status"] == "FINAL"
 
 
+def test_open_encounter_is_idempotent_and_reuses_existing_open_encounter(client, headers, db_session, doctor):
+    """Regression coverage for a real gap: /encounters/{id}/intake and /note/finalise both
+    require an encounter id to already exist, but before this endpoint the only place an
+    encounter was ever created was cca_seed.py's demo seeder -- Nurse Intake/Doctor OPD were
+    non-functional for any patient beyond the one seeded demo one."""
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    existing = db_session.query(CCAEncounter).filter(CCAEncounter.patient_id == patient_id).first()
+
+    res = client.post(f"/api/cca/patients/{patient_id}/encounters", headers=headers, json={})
+    assert res.status_code == 201
+    assert res.json()["encounter"]["id"] == existing.id  # reuses the seeded OPEN encounter
+
+    again = client.post(f"/api/cca/patients/{patient_id}/encounters", headers=headers, json={})
+    assert again.json()["encounter"]["id"] == existing.id
+
+
+def test_open_encounter_creates_new_encounter_when_none_open(client, headers, db_session, doctor):
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    db_session.query(CCAEncounter).filter(CCAEncounter.patient_id == patient_id).update({"status": "CLOSED"})
+    db_session.commit()
+
+    res = client.post(f"/api/cca/patients/{patient_id}/encounters", headers=headers, json={
+        "encounter_type": "OPD_CONSULTATION", "specialty": "Surgical Oncology"
+    })
+    assert res.status_code == 201
+    new_encounter = res.json()["encounter"]
+    assert new_encounter["status"] == "OPEN"
+
+    created = db_session.query(CCAEncounter).filter(CCAEncounter.id == new_encounter["id"]).first()
+    assert created.specialty == "Surgical Oncology"
+    assert created.clinician == "onc.doctor@ccahosp.com"
+
+    journey = client.get(f"/api/cca/patients/{patient_id}/journey", headers=headers).json()["journey_events"]
+    assert any(e["event_type"] == "ENCOUNTER_OPENED" for e in journey)
+
+
+def test_open_encounter_is_org_scoped(client, make_user, auth_headers, db_session, doctor):
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    other_doctor = make_user(email="other.org.encounter@rivalhosp.com", role="Doctor")
+    res = client.post(f"/api/cca/patients/{patient_id}/encounters", headers=auth_headers(other_doctor), json={})
+    assert res.status_code == 404
+
+
 def test_act_5_orders_result_simulation_and_acknowledgement(client, headers, admin_headers, db_session, doctor):
     patient_id = _demo_patient_id(db_session, doctor.organization_id)
 
@@ -347,6 +390,47 @@ def test_act_8_live_care_plan_prefill_and_versioning(client, headers, db_session
     })
     assert good_update.status_code == 200
     assert good_update.json()["version"] == 2
+
+
+def test_care_plans_current_returns_null_then_the_active_plan(client, headers, db_session, doctor):
+    """Regression coverage for a real gap: the Live Care Plan Hub had no way to read back an
+    already-created plan's id/version -- only /care-plans/prefill (a pre-MDT draft generator)
+    and POST/PUT existed, so a real Amend Care Plan action had nothing to target."""
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+
+    before = client.get(f"/api/cca/care-plans/current?patient_id={patient_id}", headers=headers)
+    assert before.status_code == 200
+    assert before.json()["care_plan"] is None
+
+    mdt_res = client.post("/api/cca/mdt/cases", headers=headers, json={
+        "patient_id": patient_id, "question": "Sequencing for Stage IIA HR+/HER2- disease."
+    })
+    case_id = mdt_res.json()["mdt_case"]["id"]
+    client.post(f"/api/cca/mdt/cases/{case_id}/recommendation", headers=headers, json={
+        "recommendation": "Neoadjuvant dose-dense AC-T chemotherapy recommended."
+    })
+    prefill = client.get(f"/api/cca/care-plans/prefill?patient_id={patient_id}", headers=headers).json()
+    plan_id = client.post("/api/cca/care-plans", headers=headers, json={"patient_id": patient_id, **prefill}).json()["care_plan"]["id"]
+
+    after = client.get(f"/api/cca/care-plans/current?patient_id={patient_id}", headers=headers).json()["care_plan"]
+    assert after["id"] == plan_id
+    assert after["version_no"] == 1
+    assert after["status"] == "ACTIVE"
+
+    client.put(f"/api/cca/care-plans/{plan_id}", headers=headers, json={
+        "components": {"supportive": "Ondansetron PRN"},
+        "change_reason": "Added antiemetic support."
+    })
+    amended = client.get(f"/api/cca/care-plans/current?patient_id={patient_id}", headers=headers).json()["care_plan"]
+    assert amended["version_no"] == 2
+    assert amended["components"]["supportive"] == "Ondansetron PRN"
+
+
+def test_care_plans_current_is_org_scoped(client, make_user, auth_headers, db_session, doctor):
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    other_doctor = make_user(email="other.org.careplan@rivalhosp.com", role="Doctor")
+    res = client.get(f"/api/cca/care-plans/current?patient_id={patient_id}", headers=auth_headers(other_doctor))
+    assert res.status_code == 404
 
 
 def test_act_9_treatment_day_clearance_and_toxicity(client, headers, db_session, doctor):

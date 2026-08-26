@@ -476,6 +476,11 @@
             border-color: var(--brand-primary);
             color: var(--brand-dark);
         }
+        .step-pill-6.completed {
+            background: var(--green-badge-bg);
+            border-color: #86EFAC;
+            color: var(--green-badge-text);
+        }
 
         .intake-card {
             background: #FFFFFF;
@@ -535,6 +540,252 @@
             font-weight: 500;
             cursor: pointer;
         }
+
+        /* Read-only summary card (Oncology Summary, etc.) */
+        .readonly-card-header {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--ink-900);
+            margin-bottom: 2px;
+        }
+        .readonly-card-source {
+            font-size: 12.5px;
+            color: var(--ink-500);
+            margin-bottom: 18px;
+        }
+        .field-grid-4 {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+        }
+        .field-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+        .field-label {
+            font-size: 12.5px;
+            color: var(--ink-500);
+            margin-bottom: 4px;
+        }
+        .field-value {
+            font-size: 13.5px;
+            font-weight: 700;
+            color: var(--ink-900);
+        }
+        .field-hint {
+            font-size: 11.5px;
+            color: var(--ink-400);
+            margin-top: 4px;
+        }
+        .section-divider-card {
+            border-top: 1px solid var(--line);
+            margin: 20px -24px 0;
+            padding: 20px 24px 0;
+        }
+
+        /* Medication reconciliation row */
+        .med-row-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .med-field-box {
+            height: 42px;
+            display: flex;
+            align-items: center;
+            padding: 0 14px;
+            background: #FFFFFF;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            color: var(--ink-900);
+        }
+        .checkbox-required-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 13.5px;
+            font-weight: 700;
+            color: var(--ink-900);
+            margin-top: 12px;
+            cursor: pointer;
+        }
+        .checkbox-required-row input { width: 16px; height: 16px; cursor: pointer; }
+        .checkbox-required-row .req-star { color: var(--rose-badge-text); }
+
+        .allergy-alert-box {
+            background: var(--rose-badge-bg);
+            border: 1px solid #FECDD3;
+            border-radius: var(--radius-md);
+            padding: 16px 18px;
+            margin-bottom: 14px;
+        }
+        .allergy-alert-title { font-size: 14px; font-weight: 700; color: var(--rose-badge-text); margin-bottom: 4px; }
+        .allergy-alert-detail { font-size: 13px; color: #9F1239; margin-bottom: 6px; }
+        .allergy-alert-meta { font-size: 11.5px; color: #B91C4A; }
+
+        /* Documents & Available Results (step 4) */
+        .docs-two-col { display: grid; grid-template-columns: 1fr 1.4fr; gap: 20px; }
+        .doc-list-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 13px 16px;
+            border-radius: var(--radius-sm);
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--ink-800);
+            cursor: pointer;
+            margin-bottom: 6px;
+        }
+        .doc-list-item:hover { background: var(--bg-card-subtle); }
+        .doc-list-item.selected {
+            background: #EFF6FF;
+            border: 1px solid var(--brand-primary);
+            color: var(--brand-dark);
+        }
+        .lab-values-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .lab-value-card { }
+        .lab-value-label { font-size: 12.5px; color: var(--ink-500); margin-bottom: 2px; }
+        .lab-value-num { font-size: 18px; font-weight: 700; color: var(--ink-900); margin-bottom: 8px; }
+        .needs-review-pill {
+            display: inline-flex;
+            background: var(--amber-badge-bg);
+            color: var(--amber-badge-text);
+            font-size: 11.5px;
+            font-weight: 700;
+            padding: 4px 10px;
+            border-radius: var(--radius-sm);
+        }
+
+        /* Nursing Attention chip toggles (step 5) */
+        .chip-toggle-row { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0 22px; }
+        .chip-toggle {
+            background: #FFFFFF;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-sm);
+            padding: 10px 16px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--ink-700);
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .chip-toggle.selected {
+            background: #EFF6FF;
+            border-color: var(--brand-primary);
+            color: var(--brand-dark);
+        }
+
+        /* Handoff checklist (step 6) */
+        .checklist-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .checklist-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 14px 18px;
+            border-radius: var(--radius-sm);
+            font-size: 13.5px;
+            font-weight: 700;
+        }
+        .checklist-item.done { background: var(--green-badge-bg); color: var(--green-badge-text); }
+        .checklist-item.pending { background: var(--amber-badge-bg); color: var(--amber-badge-text); }
+        .status-pill-inline {
+            padding: 5px 12px;
+            border-radius: var(--radius-sm);
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .status-pill-inline.done { background: var(--green-badge-bg); color: var(--green-badge-text); }
+        .status-pill-inline.pending { background: var(--amber-badge-bg); color: var(--amber-badge-text); }
+        .btn-navy:disabled {
+            background: #94A3B8;
+            cursor: not-allowed;
+        }
+
+        /* Intake Completed screen */
+        .completion-icon-circle {
+            width: 56px;
+            height: 56px;
+            border-radius: var(--radius-full);
+            background: var(--green-badge-bg);
+            color: var(--green-badge-text);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 26px;
+            margin-bottom: 18px;
+        }
+
+        /* NEXUS */
+        .nexus-metrics-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; margin-bottom: 20px; }
+        .nexus-metric-tile {
+            background: var(--bg-card-subtle);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-md);
+            padding: 16px;
+        }
+        .nexus-metric-label { font-size: 12px; color: var(--ink-500); margin-bottom: 8px; }
+        .nexus-metric-value { font-size: 20px; font-weight: 700; color: var(--ink-900); }
+        .nexus-lower-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
+        .nexus-tabs { display: flex; gap: 8px; }
+        .nexus-tab-btn {
+            background: #F1F5F9;
+            border: none;
+            color: var(--ink-600);
+            font-size: 13px;
+            font-weight: 600;
+            padding: 8px 16px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+        }
+        .nexus-tab-btn.active { background: var(--navy-action); color: #FFFFFF; }
+        .nexus-task-card {
+            background: var(--bg-card-subtle);
+            border: 1px solid var(--line);
+            border-radius: var(--radius-md);
+            padding: 16px;
+            margin-bottom: 12px;
+        }
+        .nexus-task-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; }
+        .nexus-task-title { font-size: 14.5px; font-weight: 700; color: var(--ink-900); }
+        .nexus-task-owner { font-size: 12px; color: var(--ink-500); margin-bottom: 6px; }
+        .nexus-task-desc { font-size: 13px; color: var(--ink-700); margin-bottom: 12px; }
+        .owner-badge { font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: var(--radius-sm); background: var(--blue-badge-bg); color: var(--blue-badge-text); white-space: nowrap; }
+        .nexus-task-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+        .nexus-mini-btn {
+            background: #FFFFFF;
+            border: 1px solid var(--line);
+            color: var(--ink-700);
+            font-size: 12.5px;
+            font-weight: 600;
+            padding: 7px 14px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+        }
+        .nexus-mini-btn.primary { background: var(--navy-action); color: #FFFFFF; border-color: var(--navy-action); }
+        .care-team-list-item { padding: 12px 0; border-bottom: 1px solid var(--line-subtle); font-size: 13.5px; font-weight: 600; color: var(--ink-800); }
+        .priority-focus-card { border-radius: var(--radius-md); padding: 14px 16px; margin-bottom: 12px; }
+        .priority-focus-card.critical { background: var(--rose-badge-bg); }
+        .priority-focus-card.warn { background: var(--amber-badge-bg); }
+        .priority-focus-card.info { background: var(--blue-badge-bg); }
+        .priority-focus-title { font-size: 13.5px; font-weight: 700; color: var(--ink-900); margin-bottom: 4px; }
+        .priority-focus-tag { font-size: 11.5px; font-weight: 700; }
+        .priority-focus-card.critical .priority-focus-tag { color: var(--rose-badge-text); }
+        .priority-focus-card.warn .priority-focus-tag { color: var(--amber-badge-text); }
+        .priority-focus-card.info .priority-focus-tag { color: var(--blue-badge-text); }
+        .timeline-grid-6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
+        .timeline-stage-card {
+            border-radius: var(--radius-md);
+            padding: 14px 12px;
+            text-align: left;
+        }
+        .timeline-stage-card.completed { background: var(--green-badge-bg); }
+        .timeline-stage-card.current { background: var(--blue-badge-bg); }
+        .timeline-stage-card.upcoming { background: var(--bg-card-subtle); border: 1px solid var(--line); }
+        .timeline-stage-name { font-size: 13.5px; font-weight: 700; color: var(--ink-900); margin-bottom: 8px; }
+        .timeline-stage-status { font-size: 11.5px; font-weight: 700; padding: 3px 9px; border-radius: var(--radius-sm); display: inline-block; }
+        .timeline-stage-card.completed .timeline-stage-status { background: #FFFFFF; color: var(--green-badge-text); }
+        .timeline-stage-card.current .timeline-stage-status { background: #FFFFFF; color: var(--blue-badge-text); }
+        .timeline-stage-card.upcoming .timeline-stage-status { background: #FFFFFF; color: var(--ink-500); }
     </style>
 </head>
 <body>
@@ -827,81 +1078,603 @@
                     </div>
 
                     <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:24px;">
-                        <button class="btn-navy" onclick="goToNurseStep(3)">Continue to Vitals &amp; Assessment →</button>
+                        <button class="btn-navy" onclick="goToNurseStep(2)">Continue to History &amp; Medication →</button>
                     </div>
                 </div>
 
-                <!-- Step 3 Form Content (Vitals & BSA) -->
+                <!-- Step 2 Form Content (History & Medication) -->
+                <div class="intake-card" id="nurse-step-content-2" style="display:none;">
+                    <div class="readonly-card-header">Oncology Summary · Read only</div>
+                    <div class="readonly-card-source">Source: Clinical record</div>
+                    <div class="field-grid-4">
+                        <div>
+                            <div class="field-label">Diagnosis</div>
+                            <div class="field-value">Referral-provided gastrointestinal lesion</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Stage</div>
+                            <div class="field-value">Not clinically confirmed</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Histology / biomarkers</div>
+                            <div class="field-value">Refer to clinician-verified clinical record</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Surgery</div>
+                            <div class="field-value">Recorded surgical history · read only</div>
+                        </div>
+                    </div>
+                    <div class="field-grid-4" style="margin-top:18px;">
+                        <div>
+                            <div class="field-label">Current treatment</div>
+                            <div class="field-value">No active treatment recorded</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Cycle / treatment point</div>
+                            <div class="field-value">Not applicable</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="intake-card" id="nurse-step-content-2b" style="display:none; margin-top:20px;">
+                    <div class="readonly-card-header">Relevant Nursing History</div>
+                    <div class="field-grid-3" style="margin-bottom:18px;">
+                        <div class="form-group">
+                            <label class="form-label">Relevant medical history</label>
+                            <input type="text" class="form-input" id="hist-medical" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Comorbidities</label>
+                            <input type="text" class="form-input" id="hist-comorbid" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Previous admissions</label>
+                            <input type="text" class="form-input" id="hist-admissions" />
+                        </div>
+                    </div>
+                    <div class="field-grid-3" style="margin-bottom:18px;">
+                        <div class="form-group">
+                            <label class="form-label">Family history</label>
+                            <input type="text" class="form-input" id="hist-family" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Social history</label>
+                            <input type="text" class="form-input" id="hist-social" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Living situation / support</label>
+                            <input type="text" class="form-input" id="hist-living" />
+                        </div>
+                    </div>
+                    <div class="field-grid-3">
+                        <div class="form-group">
+                            <label class="form-label">Tobacco</label>
+                            <select class="form-select" id="hist-tobacco">
+                                <option>Never</option><option>Former</option><option>Current</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Alcohol</label>
+                            <select class="form-select" id="hist-alcohol">
+                                <option>None</option><option>Occasional</option><option>Regular</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="intake-card" id="nurse-step-content-2c" style="display:none; margin-top:20px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:2px;">
+                        <div class="readonly-card-header" style="margin-bottom:0;">Current Medications</div>
+                        <button class="btn-outline" onclick="addMedicationRow()">+ Add medication</button>
+                    </div>
+                    <div class="readonly-card-source">Reconciliation only — not prescribing</div>
+                    <div id="medication-rows-container">
+                        <div class="med-row-grid">
+                            <div class="med-field-box">Ondansetron</div>
+                            <div class="med-field-box">8 mg</div>
+                            <div class="med-field-box">As needed</div>
+                            <div class="med-field-box">Active</div>
+                            <div class="med-field-box">Clinical record</div>
+                        </div>
+                        <div class="med-row-grid">
+                            <div class="med-field-box">Pantoprazole</div>
+                            <div class="med-field-box">40 mg</div>
+                            <div class="med-field-box">Once daily</div>
+                            <div class="med-field-box">Active</div>
+                            <div class="med-field-box">Patient reported</div>
+                        </div>
+                    </div>
+                    <label class="checkbox-required-row">
+                        <input type="checkbox" id="chk-medication-reconciled" onchange="updateHandoffChecklist()" />
+                        Medication list reconciled with patient <span class="req-star">*</span>
+                    </label>
+                </div>
+
+                <div class="intake-card" id="nurse-step-content-2d" style="display:none; margin-top:20px;">
+                    <div class="readonly-card-header">Allergies / ADR</div>
+                    <div class="allergy-alert-box">
+                        <div class="allergy-alert-title">Paclitaxel · Severe</div>
+                        <div class="allergy-alert-detail">Flushing, chest tightness, and wheeze · Known clinical allergy</div>
+                        <div class="allergy-alert-meta">Clinical record · 02 Aug 2026 · existing verified record preserved</div>
+                    </div>
+                    <button class="btn-outline" style="margin-bottom:14px;">+ Add newly reported allergy</button>
+                    <label class="checkbox-required-row">
+                        <input type="checkbox" id="chk-allergy-reviewed" onchange="updateHandoffChecklist()" />
+                        Allergy status reviewed with patient <span class="req-star">*</span>
+                    </label>
+                    <div style="display:flex; justify-content:space-between; gap:10px; margin-top:24px;">
+                        <button class="btn-outline" onclick="goToNurseStep(1)">← Previous</button>
+                        <div style="display:flex; gap:10px;">
+                            <button class="btn-outline" onclick="saveNurseDraft()">Save Draft</button>
+                            <button class="btn-navy" onclick="goToNurseStep(3)">Continue →</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 3 Form Content (Vitals & Functional Assessment) -->
                 <div class="intake-card" id="nurse-step-content-3" style="display:none;">
                     <div style="font-size:16px; font-weight:700; margin-bottom:16px;">Vitals &amp; Functional Assessment</div>
 
                     <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:16px; margin-bottom:20px;">
                         <div class="form-group">
-                            <label class="form-label">Blood Pressure (BP)</label>
-                            <input type="text" class="form-input" id="vitals-bp" placeholder="120/80" />
+                            <label class="form-label">Temperature °C</label>
+                            <input type="number" step="0.1" class="form-input" id="vitals-temp" value="37.2" />
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Heart Rate (bpm)</label>
-                            <input type="number" class="form-input" id="vitals-hr" placeholder="78" />
+                            <label class="form-label">Pulse</label>
+                            <input type="number" class="form-input" id="vitals-pulse" value="88" />
                         </div>
                         <div class="form-group">
-                            <label class="form-label">SpO2 (%)</label>
-                            <input type="number" class="form-input" id="vitals-spo2" placeholder="98" />
+                            <label class="form-label">Respiratory rate</label>
+                            <input type="number" class="form-input" id="vitals-rr" value="16" />
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Temperature (°F)</label>
-                            <input type="text" class="form-input" id="vitals-temp" placeholder="98.4" />
+                            <label class="form-label">SpO₂ %</label>
+                            <input type="number" class="form-input" id="vitals-spo2" value="98" />
                         </div>
                     </div>
 
                     <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:16px; margin-bottom:20px;">
                         <div class="form-group">
-                            <label class="form-label">Height (cm)</label>
-                            <input type="number" class="form-input" id="vitals-height" placeholder="172" oninput="calcBSA()" />
+                            <label class="form-label">Systolic BP</label>
+                            <input type="number" class="form-input" id="vitals-bp-sys" value="118" />
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Weight (kg)</label>
-                            <input type="number" class="form-input" id="vitals-weight" placeholder="68" oninput="calcBSA()" />
+                            <label class="form-label">Diastolic BP</label>
+                            <input type="number" class="form-input" id="vitals-bp-dia" value="76" />
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Calculated BSA (m²)</label>
-                            <input type="text" class="form-input" id="vitals-bsa" value="1.81 m²" readonly style="background:#F1F5F9; font-weight:700;" />
+                            <label class="form-label">Weight kg</label>
+                            <input type="number" step="0.1" class="form-input" id="vitals-weight" value="61.4" oninput="calcBSA()" />
                         </div>
                         <div class="form-group">
-                            <label class="form-label">ECOG Performance Status</label>
+                            <label class="form-label">Height cm</label>
+                            <input type="number" class="form-input" id="vitals-height" value="162" oninput="calcBSA()" />
+                            <div class="field-hint">Previous: 162 cm · Update if required</div>
+                        </div>
+                    </div>
+
+                    <div style="display:grid; grid-template-columns:repeat(2, 1fr); gap:16px; margin-bottom:20px;">
+                        <div>
+                            <div class="field-label">BMI · calculated</div>
+                            <div class="field-value" id="vitals-bmi" style="font-size:18px;">23.4</div>
+                        </div>
+                        <div>
+                            <div class="field-label">BSA · calculated</div>
+                            <div class="field-value" id="vitals-bsa" style="font-size:18px;">1.65 m²</div>
+                        </div>
+                    </div>
+
+                    <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:16px; margin-bottom:8px;">
+                        <div class="form-group">
+                            <label class="form-label">ECOG 0-4</label>
                             <select class="form-select" id="vitals-ecog">
-                                <option value="0">0 — Fully active</option>
-                                <option value="1" selected>1 — Restricted in strenuous activity</option>
-                                <option value="2">2 — Ambulatory, capable of self-care</option>
-                                <option value="3">3 — Limited self-care, >50% in bed</option>
-                                <option value="4">4 — Completely disabled</option>
+                                <option value="0">0</option>
+                                <option value="1" selected>1</option>
+                                <option value="2">2</option>
+                                <option value="3">3</option>
+                                <option value="4">4</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Fall risk</label>
+                            <select class="form-select" id="vitals-fallrisk">
+                                <option>Low</option><option>Medium</option><option>High</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Nutrition concern</label>
+                            <select class="form-select" id="vitals-nutrition">
+                                <option>None</option><option>Mild</option><option>Moderate</option><option>Severe</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Consciousness</label>
+                            <select class="form-select" id="vitals-consciousness">
+                                <option>Alert / oriented</option><option>Drowsy</option><option>Confused</option><option>Unresponsive</option>
                             </select>
                         </div>
                     </div>
 
-                    <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:24px;">
-                        <button class="btn-outline" onclick="goToNurseStep(1)">← Back</button>
-                        <button class="btn-navy" onclick="submitNurseHandoff()">Complete Intake &amp; Handoff to Doctor →</button>
+                    <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:16px; margin-bottom:20px;">
+                        <div class="form-group">
+                            <label class="form-label">Mobility</label>
+                            <select class="form-select" id="vitals-mobility">
+                                <option>Independent</option><option>Assisted</option><option>Wheelchair</option><option>Bedbound</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Distress</label>
+                            <select class="form-select" id="vitals-distress">
+                                <option>None</option><option>Mild</option><option>Moderate</option><option>Severe</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Support Person</label>
+                            <select class="form-select" id="vitals-support">
+                                <option>Present</option><option>Not present</option><option>Unknown</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div style="display:flex; justify-content:space-between; gap:10px; margin-top:24px;">
+                        <button class="btn-outline" onclick="goToNurseStep(2)">← Previous</button>
+                        <div style="display:flex; gap:10px;">
+                            <button class="btn-outline" onclick="saveNurseDraft()">Save Draft</button>
+                            <button class="btn-navy" onclick="goToNurseStep(4)">Continue →</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 4 Form Content (Documents & Available Results) -->
+                <div class="intake-card" id="nurse-step-content-4" style="display:none;">
+                    <div class="docs-two-col">
+                        <div>
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                                <div class="readonly-card-header" style="margin-bottom:0;">Available Documents</div>
+                                <button class="btn-outline">⬆ Upload / Capture</button>
+                            </div>
+                            <div class="doc-list-item" onclick="selectDoc(this)">📄 Referral letter</div>
+                            <div class="doc-list-item" onclick="selectDoc(this)">📄 Pathology report</div>
+                            <div class="doc-list-item selected" onclick="selectDoc(this)">📄 Previous CBC</div>
+                            <div class="doc-list-item" onclick="selectDoc(this)">📄 Radiology report</div>
+                            <div class="doc-list-item" onclick="selectDoc(this)">📄 External prescription</div>
+                            <div class="doc-list-item" onclick="selectDoc(this)">📄 Previous treatment summary</div>
+                        </div>
+                        <div>
+                            <div class="readonly-card-header">Previous CBC</div>
+                            <div class="readonly-card-source">Extracted information must be confirmed against the source document.</div>
+                            <div class="lab-values-grid">
+                                <div class="lab-value-card">
+                                    <div class="lab-value-label">Hemoglobin</div>
+                                    <div class="lab-value-num">10.2 g/dL</div>
+                                    <span class="needs-review-pill">Needs clinician review</span>
+                                </div>
+                                <div class="lab-value-card">
+                                    <div class="lab-value-label">WBC</div>
+                                    <div class="lab-value-num">3.1 ×10⁹/L</div>
+                                    <span class="needs-review-pill">Needs clinician review</span>
+                                </div>
+                                <div class="lab-value-card" style="margin-top:20px;">
+                                    <div class="lab-value-label">ANC</div>
+                                    <div class="lab-value-num">1.2 ×10⁹/L</div>
+                                    <span class="needs-review-pill">Needs clinician review</span>
+                                </div>
+                                <div class="lab-value-card" style="margin-top:20px;">
+                                    <div class="lab-value-label">Platelets</div>
+                                    <div class="lab-value-num">168 ×10⁹/L</div>
+                                    <span class="needs-review-pill">Needs clinician review</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; gap:10px; margin-top:24px;">
+                        <button class="btn-outline" onclick="goToNurseStep(3)">← Previous</button>
+                        <div style="display:flex; gap:10px;">
+                            <button class="btn-outline" onclick="saveNurseDraft()">Save Draft</button>
+                            <button class="btn-navy" onclick="goToNurseStep(5)">Continue →</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 5 Form Content (Nurse Assessment) -->
+                <div class="intake-card" id="nurse-step-content-5" style="display:none;">
+                    <div class="readonly-card-header">Nurse Assessment</div>
+                    <div class="form-group" style="margin-bottom:22px;">
+                        <label class="form-label">Nurse Observations</label>
+                        <textarea class="form-textarea" id="nurse-observations" style="height:100px;">Alert and oriented. Oral intake and symptom burden reviewed.</textarea>
+                    </div>
+
+                    <div class="readonly-card-header" style="font-size:14px;">Nursing Attention Items</div>
+                    <div class="chip-toggle-row" id="attention-chip-row">
+                        <div class="chip-toggle" onclick="toggleChip(this)">Hydration concern</div>
+                        <div class="chip-toggle" onclick="toggleChip(this)">Nutrition concern</div>
+                        <div class="chip-toggle" onclick="toggleChip(this)">Medication issue</div>
+                        <div class="chip-toggle" onclick="toggleChip(this)">Allergy / ADR concern</div>
+                        <div class="chip-toggle" onclick="toggleChip(this)">Abnormal vital</div>
+                        <div class="chip-toggle" onclick="toggleChip(this)">Symptom escalation</div>
+                        <div class="chip-toggle" onclick="toggleChip(this)">Mobility / fall concern</div>
+                        <div class="chip-toggle" onclick="toggleChip(this)">Psychosocial / distress concern</div>
+                        <div class="chip-toggle selected" onclick="toggleChip(this)">None</div>
+                    </div>
+
+                    <div class="field-grid-3">
+                        <div class="form-group">
+                            <label class="form-label">Handoff Priority</label>
+                            <select class="form-select" id="handoff-priority">
+                                <option>Routine</option><option>Urgent</option><option>Emergency</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Destination</label>
+                            <select class="form-select" id="handoff-destination">
+                                <option>Medical Oncology</option>
+                                <option>Surgical Oncology</option>
+                                <option>Radiation Oncology</option>
+                            </select>
+                        </div>
+                        <div>
+                            <div class="field-label">Receiving clinician / role</div>
+                            <div class="field-value" id="handoff-clinician">Dr. Sameer Kulkarni</div>
+                        </div>
+                    </div>
+
+                    <div style="display:flex; justify-content:space-between; gap:10px; margin-top:24px;">
+                        <button class="btn-outline" onclick="goToNurseStep(4)">← Previous</button>
+                        <div style="display:flex; gap:10px;">
+                            <button class="btn-outline" onclick="saveNurseDraft()">Save Draft</button>
+                            <button class="btn-navy" onclick="goToNurseStep(6)">Continue →</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 6 Form Content (Review & Handoff) -->
+                <div class="intake-card" id="nurse-step-content-6" style="display:none;">
+                    <div class="field-grid-4" style="margin-bottom:20px;">
+                        <div>
+                            <div class="field-label">Patient / destination</div>
+                            <div class="field-value" id="review-patient-dest">Arun Shah · Surgical Oncology</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Reason for Visit</div>
+                            <div class="field-value" id="review-reason">New surgical assessment</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Symptoms</div>
+                            <div class="field-value" id="review-symptoms">Fatigue, Nausea</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Vitals</div>
+                            <div class="field-value" id="review-vitals">37.2 °C · 88 bpm · SpO2 98%</div>
+                        </div>
+                    </div>
+                    <div class="field-grid-4">
+                        <div>
+                            <div class="field-label">Functional Status</div>
+                            <div class="field-value" id="review-functional">ECOG 1 · Independent · Fall Low</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Medication</div>
+                            <div class="field-value" id="review-medication">Pending</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Allergies</div>
+                            <div class="field-value" id="review-allergies">Pending</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Priority</div>
+                            <div class="field-value" id="review-priority">Routine</div>
+                        </div>
+                    </div>
+                    <div class="field-grid-4" style="margin-top:20px;">
+                        <div>
+                            <div class="field-label">Attention Required</div>
+                            <div class="field-value" id="review-attention">None recorded</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Nurse Observations</div>
+                            <div class="field-value" id="review-observations" style="font-weight:600;">Alert and oriented. Oral intake and symptom burden reviewed.</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="intake-card" id="nurse-step-content-6b" style="display:none; margin-top:20px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                        <div class="readonly-card-header" style="margin-bottom:0;">Handoff Checklist</div>
+                        <span class="status-pill-inline pending" id="checklist-status-pill">Incomplete</span>
+                    </div>
+                    <div class="checklist-grid-2">
+                        <div class="checklist-item done">✓ Identity verified</div>
+                        <div class="checklist-item done">✓ Vitals recorded</div>
+                        <div class="checklist-item pending" id="checklist-medication">⚠ Medication reconciled</div>
+                        <div class="checklist-item pending" id="checklist-allergy">⚠ Allergy review</div>
+                        <div class="checklist-item done">✓ ECOG recorded</div>
+                        <div class="checklist-item done">✓ Safety assessment completed</div>
+                        <div class="checklist-item done">✓ Nurse observations recorded</div>
+                        <div class="checklist-item done">✓ Handoff destination confirmed</div>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; gap:10px; margin-top:24px;">
+                        <button class="btn-outline" onclick="goToNurseStep(5)">← Previous</button>
+                        <div style="display:flex; gap:10px;">
+                            <button class="btn-outline" onclick="saveNurseDraft()">Save Draft</button>
+                            <button class="btn-navy" id="complete-handoff-btn" onclick="completeHandoff()" disabled>Complete &amp; Send to <span id="complete-btn-dest">Surgical Oncology</span></button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== VIEW 2b: INTAKE COMPLETED ===== -->
+            <div id="view-nurse-complete" class="view-panel">
+                <h1 class="page-title">Intake Completed</h1>
+                <div class="intake-card" style="max-width:640px;">
+                    <div class="completion-icon-circle">✓</div>
+                    <div style="font-size:22px; font-weight:700; color:var(--ink-900); margin-bottom:6px;" id="complete-patient-name">Arun Shah</div>
+                    <div style="font-size:14px; color:var(--ink-600); margin-bottom:20px;" id="complete-handoff-line">Handoff sent to Surgical Oncology</div>
+                    <div class="field-grid-3" style="margin-bottom:24px;">
+                        <div>
+                            <div class="field-label">Priority</div>
+                            <div class="field-value" id="complete-priority">Routine</div>
+                        </div>
+                        <div>
+                            <div class="field-label">Completed</div>
+                            <div class="field-value" id="complete-time">10:46</div>
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                        <button class="btn-navy" onclick="showNurseTab('patients')">Back to Patients</button>
+                        <button class="btn-outline" onclick="goToNurseStep(6)">View Handoff Summary</button>
+                        <button class="btn-outline" onclick="showNurseTab('patients')">Open Next Patient →</button>
                     </div>
                 </div>
             </div>
 
             <!-- ===== VIEW 3: NEXUS CLINICAL INTELLIGENCE ===== -->
             <div id="view-nurse-nexus" class="view-panel">
-                <h1 class="page-title">NEXUS Clinical Brief</h1>
-                <p class="page-subtitle">AI-assisted clinical synthesis and clinical milestone tracker</p>
+                <h1 class="page-title">NEXUS</h1>
+                <p class="page-subtitle">Coordinate nursing follow-up and team dependencies across assigned patients.</p>
 
-                <div class="intake-card">
-                    <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
-                        <div style="font-size:28px;">⚡</div>
-                        <div>
-                            <div style="font-size:18px; font-weight:700; color:var(--ink-900);">AIvana NEXUS Intelligence</div>
-                            <div style="font-size:12.5px; color:var(--ink-500);">Synthesizes multi-source records, histopathology, and guideline milestones</div>
+                <div class="patient-context-banner" style="grid-template-columns: 1fr 1.4fr 1.4fr 1fr 1fr;">
+                    <div>
+                        <div class="banner-label">Patient</div>
+                        <div class="banner-value">Sunita Patil · CCA-02481</div>
+                    </div>
+                    <div>
+                        <div class="banner-label">Diagnosis</div>
+                        <div class="banner-value" style="font-size:12.5px;">Left breast invasive ductal carcinoma</div>
+                    </div>
+                    <div>
+                        <div class="banner-label">Treatment</div>
+                        <div class="banner-value" style="font-size:12.5px;">Adjuvant AC chemotherapy · Cycle 2 · Day 8</div>
+                    </div>
+                    <div>
+                        <div class="banner-label">Encounter</div>
+                        <div class="banner-value">Today · 10:30</div>
+                    </div>
+                    <div style="display:flex; align-items:center;">
+                        <button class="btn-outline">Change Patient</button>
+                    </div>
+                </div>
+
+                <div class="nexus-metrics-grid">
+                    <div class="nexus-metric-tile">
+                        <div class="nexus-metric-label">Current Care Phase</div>
+                        <div class="nexus-metric-value" style="font-size:16px;">Diagnostics / treatment</div>
+                    </div>
+                    <div class="nexus-metric-tile">
+                        <div class="nexus-metric-label">My Open Tasks</div>
+                        <div class="nexus-metric-value">2</div>
+                    </div>
+                    <div class="nexus-metric-tile">
+                        <div class="nexus-metric-label">Team Open Tasks</div>
+                        <div class="nexus-metric-value">2</div>
+                    </div>
+                    <div class="nexus-metric-tile">
+                        <div class="nexus-metric-label">Pending Results</div>
+                        <div class="nexus-metric-value">2</div>
+                    </div>
+                    <div class="nexus-metric-tile">
+                        <div class="nexus-metric-label">Next Milestone</div>
+                        <div class="nexus-metric-value" style="font-size:16px;">Medical Oncology</div>
+                    </div>
+                </div>
+
+                <div class="nexus-lower-grid">
+                    <div class="intake-card">
+                        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:6px;">
+                            <div class="readonly-card-header" style="margin-bottom:0;">Coordinated Actions</div>
+                            <div class="nexus-tabs">
+                                <button class="nexus-tab-btn active" onclick="setNexusTab(this)">My Tasks</button>
+                                <button class="nexus-tab-btn" onclick="setNexusTab(this)">All Team Tasks</button>
+                                <button class="nexus-tab-btn" onclick="setNexusTab(this)">Completed</button>
+                            </div>
+                        </div>
+                        <div class="readonly-card-source">Ownership determines available actions.</div>
+
+                        <div class="nexus-task-card">
+                            <div class="nexus-task-top">
+                                <div class="nexus-task-title">Patient symptom follow-up</div>
+                                <span class="owner-badge">Nurse-owned</span>
+                            </div>
+                            <div class="nexus-task-owner">Nurse Navigator · Open</div>
+                            <div class="nexus-task-desc">Call regarding nausea and oral intake</div>
+                            <div class="nexus-task-actions">
+                                <button class="nexus-mini-btn">Start</button>
+                                <button class="nexus-mini-btn primary">Complete</button>
+                                <button class="nexus-mini-btn">Add Note</button>
+                                <button class="nexus-mini-btn">Escalate</button>
+                            </div>
+                        </div>
+
+                        <div class="nexus-task-card">
+                            <div class="nexus-task-top">
+                                <div class="nexus-task-title">Confirm appointment attendance</div>
+                                <span class="owner-badge">Nurse-owned</span>
+                            </div>
+                            <div class="nexus-task-owner">Nurse Navigator · In progress</div>
+                            <div class="nexus-task-desc">Contact patient before visit</div>
+                            <div class="nexus-task-actions">
+                                <button class="nexus-mini-btn">Start</button>
+                                <button class="nexus-mini-btn primary">Complete</button>
+                                <button class="nexus-mini-btn">Add Note</button>
+                                <button class="nexus-mini-btn">Escalate</button>
+                            </div>
                         </div>
                     </div>
 
-                    <div style="background:#F8FAFC; border:1px solid var(--line); border-radius:8px; padding:16px; font-size:13.5px; line-height:1.6;">
-                        <p><strong>Clinical Summary:</strong> 57-year-old male presenting with suspected gastrointestinal malignancy. Pre-consultation nurse intake in progress. Vital parameters stable. Medication reconciliation required prior to oncologist consultation.</p>
+                    <div>
+                        <div class="intake-card" style="margin-bottom:20px;">
+                            <div class="readonly-card-header" style="font-size:15px;">Assigned Care Team</div>
+                            <div class="care-team-list-item">Medical Oncologist</div>
+                            <div class="care-team-list-item">Nurse Navigator</div>
+                            <div class="care-team-list-item">MDT Coordinator</div>
+                            <div class="care-team-list-item" style="border-bottom:none;">Care Coordinator</div>
+                        </div>
+
+                        <div class="intake-card">
+                            <div class="readonly-card-header" style="font-size:15px;">Priority Focus</div>
+                            <div class="priority-focus-card critical">
+                                <div class="priority-focus-title">Critical ANC</div>
+                                <span class="priority-focus-tag">Clinician-owned</span>
+                            </div>
+                            <div class="priority-focus-card warn">
+                                <div class="priority-focus-title">Nausea / reduced intake</div>
+                                <span class="priority-focus-tag">Nurse-owned</span>
+                            </div>
+                            <div class="priority-focus-card info" style="margin-bottom:0;">
+                                <div class="priority-focus-title">MDT pack pending</div>
+                                <span class="priority-focus-tag">Shared</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="intake-card" style="margin-top:20px;">
+                    <div class="readonly-card-header">Care Coordination Timeline</div>
+                    <div class="timeline-grid-6">
+                        <div class="timeline-stage-card completed">
+                            <div class="timeline-stage-name">Registration</div>
+                            <span class="timeline-stage-status">Completed</span>
+                        </div>
+                        <div class="timeline-stage-card completed">
+                            <div class="timeline-stage-name">Nurse Intake</div>
+                            <span class="timeline-stage-status">Completed</span>
+                        </div>
+                        <div class="timeline-stage-card current">
+                            <div class="timeline-stage-name">Consultation</div>
+                            <span class="timeline-stage-status">Current</span>
+                        </div>
+                        <div class="timeline-stage-card upcoming">
+                            <div class="timeline-stage-name">Diagnostics</div>
+                            <span class="timeline-stage-status">Upcoming</span>
+                        </div>
+                        <div class="timeline-stage-card upcoming">
+                            <div class="timeline-stage-name">Treatment Readiness</div>
+                            <span class="timeline-stage-status">Upcoming</span>
+                        </div>
+                        <div class="timeline-stage-card upcoming">
+                            <div class="timeline-stage-name">Follow-up</div>
+                            <span class="timeline-stage-status">Upcoming</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -922,10 +1695,29 @@
             if (targetNav) targetNav.classList.add('active');
         }
 
+        // Maps each numbered step to the one or more intake-card divs it renders.
+        const NURSE_STEP_CONTENT_IDS = {
+            1: ['nurse-step-content-1'],
+            2: ['nurse-step-content-2', 'nurse-step-content-2b', 'nurse-step-content-2c', 'nurse-step-content-2d'],
+            3: ['nurse-step-content-3'],
+            4: ['nurse-step-content-4'],
+            5: ['nurse-step-content-5'],
+            6: ['nurse-step-content-6', 'nurse-step-content-6b'],
+        };
+        let currentNurseStep = 1;
+
         function openNurseIntakeWizard(name, mrn, age, sex, visit) {
             document.getElementById('intake-hdr-name').textContent = `${name} · ${mrn}`;
             document.getElementById('intake-hdr-age-sex').textContent = `${age} years · ${sex}`;
             document.getElementById('intake-hdr-visit').textContent = visit;
+
+            // Destination defaults to the referring specialty in the visit context, e.g.
+            // "New · Surgical Oncology" -> "Surgical Oncology".
+            const specialty = visit.includes('·') ? visit.split('·').pop().trim() : visit;
+            const destSelect = document.getElementById('handoff-destination');
+            if ([...destSelect.options].some(o => o.value === specialty)) destSelect.value = specialty;
+            document.getElementById('review-patient-dest').textContent = `${name} · ${specialty}`;
+            document.getElementById('complete-patient-name').textContent = name;
 
             document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
             document.getElementById('view-nurse-intake').classList.add('active');
@@ -937,26 +1729,118 @@
         }
 
         function goToNurseStep(stepNum) {
+            currentNurseStep = stepNum;
             document.querySelectorAll('.step-pill-6').forEach((p, idx) => {
-                p.classList.remove('active');
+                p.classList.remove('active', 'completed');
                 if (idx + 1 === stepNum) p.classList.add('active');
+                else if (idx + 1 < stepNum) p.classList.add('completed');
             });
 
-            document.getElementById('nurse-step-content-1').style.display = stepNum === 1 ? 'block' : 'none';
-            document.getElementById('nurse-step-content-3').style.display = stepNum === 3 ? 'block' : 'none';
+            Object.entries(NURSE_STEP_CONTENT_IDS).forEach(([step, ids]) => {
+                ids.forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.style.display = Number(step) === stepNum ? 'block' : 'none';
+                });
+            });
+
+            if (stepNum === 6) updateReviewSummary();
         }
 
         function calcBSA() {
-            const h = parseFloat(document.getElementById('vitals-height').value) || 172;
-            const w = parseFloat(document.getElementById('vitals-weight').value) || 68;
+            const h = parseFloat(document.getElementById('vitals-height').value) || 162;
+            const w = parseFloat(document.getElementById('vitals-weight').value) || 61.4;
             // Mosteller formula: sqrt(h * w / 3600)
             const bsa = Math.sqrt((h * w) / 3600).toFixed(2);
-            document.getElementById('vitals-bsa').value = `${bsa} m²`;
+            const bmi = (w / Math.pow(h / 100, 2)).toFixed(1);
+            document.getElementById('vitals-bsa').textContent = `${bsa} m²`;
+            document.getElementById('vitals-bmi').textContent = bmi;
         }
 
-        function submitNurseHandoff() {
-            alert('✅ Nurse Intake & Vitals Assessment completed! Structured clinical handoff sent to the Doctor.');
-            closeNurseIntakeWizard();
+        function addMedicationRow() {
+            const container = document.getElementById('medication-rows-container');
+            const row = document.createElement('div');
+            row.className = 'med-row-grid';
+            row.innerHTML = `
+                <input type="text" class="med-field-box" placeholder="Medication" style="border:1px solid var(--line);" />
+                <input type="text" class="med-field-box" placeholder="Dose" style="border:1px solid var(--line);" />
+                <input type="text" class="med-field-box" placeholder="Frequency" style="border:1px solid var(--line);" />
+                <input type="text" class="med-field-box" placeholder="Status" style="border:1px solid var(--line);" />
+                <input type="text" class="med-field-box" placeholder="Source" style="border:1px solid var(--line);" />
+            `;
+            container.appendChild(row);
+        }
+
+        function selectDoc(el) {
+            document.querySelectorAll('.doc-list-item').forEach(d => d.classList.remove('selected'));
+            el.classList.add('selected');
+        }
+
+        function toggleChip(el) {
+            const row = document.getElementById('attention-chip-row');
+            // "None" is exclusive of every other attention item.
+            if (el.textContent.trim() === 'None') {
+                row.querySelectorAll('.chip-toggle').forEach(c => c.classList.remove('selected'));
+                el.classList.add('selected');
+                return;
+            }
+            row.querySelector('.chip-toggle:last-child').classList.remove('selected');
+            el.classList.toggle('selected');
+        }
+
+        function setNexusTab(el) {
+            el.parentElement.querySelectorAll('.nexus-tab-btn').forEach(b => b.classList.remove('active'));
+            el.classList.add('active');
+        }
+
+        function updateHandoffChecklist() {
+            const medDone = document.getElementById('chk-medication-reconciled').checked;
+            const allergyDone = document.getElementById('chk-allergy-reviewed').checked;
+
+            const medItem = document.getElementById('checklist-medication');
+            medItem.className = `checklist-item ${medDone ? 'done' : 'pending'}`;
+            medItem.textContent = medDone ? '✓ Medication reconciled' : '⚠ Medication reconciled';
+
+            const allergyItem = document.getElementById('checklist-allergy');
+            allergyItem.className = `checklist-item ${allergyDone ? 'done' : 'pending'}`;
+            allergyItem.textContent = allergyDone ? '✓ Allergy review' : '⚠ Allergy review';
+
+            const allDone = medDone && allergyDone;
+            document.getElementById('checklist-status-pill').className = `status-pill-inline ${allDone ? 'done' : 'pending'}`;
+            document.getElementById('checklist-status-pill').textContent = allDone ? 'Complete' : 'Incomplete';
+            document.getElementById('complete-handoff-btn').disabled = !allDone;
+
+            document.getElementById('review-medication').textContent = medDone ? 'Reconciled' : 'Pending';
+            document.getElementById('review-allergies').textContent = allergyDone ? 'Reviewed' : 'Pending';
+        }
+
+        function updateReviewSummary() {
+            const dest = document.getElementById('handoff-destination').value;
+            const priority = document.getElementById('handoff-priority').value;
+            document.getElementById('review-vitals').textContent =
+                `${document.getElementById('vitals-temp').value} °C · ${document.getElementById('vitals-pulse').value} bpm · SpO2 ${document.getElementById('vitals-spo2').value}%`;
+            document.getElementById('review-functional').textContent =
+                `ECOG ${document.getElementById('vitals-ecog').value} · ${document.getElementById('vitals-mobility').value} · Fall ${document.getElementById('vitals-fallrisk').value}`;
+            document.getElementById('review-priority').textContent = priority;
+            document.getElementById('review-observations').textContent = document.getElementById('nurse-observations').value;
+            const selectedAttention = [...document.querySelectorAll('#attention-chip-row .chip-toggle.selected')].map(c => c.textContent.trim());
+            document.getElementById('review-attention').textContent = (selectedAttention.length && selectedAttention[0] !== 'None') ? selectedAttention.join(', ') : 'None recorded';
+            document.getElementById('complete-btn-dest').textContent = dest;
+            updateHandoffChecklist();
+        }
+
+        function saveNurseDraft() {
+            toast ? toast('Draft saved', 'success') : alert('Draft saved.');
+        }
+
+        function completeHandoff() {
+            const dest = document.getElementById('handoff-destination').value;
+            const priority = document.getElementById('handoff-priority').value;
+            document.getElementById('complete-handoff-line').textContent = `Handoff sent to ${dest}`;
+            document.getElementById('complete-priority').textContent = priority;
+            document.getElementById('complete-time').textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+            document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
+            document.getElementById('view-nurse-complete').classList.add('active');
         }
     </script>
 </body>

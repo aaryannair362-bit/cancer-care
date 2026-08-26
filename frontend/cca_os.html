@@ -700,6 +700,95 @@
                 </div>
             </div>
 
+            <!-- SCREEN 1c: Nurse Intake & BSA (SCR-08) -->
+            <div id="view-intake" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">🚶‍♂️ Nurse Intake &amp; BSA</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Vitals, Body Surface Area (DuBois), ECOG performance status, and a handoff note for the active patient.</p>
+                    </div>
+                </div>
+                <div class="grid-2">
+                    <div class="workspace-card">
+                        <div class="card-header"><div class="card-title">Anthropometrics &amp; Vitals</div></div>
+                        <div class="grid-2" style="gap:12px;">
+                            <div><label style="font-size:11px;color:var(--text-muted);">Height (cm)</label><input id="intake-height" type="number" value="158" oninput="updateIntakeBsaPreview()" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;" /></div>
+                            <div><label style="font-size:11px;color:var(--text-muted);">Weight (kg)</label><input id="intake-weight" type="number" value="64" oninput="updateIntakeBsaPreview()" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;" /></div>
+                            <div><label style="font-size:11px;color:var(--text-muted);">BP Systolic</label><input id="intake-bp-sys" type="number" value="130" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;" /></div>
+                            <div><label style="font-size:11px;color:var(--text-muted);">BP Diastolic</label><input id="intake-bp-dia" type="number" value="80" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;" /></div>
+                            <div><label style="font-size:11px;color:var(--text-muted);">Heart Rate</label><input id="intake-hr" type="number" value="74" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;" /></div>
+                            <div><label style="font-size:11px;color:var(--text-muted);">Temperature (°C)</label><input id="intake-temp" type="number" step="0.1" value="36.8" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;" /></div>
+                            <div><label style="font-size:11px;color:var(--text-muted);">Oxygen Sat (%)</label><input id="intake-spo2" type="number" value="99" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;" /></div>
+                            <div><label style="font-size:11px;color:var(--text-muted);">Respiratory Rate</label><input id="intake-rr" type="number" value="16" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;" /></div>
+                        </div>
+                    </div>
+                    <div class="workspace-card">
+                        <div class="card-header"><div class="card-title">Performance Status &amp; Triage</div></div>
+                        <div style="background:var(--bg-card);padding:16px;border-radius:8px;margin-bottom:14px;text-align:center;">
+                            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">Body Surface Area (DuBois, live preview)</div>
+                            <div style="font-size:32px;font-weight:800;color:var(--brand-primary);margin-top:4px;" id="intake-bsa-preview">1.65</div>
+                            <div style="font-size:11px;color:var(--text-secondary);">m² &middot; BMI <span id="intake-bmi-preview">25.6</span></div>
+                        </div>
+                        <div class="grid-3" style="gap:12px;margin-bottom:14px;">
+                            <div>
+                                <label style="font-size:11px;color:var(--text-muted);">ECOG (0-4)</label>
+                                <select id="intake-ecog" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;">
+                                    <option value="0">0</option><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+                                </select>
+                            </div>
+                            <div><label style="font-size:11px;color:var(--text-muted);">Karnofsky</label><input id="intake-karnofsky" type="number" step="10" min="0" max="100" value="80" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;" /></div>
+                            <div><label style="font-size:11px;color:var(--text-muted);">Pain (0-10)</label><input id="intake-pain" type="number" min="0" max="10" value="0" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;" /></div>
+                        </div>
+                        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">Handoff Note</label>
+                        <textarea id="intake-handoff-note" style="width:100%;height:70px;padding:10px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);font-size:12px;margin-top:4px;margin-bottom:14px;">Intake complete.</textarea>
+                        <button class="btn-cca btn-primary" onclick="submitIntake()">💾 Save Intake</button>
+                        <div id="intake-save-status" style="font-size:12px;margin-top:10px;color:var(--text-secondary);"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SCREEN 1d: Doctor OPD Consultation (SCR-09) -->
+            <div id="view-opd" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">👨‍⚕️ Clinical Consultation</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Structured consultation note for the active patient. Finalising raises staging investigation orders and moves the patient into Under Investigation.</p>
+                    </div>
+                </div>
+                <div class="grid-2">
+                    <div class="workspace-card">
+                        <div class="card-header"><div class="card-title">Consultation Note</div></div>
+                        <label style="font-size:11px;color:var(--text-muted);">Chief Complaint</label>
+                        <textarea id="opd-chief-complaint" style="width:100%;height:45px;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;"></textarea>
+                        <label style="font-size:11px;color:var(--text-muted);">History of Presenting Illness (HPI)</label>
+                        <textarea id="opd-hpi" style="width:100%;height:60px;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;"></textarea>
+                        <label style="font-size:11px;color:var(--text-muted);">Physical Examination</label>
+                        <textarea id="opd-physical-exam" style="width:100%;height:60px;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;"></textarea>
+                        <label style="font-size:11px;color:var(--text-muted);">Differential Diagnosis</label>
+                        <textarea id="opd-differential-diagnosis" style="width:100%;height:45px;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:14px;"></textarea>
+                        <button class="btn-cca btn-emerald" onclick="submitOpdNote()">✍️ Finalise Consultation Note</button>
+                        <div id="opd-note-status" style="font-size:12px;margin-top:10px;color:var(--text-secondary);"></div>
+                    </div>
+                    <div class="workspace-card">
+                        <div class="card-header"><div class="card-title">Raise Order</div></div>
+                        <label style="font-size:11px;color:var(--text-muted);">Order Type</label>
+                        <select id="opd-order-type" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;">
+                            <option value="RADIOLOGY">Radiology</option><option value="LAB">Lab</option><option value="PATHOLOGY">Pathology</option>
+                        </select>
+                        <label style="font-size:11px;color:var(--text-muted);">Item Name</label>
+                        <input id="opd-order-item" type="text" placeholder="e.g. CECT Chest, Abdomen &amp; Pelvis" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;" />
+                        <label style="font-size:11px;color:var(--text-muted);">Clinical Indication</label>
+                        <textarea id="opd-order-indication" style="width:100%;height:50px;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;"></textarea>
+                        <label style="font-size:11px;color:var(--text-muted);">Priority</label>
+                        <select id="opd-order-priority" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:14px;">
+                            <option value="ROUTINE">Routine</option><option value="URGENT">Urgent</option><option value="STAT">Stat</option>
+                        </select>
+                        <button class="btn-cca btn-outline" onclick="submitRaiseOrder()">📤 Raise Order</button>
+                        <div id="opd-order-status" style="font-size:12px;margin-top:10px;color:var(--text-secondary);"></div>
+                    </div>
+                </div>
+            </div>
+
             <!-- SCREEN 1b: Ingested Documents (Front Desk registration / referral upload, and
                  the general document list every clinical role reads from) -->
             <div id="view-documents" class="screen-view">
@@ -760,6 +849,22 @@
                             <!-- Fact cards -->
                         </div>
                     </div>
+                </div>
+            </div>
+
+            <!-- SCREEN 2b: Results & Orders Inbox (SCR-13/14) -->
+            <div id="view-results_inbox" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">📑 Results &amp; Orders Inbox</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Radiology/lab/pathology results for the active patient. Acknowledge closes the loop on this codebase's audit trail; staging-relevant results feed directly into the Staging Workspace.</p>
+                    </div>
+                </div>
+                <div class="workspace-card">
+                    <table class="cca-table">
+                        <thead><tr><th>Result</th><th>Type</th><th>Critical</th><th>Status</th><th>Findings</th><th>Resulted</th><th></th></tr></thead>
+                        <tbody id="results-inbox-body"><!-- Populated via JS --></tbody>
+                    </table>
                 </div>
             </div>
 
@@ -962,27 +1067,8 @@
                     <button class="btn-cca btn-primary" onclick="openCarePlanAmendModal()">✏️ Amend Care Plan (New Version)</button>
                 </div>
 
-                <div class="workspace-card">
-                    <div class="card-header">
-                        <div class="card-title">Treatment Sequencing & Regimen Protocols</div>
-                    </div>
-                    <div class="grid-3">
-                        <div style="background:var(--bg-card);padding:16px;border-radius:8px;border-left:3px solid var(--brand-primary);">
-                            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">1. Systemic Therapy (Neoadjuvant)</div>
-                            <div style="font-size:14px;font-weight:700;margin-top:6px;color:var(--text-primary);">Dose-dense AC-T</div>
-                            <p style="font-size:12px;color:var(--text-secondary);margin-top:4px;">AC q2w × 4 cycles followed by Paclitaxel q2w × 4 cycles + Pegfilgrastim 6mg support.</p>
-                        </div>
-                        <div style="background:var(--bg-card);padding:16px;border-radius:8px;border-left:3px solid var(--accent-emerald);">
-                            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">2. Surgical Therapy</div>
-                            <div style="font-size:14px;font-weight:700;margin-top:6px;color:var(--text-primary);">Lumpectomy + SLNB</div>
-                            <p style="font-size:12px;color:var(--text-secondary);margin-top:4px;">Breast-conserving surgery planned 4–6 weeks post-chemo completion.</p>
-                        </div>
-                        <div style="background:var(--bg-card);padding:16px;border-radius:8px;border-left:3px solid var(--accent-indigo);">
-                            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">3. Radiotherapy & Endocrine</div>
-                            <div style="font-size:14px;font-weight:700;margin-top:6px;color:var(--text-primary);">Adjuvant WBRT + AI</div>
-                            <p style="font-size:12px;color:var(--text-secondary);margin-top:4px;">40.05 Gy in 15 fractions followed by Letrozole 2.5mg OD for 5–10 years.</p>
-                        </div>
-                    </div>
+                <div id="careplan-content-container">
+                    <!-- Populated via JS: loadCarePlanView() -->
                 </div>
             </div>
 
@@ -990,8 +1076,8 @@
             <div id="view-treatment_day" class="screen-view">
                 <div class="card-header">
                     <div>
-                        <h2 class="card-title">💉 Daycare Chemotherapy Clearance Cockpit (Cycle 1 / Day 1)</h2>
-                        <p style="font-size: 13px; color: var(--text-secondary);">Pre-cycle organ toxicity evaluation and 5 structured clearance exits.</p>
+                        <h2 class="card-title">💉 Daycare Chemotherapy Clearance Cockpit (<span id="treatment-day-cycle-label">Cycle …</span>)</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Pre-cycle organ toxicity evaluation and structured clearance exits.</p>
                     </div>
                     <button class="btn-cca btn-emerald" onclick="openClearanceModal()">🎯 Decide Treatment Clearance</button>
                 </div>
@@ -1006,13 +1092,7 @@
                             <thead>
                                 <tr><th>Parameter</th><th>Result</th><th>Baseline</th><th>Status</th></tr>
                             </thead>
-                            <tbody>
-                                <tr><td>Hemoglobin</td><td>11.8 g/dL</td><td>11.8 g/dL</td><td><span class="badge-pill badge-curative">Normal</span></td></tr>
-                                <tr><td>Absolute Neutrophils (ANC)</td><td>4,200 /µL</td><td>4,400 /µL</td><td><span class="badge-pill badge-curative">Normal</span></td></tr>
-                                <tr><td>Platelet Count</td><td>220,000 /µL</td><td>220,000 /µL</td><td><span class="badge-pill badge-curative">Normal</span></td></tr>
-                                <tr><td>Serum Creatinine</td><td>0.9 mg/dL</td><td>0.9 mg/dL</td><td><span class="badge-pill badge-curative">Normal</span></td></tr>
-                                <tr><td>Total Bilirubin</td><td>0.8 mg/dL</td><td>0.8 mg/dL</td><td><span class="badge-pill badge-curative">Normal</span></td></tr>
-                            </tbody>
+                            <tbody id="lab-tolerability-body"><!-- Populated via JS: loadTreatmentDayAssessment() --></tbody>
                         </table>
                     </div>
 
@@ -1022,15 +1102,7 @@
                             <div class="card-title">CTCAE v5.0 Toxicity Assessment</div>
                             <button class="btn-cca btn-outline" style="font-size:11px;" onclick="openToxicityModal()">+ Record Toxicity</button>
                         </div>
-                        <div id="toxicity-items-container">
-                            <div style="background:var(--bg-card);padding:12px;border-radius:8px;margin-bottom:8px;">
-                                <div style="display:flex;justify-content:space-between;align-items:center;">
-                                    <strong>Peripheral Sensory Neuropathy</strong>
-                                    <span class="badge-pill badge-curative">Grade 0 (Baseline)</span>
-                                </div>
-                                <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">No numbness or tingling prior to paclitaxel exposure.</div>
-                            </div>
-                        </div>
+                        <div id="toxicity-items-container"><!-- Populated via JS: loadTreatmentDayAssessment() --></div>
                     </div>
                 </div>
             </div>

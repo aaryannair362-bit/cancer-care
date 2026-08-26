@@ -23,6 +23,8 @@ let currentPatientData = null;
 let currentDocuments = [];
 let currentFacts = [];
 let currentContradictions = [];
+let currentCarePlanId = null;
+let currentClearanceExits = [];
 
 // ---------------------------------------------------------------------------
 // Role-aware sidebar (role-screen-spec "Final Sidebar" lists). Roles not listed here
@@ -242,6 +244,11 @@ function switchTab(tabId) {
     if (tabId === 'journey') loadJourneyTimeline();
     if (tabId === 'command_centre') loadCensusQueue();
     if (tabId === 'documents') loadDocumentsList();
+    if (tabId === 'intake') loadIntakeView();
+    if (tabId === 'opd') loadOpdView();
+    if (tabId === 'results_inbox') loadResultsInbox();
+    if (tabId === 'careplan') loadCarePlanView();
+    if (tabId === 'treatment_day') loadTreatmentDayAssessment();
     if (tabId === 'imaging') loadImagingWorklist();
     if (tabId === 'pathology') loadPathologyWorklist();
     if (tabId === 'molecular') loadMolecularTests();
@@ -1027,6 +1034,366 @@ function copyMDTExternalLink() {
     const expUrl = `${window.location.origin}/cca_os.html?token=exp_mdt_${Date.now()}&role=external_consultant`;
     navigator.clipboard.writeText(expUrl);
     alert(`External Consultant Link Copied!\nExpiring Signed URL:\n${expUrl}\n\nCan be shared with external tumor board specialists (no login required).`);
+}
+
+// ---------------------------------------------------------------------------
+// 13a. Nurse Intake & BSA (SCR-08)
+// ---------------------------------------------------------------------------
+
+function calcBsaDuBois(heightCm, weightKg) {
+    if (!heightCm || !weightKg) return null;
+    return 0.007184 * Math.pow(heightCm, 0.725) * Math.pow(weightKg, 0.425);
+}
+
+function updateIntakeBsaPreview() {
+    const h = parseFloat(document.getElementById('intake-height').value);
+    const w = parseFloat(document.getElementById('intake-weight').value);
+    const bsa = calcBsaDuBois(h, w);
+    const bmi = (h && w) ? w / Math.pow(h / 100, 2) : null;
+    document.getElementById('intake-bsa-preview').textContent = bsa !== null ? bsa.toFixed(2) : '-';
+    document.getElementById('intake-bmi-preview').textContent = bmi !== null ? bmi.toFixed(1) : '-';
+}
+
+function loadIntakeView() {
+    updateIntakeBsaPreview();
+}
+
+// Shared by Nurse Intake and Doctor OPD Consult: both write against an encounter id.
+// Idempotent on the backend (POST /patients/{id}/encounters returns the existing OPEN
+// encounter if one exists), so calling this per-submit for the same patient is safe.
+async function ensureEncounterId() {
+    const data = await Api.post(`${CCA_API_BASE}/patients/${currentPatientId}/encounters`, {});
+    return data.encounter.id;
+}
+
+async function submitIntake() {
+    const statusEl = document.getElementById('intake-save-status');
+    statusEl.textContent = 'Saving...';
+    try {
+        const encounterId = await ensureEncounterId();
+        await Api.post(`${CCA_API_BASE}/encounters/${encounterId}/intake`, {
+            patient_id: currentPatientId,
+            height_cm: parseFloat(document.getElementById('intake-height').value),
+            weight_kg: parseFloat(document.getElementById('intake-weight').value),
+            bp_systolic: parseInt(document.getElementById('intake-bp-sys').value, 10),
+            bp_diastolic: parseInt(document.getElementById('intake-bp-dia').value, 10),
+            heart_rate: parseInt(document.getElementById('intake-hr').value, 10),
+            temperature_c: parseFloat(document.getElementById('intake-temp').value),
+            oxygen_sat: parseInt(document.getElementById('intake-spo2').value, 10),
+            respiratory_rate: parseInt(document.getElementById('intake-rr').value, 10),
+            ecog: parseInt(document.getElementById('intake-ecog').value, 10),
+            karnofsky: parseInt(document.getElementById('intake-karnofsky').value, 10),
+            pain_score: parseInt(document.getElementById('intake-pain').value, 10),
+            handoff_note: document.getElementById('intake-handoff-note').value,
+        });
+        statusEl.textContent = '✅ Intake saved.';
+        toast('Nurse intake saved', 'success');
+        await loadPatient(currentPatientId);
+        await loadJourneyTimeline();
+    } catch (err) {
+        statusEl.textContent = `❌ ${apiErrorMessage(err)}`;
+        toast(apiErrorMessage(err), 'error');
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 13b. Doctor OPD Consultation (SCR-09)
+// ---------------------------------------------------------------------------
+
+function loadOpdView() {
+    // Form starts blank per encounter -- nothing to prefill until a note is finalised.
+}
+
+async function submitOpdNote() {
+    const statusEl = document.getElementById('opd-note-status');
+    statusEl.textContent = 'Finalising...';
+    try {
+        const encounterId = await ensureEncounterId();
+        await Api.post(`${CCA_API_BASE}/encounters/${encounterId}/note/finalise`, {
+            chief_complaint: document.getElementById('opd-chief-complaint').value,
+            hpi: document.getElementById('opd-hpi').value,
+            physical_exam: document.getElementById('opd-physical-exam').value,
+            differential_diagnosis: document.getElementById('opd-differential-diagnosis').value,
+        });
+        statusEl.textContent = '✅ Consultation note finalised.';
+        toast('Consultation note finalised', 'success');
+        await loadPatient(currentPatientId);
+        await loadJourneyTimeline();
+    } catch (err) {
+        statusEl.textContent = `❌ ${apiErrorMessage(err)}`;
+        toast(apiErrorMessage(err), 'error');
+    }
+}
+
+async function submitRaiseOrder() {
+    const statusEl = document.getElementById('opd-order-status');
+    const indication = document.getElementById('opd-order-indication').value;
+    if (!indication) { toast('Clinical indication is required', 'error'); return; }
+    statusEl.textContent = 'Raising order...';
+    try {
+        await Api.post(`${CCA_API_BASE}/orders`, {
+            patient_id: currentPatientId,
+            order_type: document.getElementById('opd-order-type').value,
+            item_name: document.getElementById('opd-order-item').value || undefined,
+            clinical_indication: indication,
+            priority: document.getElementById('opd-order-priority').value,
+        });
+        statusEl.textContent = '✅ Order raised.';
+        toast('Order raised', 'success');
+        document.getElementById('opd-order-item').value = '';
+        document.getElementById('opd-order-indication').value = '';
+    } catch (err) {
+        statusEl.textContent = `❌ ${apiErrorMessage(err)}`;
+        toast(apiErrorMessage(err), 'error');
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 13c. Results & Orders Inbox (SCR-13/14)
+// ---------------------------------------------------------------------------
+
+async function loadResultsInbox() {
+    try {
+        const data = await Api.get(`${CCA_API_BASE}/results?patient_id=${currentPatientId}`);
+        const tbody = document.getElementById('results-inbox-body');
+        tbody.innerHTML = data.results.map(r => `
+            <tr>
+                <td><strong>${escapeHtml(r.title)}</strong></td>
+                <td><span class="badge-pill badge-stage">${escapeHtml(r.result_type)}</span></td>
+                <td>${r.is_critical ? `<span class="badge-pill" style="background:var(--pill-danger-bg);color:var(--pill-danger-text);border:1px solid var(--pill-danger-border);">Critical</span>` : '-'}</td>
+                <td><span class="badge-pill ${r.status === 'ACKNOWLEDGED' ? 'badge-curative' : 'badge-warning'}">${escapeHtml(r.status)}</span></td>
+                <td style="max-width:280px;">${escapeHtml((r.findings_text || '').slice(0, 120))}</td>
+                <td>${escapeHtml(r.resulted_at ? new Date(r.resulted_at).toLocaleString() : '-')}</td>
+                <td>${r.status !== 'ACKNOWLEDGED' ? `<button class="btn-cca btn-outline" style="font-size:11px;padding:3px 8px;" onclick="acknowledgeResultRow(${Number(r.id)})">Acknowledge</button>` : ''}</td>
+            </tr>
+        `).join('') || '<tr><td colspan="7">No results on file for this patient.</td></tr>';
+    } catch (err) { toast(apiErrorMessage(err), 'error'); }
+}
+
+async function acknowledgeResultRow(resultId) {
+    try {
+        await Api.post(`${CCA_API_BASE}/results/${resultId}/acknowledge`);
+        toast('Result acknowledged', 'success');
+        await loadResultsInbox();
+        await loadJourneyTimeline();
+    } catch (err) { toast(apiErrorMessage(err), 'error'); }
+}
+
+// ---------------------------------------------------------------------------
+// 13d. Live Care Plan (SCR-23)
+// ---------------------------------------------------------------------------
+
+let currentCarePlanData = null;
+
+async function loadCarePlanView() {
+    const container = document.getElementById('careplan-content-container');
+    try {
+        const data = await Api.get(`${CCA_API_BASE}/care-plans/current?patient_id=${currentPatientId}`);
+        const plan = data.care_plan;
+        currentCarePlanId = plan ? plan.id : null;
+        currentCarePlanData = plan;
+        document.getElementById('careplan-ver-text').textContent = plan ? `${plan.version_no}.0` : '—';
+
+        if (!plan) {
+            container.innerHTML = `
+                <div class="workspace-card" style="text-align:center;padding:32px;">
+                    <span class="absence-token absence-not-recorded">NOT_RECORDED</span>
+                    <p style="font-size:13px;color:var(--text-secondary);margin-top:10px;">No active care plan on record for this patient yet.</p>
+                </div>
+            `;
+            return;
+        }
+
+        const comps = plan.components || {};
+        const rows = [
+            ['Systemic Therapy', comps.systemic],
+            ['Surgical Therapy', comps.surgical],
+            ['Radiation Therapy', comps.radiation],
+            ['Supportive Care', comps.supportive],
+        ];
+        container.innerHTML = `
+            <div class="workspace-card">
+                <div class="card-header">
+                    <div class="card-title">Treatment Sequencing &amp; Regimen Protocols</div>
+                    <span class="badge-pill badge-stage">Intent: ${escapeHtml(plan.intent || 'NOT_RECORDED')}</span>
+                </div>
+                <div class="grid-3">
+                    ${rows.map(([label, val]) => `
+                        <div style="background:var(--bg-card);padding:16px;border-radius:8px;border-left:3px solid var(--brand-primary);">
+                            <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">${escapeHtml(label)}</div>
+                            <p style="font-size:12px;color:var(--text-secondary);margin-top:6px;">${val ? escapeHtml(typeof val === 'string' ? val : JSON.stringify(val)) : '<span class="absence-token absence-not-recorded">NOT_RECORDED</span>'}</p>
+                        </div>
+                    `).join('')}
+                </div>
+                ${plan.next_decision_point ? `<div style="margin-top:14px;font-size:12px;color:var(--text-secondary);">Next decision point: <strong>${escapeHtml(plan.next_decision_point)}</strong></div>` : ''}
+            </div>
+        `;
+    } catch (err) {
+        toast(apiErrorMessage(err), 'error');
+    }
+}
+
+function openCarePlanAmendModal() {
+    if (!currentCarePlanId) {
+        toast('No active care plan to amend for this patient yet', 'error');
+        return;
+    }
+    const comps = currentCarePlanData.components || {};
+    openModal(`
+        <div class="card-header">
+            <div class="card-title">✏️ Amend Care Plan (v${Number(currentCarePlanData.version_no) + 1})</div>
+            <button onclick="closeModal()" style="background:transparent;border:none;color:var(--text-secondary);font-size:20px;cursor:pointer;">&times;</button>
+        </div>
+        <label style="font-size:11px;color:var(--text-muted);">Intent</label>
+        <input id="amend-intent" type="text" value="${escapeHtml(currentCarePlanData.intent || '')}" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;" />
+        <label style="font-size:11px;color:var(--text-muted);">Systemic Therapy</label>
+        <textarea id="amend-systemic" style="width:100%;height:45px;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;">${escapeHtml(comps.systemic || '')}</textarea>
+        <label style="font-size:11px;color:var(--text-muted);">Surgical Therapy</label>
+        <textarea id="amend-surgical" style="width:100%;height:45px;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;">${escapeHtml(comps.surgical || '')}</textarea>
+        <label style="font-size:11px;color:var(--text-muted);">Radiation Therapy</label>
+        <textarea id="amend-radiation" style="width:100%;height:45px;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;">${escapeHtml(comps.radiation || '')}</textarea>
+        <label style="font-size:11px;color:var(--text-muted);">Supportive Care</label>
+        <textarea id="amend-supportive" style="width:100%;height:45px;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;">${escapeHtml(comps.supportive || '')}</textarea>
+        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">Change Reason (required, Rule E-36)</label>
+        <textarea id="amend-change-reason" style="width:100%;height:55px;padding:10px;background:var(--bg-card);border:1px solid var(--border-bright);border-radius:6px;color:var(--text-primary);font-size:12px;margin-top:4px;margin-bottom:16px;" placeholder="Why is this care plan changing?"></textarea>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+            <button class="btn-cca btn-outline" onclick="closeModal()">Cancel</button>
+            <button class="btn-cca btn-emerald" onclick="submitCarePlanAmendment()">Submit Amendment</button>
+        </div>
+    `);
+}
+
+async function submitCarePlanAmendment() {
+    const changeReason = document.getElementById('amend-change-reason').value;
+    if (!changeReason) { toast('Change reason is required', 'error'); return; }
+    try {
+        await Api.put(`${CCA_API_BASE}/care-plans/${currentCarePlanId}`, {
+            intent: document.getElementById('amend-intent').value,
+            components: {
+                systemic: document.getElementById('amend-systemic').value,
+                surgical: document.getElementById('amend-surgical').value,
+                radiation: document.getElementById('amend-radiation').value,
+                supportive: document.getElementById('amend-supportive').value,
+            },
+            change_reason: changeReason,
+        });
+        toast('Care plan amended', 'success');
+        closeModal();
+        await loadCarePlanView();
+        await loadJourneyTimeline();
+    } catch (err) { toast(apiErrorMessage(err), 'error'); }
+}
+
+// ---------------------------------------------------------------------------
+// 13e. Treatment-Day Assessment, Clearance & Toxicity (SCR-24)
+// ---------------------------------------------------------------------------
+
+async function loadTreatmentDayAssessment() {
+    try {
+        const data = await Api.get(`${CCA_API_BASE}/treatment/day-assessment?patient_id=${currentPatientId}`);
+        currentClearanceExits = data.clearance_exits || [];
+
+        document.getElementById('treatment-day-cycle-label').textContent = data.cycle_info || 'NOT_RECORDED';
+
+        // lab_parameters is always empty today -- the backend explicitly has no live lab
+        // integration yet (see lab_parameters_note) rather than fabricating structured values.
+        document.getElementById('lab-tolerability-body').innerHTML =
+            `<tr><td colspan="4" style="color:var(--text-muted);">${escapeHtml(data.lab_parameters_note || 'No lab parameters on file.')}</td></tr>`;
+
+        const toxContainer = document.getElementById('toxicity-items-container');
+        toxContainer.innerHTML = (data.toxicity_history || []).map(t => `
+            <div style="background:var(--bg-card);padding:12px;border-radius:8px;margin-bottom:8px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <strong>${escapeHtml(t.term)}</strong>
+                    <span class="badge-pill ${Number(t.grade) === 0 ? 'badge-curative' : 'badge-warning'}">Grade ${Number(t.grade)}</span>
+                </div>
+                <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">${escapeHtml(t.baseline_value)}</div>
+            </div>
+        `).join('') || '<div style="font-size:12px;color:var(--text-muted);">No toxicity events recorded yet.</div>';
+    } catch (err) { toast(apiErrorMessage(err), 'error'); }
+}
+
+async function openClearanceModal() {
+    if (!currentClearanceExits.length) await loadTreatmentDayAssessment();
+    openModal(`
+        <div class="card-header">
+            <div class="card-title">🎯 Decide Treatment Clearance</div>
+            <button onclick="closeModal()" style="background:transparent;border:none;color:var(--text-secondary);font-size:20px;cursor:pointer;">&times;</button>
+        </div>
+        <label style="font-size:11px;color:var(--text-muted);">Decision</label>
+        <select id="clearance-decision" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-bright);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:12px;">
+            ${currentClearanceExits.map(c => `<option value="${escapeHtml(c.code)}">${escapeHtml(c.label)}</option>`).join('')}
+        </select>
+        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">Reason / Clinical Basis (required)</label>
+        <textarea id="clearance-reason" style="width:100%;height:70px;padding:10px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);font-size:12px;margin-top:4px;margin-bottom:16px;" placeholder="Reference the lab tolerability check and toxicity history above."></textarea>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+            <button class="btn-cca btn-outline" onclick="closeModal()">Cancel</button>
+            <button class="btn-cca btn-emerald" onclick="submitTreatmentClearance()">Confirm Decision</button>
+        </div>
+    `);
+}
+
+async function submitTreatmentClearance() {
+    const reason = document.getElementById('clearance-reason').value;
+    if (!reason) { toast('Reason is required', 'error'); return; }
+    try {
+        await Api.post(`${CCA_API_BASE}/treatment/clearance`, {
+            patient_id: currentPatientId,
+            decision: document.getElementById('clearance-decision').value,
+            reason,
+        });
+        toast('Treatment clearance recorded', 'success');
+        closeModal();
+        await loadTreatmentDayAssessment();
+        await loadJourneyTimeline();
+        await loadPatient(currentPatientId);
+    } catch (err) { toast(apiErrorMessage(err), 'error'); }
+}
+
+function openToxicityModal() {
+    openModal(`
+        <div class="card-header">
+            <div class="card-title">+ Record CTCAE v5.0 Toxicity</div>
+            <button onclick="closeModal()" style="background:transparent;border:none;color:var(--text-secondary);font-size:20px;cursor:pointer;">&times;</button>
+        </div>
+        <label style="font-size:11px;color:var(--text-muted);">Term</label>
+        <input id="tox-term" list="tox-term-options" type="text" placeholder="e.g. Peripheral Sensory Neuropathy" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;" />
+        <datalist id="tox-term-options">
+            <option value="Peripheral Sensory Neuropathy"></option>
+            <option value="Diarrhea"></option>
+            <option value="Neutropenia"></option>
+            <option value="Fatigue"></option>
+            <option value="Nausea"></option>
+        </datalist>
+        <label style="font-size:11px;color:var(--text-muted);">CTCAE Grade</label>
+        <select id="tox-grade" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;">
+            <option value="0">Grade 0 (None)</option><option value="1">Grade 1</option><option value="2">Grade 2</option><option value="3">Grade 3</option><option value="4">Grade 4</option><option value="5">Grade 5</option>
+        </select>
+        <label style="font-size:11px;color:var(--text-muted);">Baseline / Description</label>
+        <input id="tox-baseline" type="text" placeholder="e.g. Grade 1 -- mild numbness in fingertips" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:14px;" />
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+            <button class="btn-cca btn-outline" onclick="closeModal()">Cancel</button>
+            <button class="btn-cca btn-primary" onclick="submitToxicityGrading()">Save Toxicity</button>
+        </div>
+    `);
+}
+
+async function submitToxicityGrading() {
+    const term = document.getElementById('tox-term').value;
+    const baseline = document.getElementById('tox-baseline').value;
+    if (!term) { toast('Term is required', 'error'); return; }
+    if (!baseline) { toast('Baseline / description is required', 'error'); return; }
+    try {
+        await Api.post(`${CCA_API_BASE}/treatment/toxicity`, {
+            patient_id: currentPatientId,
+            term,
+            grade: parseInt(document.getElementById('tox-grade').value, 10),
+            baseline_value: baseline,
+        });
+        toast('Toxicity recorded', 'success');
+        closeModal();
+        await loadTreatmentDayAssessment();
+    } catch (err) { toast(apiErrorMessage(err), 'error'); }
 }
 
 // ---------------------------------------------------------------------------
