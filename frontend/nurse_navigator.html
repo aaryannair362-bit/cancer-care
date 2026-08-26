@@ -860,141 +860,7 @@
                 </div>
 
                 <div class="nurse-queue-grid" id="nurse-queue-grid">
-                    <!-- Card 1: Arun Shah -->
-                    <div class="nurse-patient-card">
-                        <div class="card-top-row">
-                            <div class="patient-id-block">
-                                <div class="patient-avatar-icon">👤</div>
-                                <div>
-                                    <div class="card-patient-name">Arun Shah</div>
-                                    <div class="card-patient-meta">CCA-02521 · 57 years · Male · Today · 10:45</div>
-                                </div>
-                            </div>
-                            <span class="priority-badge">Routine</span>
-                        </div>
-
-                        <div class="card-mid-grid">
-                            <div>
-                                <div class="mid-block-label">Visit context</div>
-                                <div class="mid-block-value">New · Surgical Oncology</div>
-                                <div class="mid-block-sub">New surgical assessment</div>
-                            </div>
-                            <div>
-                                <div class="mid-block-label">Intake status</div>
-                                <span class="intake-status-badge">Intake in Progress</span>
-                            </div>
-                        </div>
-
-                        <div class="attention-notice-box">
-                            ⚠️ Medication reconciliation incomplete
-                        </div>
-
-                        <div class="card-action-row">
-                            <button class="btn-navy" onclick="openNurseIntakeWizard('Arun Shah', 'CCA-02521', 57, 'Male', 'New · Surgical Oncology')">Continue Intake →</button>
-                        </div>
-                    </div>
-
-                    <!-- Card 2: Meena Rao -->
-                    <div class="nurse-patient-card">
-                        <div class="card-top-row">
-                            <div class="patient-id-block">
-                                <div class="patient-avatar-icon">👤</div>
-                                <div>
-                                    <div class="card-patient-name">Meena Rao</div>
-                                    <div class="card-patient-meta">CCA-02516 · 48 years · Female · Today · 11:00</div>
-                                </div>
-                            </div>
-                            <span class="priority-badge">Routine</span>
-                        </div>
-
-                        <div class="card-mid-grid">
-                            <div>
-                                <div class="mid-block-label">Visit context</div>
-                                <div class="mid-block-value">New · Radiation Oncology</div>
-                                <div class="mid-block-sub">Radiation Oncology opinion</div>
-                            </div>
-                            <div>
-                                <div class="mid-block-label">Intake status</div>
-                                <span class="intake-status-badge">Ready for Handoff</span>
-                            </div>
-                        </div>
-
-                        <div class="attention-notice-box empty">
-                            No active nursing attention item
-                        </div>
-
-                        <div class="card-action-row">
-                            <button class="btn-navy" onclick="openNurseIntakeWizard('Meena Rao', 'CCA-02516', 48, 'Female', 'New · Radiation Oncology')">Review Handoff →</button>
-                        </div>
-                    </div>
-
-                    <!-- Card 3: Sunita Patil -->
-                    <div class="nurse-patient-card">
-                        <div class="card-top-row">
-                            <div class="patient-id-block">
-                                <div class="patient-avatar-icon">👤</div>
-                                <div>
-                                    <div class="card-patient-name">Sunita Patil</div>
-                                    <div class="card-patient-meta">CCA-02481 · 52 years · Female · Today · 10:30</div>
-                                </div>
-                            </div>
-                            <span class="priority-badge">Routine</span>
-                        </div>
-
-                        <div class="card-mid-grid">
-                            <div>
-                                <div class="mid-block-label">Visit context</div>
-                                <div class="mid-block-value">Follow-up · Medical Oncology</div>
-                                <div class="mid-block-sub">Cycle 3 Pre-chemo clearance</div>
-                            </div>
-                            <div>
-                                <div class="mid-block-label">Intake status</div>
-                                <span class="intake-status-badge">Intake in Progress</span>
-                            </div>
-                        </div>
-
-                        <div class="attention-notice-box">
-                            ⚠️ Pre-chemo CBC report review pending
-                        </div>
-
-                        <div class="card-action-row">
-                            <button class="btn-navy" onclick="openNurseIntakeWizard('Sunita Patil', 'CCA-02481', 52, 'Female', 'Follow-up · Medical Oncology')">Continue Intake →</button>
-                        </div>
-                    </div>
-
-                    <!-- Card 4: Ravi Kumar -->
-                    <div class="nurse-patient-card">
-                        <div class="card-top-row">
-                            <div class="patient-id-block">
-                                <div class="patient-avatar-icon">👤</div>
-                                <div>
-                                    <div class="card-patient-name">Ravi Kumar</div>
-                                    <div class="card-patient-meta">CCA-02519 · 61 years · Male · Today · 12:00</div>
-                                </div>
-                            </div>
-                            <span class="priority-badge">Routine</span>
-                        </div>
-
-                        <div class="card-mid-grid">
-                            <div>
-                                <div class="mid-block-label">Visit context</div>
-                                <div class="mid-block-value">New · Medical Oncology</div>
-                                <div class="mid-block-sub">Referral intake assessment</div>
-                            </div>
-                            <div>
-                                <div class="mid-block-label">Intake status</div>
-                                <span class="intake-status-badge">Awaiting Intake</span>
-                            </div>
-                        </div>
-
-                        <div class="attention-notice-box empty">
-                            No active nursing attention item
-                        </div>
-
-                        <div class="card-action-row">
-                            <button class="btn-navy" onclick="openNurseIntakeWizard('Ravi Kumar', 'CCA-02519', 61, 'Male', 'New · Medical Oncology')">Start Intake →</button>
-                        </div>
-                    </div>
+                    <!-- Populated via JS: loadNursePatientQueue() -->
                 </div>
             </div>
 
@@ -1701,6 +1567,7 @@
 
             if (targetView) targetView.classList.add('active');
             if (targetNav) targetNav.classList.add('active');
+            if (tabName === 'patients') loadNursePatientQueue();
         }
 
         // Maps each numbered step to the one or more intake-card divs it renders.
@@ -1714,7 +1581,53 @@
         };
         let currentNurseStep = 1;
 
-        function openNurseIntakeWizard(name, mrn, age, sex, visit) {
+        let currentPatientId = null;
+
+        async function loadNursePatientQueue() {
+            const grid = document.getElementById('nurse-queue-grid');
+            try {
+                const data = await Api.get('/cca/patients');
+                const patients = data.results || [];
+                document.getElementById('nurse-patient-count').textContent = `${patients.length} patients`;
+                grid.innerHTML = patients.length ? patients.map(p => `
+                    <div class="nurse-patient-card">
+                        <div class="card-top-row">
+                            <div class="patient-id-block">
+                                <div class="patient-avatar-icon">👤</div>
+                                <div>
+                                    <div class="card-patient-name">${escapeHtml(p.name)}</div>
+                                    <div class="card-patient-meta">${escapeHtml(p.mrn)} · ${p.age ?? '-'} years · ${escapeHtml(p.sex || '-')}</div>
+                                </div>
+                            </div>
+                            <span class="priority-badge">Routine</span>
+                        </div>
+                        <div class="card-mid-grid">
+                            <div>
+                                <div class="mid-block-label">Journey State</div>
+                                <div class="mid-block-value">${escapeHtml(p.journey_state)}</div>
+                                <div class="mid-block-sub">${escapeHtml(p.primary_oncologist || 'Unassigned')}</div>
+                            </div>
+                            <div>
+                                <div class="mid-block-label">Staging</div>
+                                <span class="intake-status-badge">${escapeHtml(p.staging_state)}</span>
+                            </div>
+                        </div>
+                        <div class="attention-notice-box empty">
+                            No active nursing attention item
+                        </div>
+                        <div class="card-action-row">
+                            <button class="btn-navy" onclick='openNurseIntakeWizard(${JSON.stringify(p)})'>Continue Intake →</button>
+                        </div>
+                    </div>
+                `).join('') : '<p style="padding:20px; color:var(--ink-500); font-size:13px;">No patients yet.</p>';
+            } catch (err) {
+                grid.innerHTML = `<p style="padding:20px; color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`;
+            }
+        }
+
+        function openNurseIntakeWizard(patient) {
+            currentPatientId = patient.id;
+            const name = patient.name, mrn = patient.mrn, age = patient.age, sex = patient.sex, visit = patient.journey_state;
             document.getElementById('intake-hdr-name').textContent = `${name} · ${mrn}`;
             document.getElementById('intake-hdr-age-sex').textContent = `${age} years · ${sex}`;
             document.getElementById('intake-hdr-visit').textContent = visit;
@@ -1915,6 +1828,8 @@
             document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
             document.getElementById('view-nurse-complete').classList.add('active');
         }
+
+        document.addEventListener('DOMContentLoaded', () => { loadNursePatientQueue(); });
     </script>
 </body>
 </html>

@@ -162,6 +162,75 @@ def list_patients(
     return {"results": results, "total": len(results)}
 
 
+@router.post("/patients", status_code=201)
+async def register_cca_patient(
+    request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Registers a new patient directly into the Oncology OS's own patient population
+    (CCAPatient) -- previously the ONLY way a CCAPatient row could ever exist was
+    cca_seed.py's hardcoded demo data, so Front Desk's registration wizard had nothing real to
+    call and was pointed at the general HMS's POST /api/patients/register instead, which writes
+    to a completely separate Patient table that no CCA role (Nurse Navigator, oncologists, MDT,
+    etc.) ever reads from -- a newly registered patient was findable only via Front Desk's own
+    Registration search (backed by that general table) and invisible everywhere else in the
+    Oncology OS. This endpoint is the real fix."""
+    if not (is_cca_front_desk(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only CCA Front Desk or Admin can register a new oncology patient")
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(422, "Patient name is required")
+    org_id = _org_id(current_user)
+
+    age = body.get("age")
+    try:
+        age = int(age) if age not in (None, "") else None
+    except (TypeError, ValueError):
+        age = None
+
+    patient = CCAPatient(
+        mrn="PENDING",
+        name=name,
+        dob=body.get("dob") or None,
+        age=age,
+        sex=body.get("sex") or None,
+        phone=body.get("phone") or None,
+        address=body.get("address") or None,
+        journey_state="Registered",
+        primary_oncologist=body.get("primary_oncologist") or None,
+        attender_name=body.get("attender_name") or None,
+        attender_phone=body.get("attender_phone") or None,
+        attender_relationship=body.get("attender_relationship") or None,
+        organization_id=org_id,
+        demo_flag=False,
+    )
+    db.add(patient)
+    db.flush()
+    patient.mrn = f"CCA-{org_id}-{patient.id:06d}"
+
+    actor = _actor(current_user)
+    j_ev = CCAJourneyEvent(
+        patient_id=patient.id,
+        event_type="PATIENT_REGISTERED",
+        event_title="Patient Registered",
+        event_category="REGISTRATION",
+        description=f"{actor} registered {name} into the Oncology OS.",
+        actor_name=actor,
+        actor_role=current_user.get("role"),
+    )
+    db.add(j_ev)
+    db.commit()
+    db.refresh(patient)
+    return {
+        "status": "success",
+        "patient": {
+            "id": patient.id, "mrn": patient.mrn, "name": patient.name,
+            "age": patient.age, "sex": patient.sex, "journey_state": patient.journey_state,
+        },
+    }
+
+
 @router.get("/patients/{patient_id}")
 def get_patient(
     patient_id: int, db: Session = Depends(get_cca_db),

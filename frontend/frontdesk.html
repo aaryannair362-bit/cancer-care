@@ -1382,8 +1382,7 @@
                 try {
                     const formData = new FormData();
                     formData.append('file', doc.file);
-                    formData.append('document_type', doc.label);
-                    await Api.upload(`/patients/${patientId}/documents`, formData);
+                    await Api.upload(`/cca/documents?patient_id=${patientId}`, formData);
                 } catch (err) {
                     toast(`Could not upload ${doc.file.name}: ${apiErrorMessage(err)}`, 'error');
                 }
@@ -1507,21 +1506,17 @@
             nextBtn.disabled = true;
             statusEl.textContent = 'Registering patient...';
             try {
-                const patient = await Api.post('/patients/register', {
+                const dept = document.getElementById('wiz-dept').value;
+                const result = await Api.post('/cca/patients', {
                     name,
                     age: age ? Number(age) : undefined,
-                    date_of_birth: dob || undefined,
-                    gender,
+                    dob: dob || undefined,
+                    sex: gender,
                     phone: mobile,
                     address: document.getElementById('wiz-address').value || undefined,
-                    id_proof_type: document.getElementById('wiz-id-doc-type').value || undefined,
-                    id_proof_number: document.getElementById('wiz-id-doc-number').value || undefined,
+                    primary_oncologist: dept ? `${dept} Team (unassigned)` : undefined,
                 });
-
-                const doctorId = document.getElementById('wiz-clinician').value;
-                if (doctorId) {
-                    await Api.post('/queue/tokens', { patient_id: patient.id, doctor_id: Number(doctorId) });
-                }
+                const patient = result.patient;
 
                 if (pendingRegistrationDocuments.length) {
                     statusEl.textContent = `Uploading ${pendingRegistrationDocuments.length} document(s) and running OCR — this can take a moment...`;
@@ -1529,7 +1524,7 @@
                 }
 
                 statusEl.textContent = '';
-                toast(`Patient ${name} registered with MRN ${patient.mrn}${doctorId ? ' and token issued' : ''}`, 'success');
+                toast(`Patient ${name} registered with MRN ${patient.mrn}`, 'success');
                 exitRegistrationWizard();
                 showTab('overview');
             } catch (err) {
@@ -1550,13 +1545,14 @@
             if (!q) { resultsEl.style.display = 'none'; return; }
 
             try {
-                const results = await Api.get(`/patients/search?q=${encodeURIComponent(q)}`);
+                const data = await Api.get(`/cca/patients?q=${encodeURIComponent(q)}`);
+                const results = data.results || [];
                 resultsEl.style.display = 'block';
                 resultsEl.innerHTML = results.length ? results.map(p => `
                     <div class="search-result-card">
                         <div>
                             <div class="search-result-name">${escapeHtml(p.name)}</div>
-                            <div class="search-result-meta">${escapeHtml(p.mrn || 'No MRN')} · ${p.age ?? '-'} years · ${escapeHtml(p.gender || '-')} · ${escapeHtml(p.phone || '-')}</div>
+                            <div class="search-result-meta">${escapeHtml(p.mrn || 'No MRN')} · ${p.age ?? '-'} years · ${escapeHtml(p.sex || '-')} · ${escapeHtml(p.journey_state || '-')}</div>
                         </div>
                         <button class="btn-outline" onclick='selectSearchResultPatient(${JSON.stringify(p)})'>Select Patient</button>
                     </div>
@@ -1577,58 +1573,42 @@
             document.getElementById('wiz-fullname').value = patient.name || '';
             document.getElementById('wiz-age').value = patient.age || '';
             document.getElementById('wiz-mobile').value = patient.phone || '';
-            document.getElementById('wiz-sex').value = patient.gender || '';
+            document.getElementById('wiz-sex').value = patient.sex || '';
             document.getElementById('wiz-address').value = patient.address || '';
             goToWizardStep(1);
         }
 
         async function loadFrontDeskPatientList() {
-            // Demo data matching the reference design -- the backend has no per-patient
-            // registration/referral-workflow-status model (Patient has no such fields), so
-            // this mirrors nurse_navigator.html's precedent of realistic static demo content
-            // rather than fabricating fields the schema doesn't track.
-            const patients = [
-                { name: 'Sunita Patil', mrn: 'CCA-02481', age: 39, sex: 'Female', phone: '+91 98765 41028', dept: 'Medical Oncology', clinician: 'Dr. Kavya Menon', time: 'Today · 10:30', reg: 'Complete', ref: 'External hospital', letter: 'Letter attached', opStatus: 'Arrived', next: 'Send to Nurse' },
-                { name: 'Arun Shah', mrn: 'New Patient', age: 57, sex: 'Male', phone: '+91 98201 11440', dept: 'Surgical Oncology', clinician: 'Dr. Sameer Kulkarni', time: 'Today · 10:45', reg: 'Incomplete', ref: 'Self referral', letter: 'Letter not attached', opStatus: 'Waiting', next: 'Continue Registration' },
-                { name: 'Meena Rao', mrn: 'CCA-02516', age: 48, sex: 'Female', phone: '+91 98450 22118', dept: 'Radiation Oncology', clinician: 'Dr. Nisha Thomas', time: 'Today · 11:00', reg: 'Complete', ref: 'External doctor', letter: 'Letter attached', opStatus: 'Expected', next: 'Await Arrival' },
-                { name: 'Priya Nair', mrn: 'CCA-02174', age: 44, sex: 'Female', phone: '+91 99860 31007', dept: 'Medical Oncology', clinician: 'Dr. Kavya Menon', time: 'Today · 11:30', reg: 'Complete', ref: 'Self referral', letter: 'Letter attached', opStatus: 'No-show', next: 'Contact / Reschedule' },
-                { name: 'Ravi Kumar', mrn: 'CCA-02519', age: 61, sex: 'Male', phone: '+91 98111 73642', dept: 'Medical Oncology', clinician: 'Dr. Kavya Menon', time: 'Today · 12:00', reg: 'In progress', ref: 'External hospital', letter: 'Letter attached', opStatus: 'Checked in', next: 'Complete Registration' },
-                { name: 'Fatima Sheikh', mrn: 'CCA-02388', age: 35, sex: 'Female', phone: '+91 99020 66311', dept: 'Medical Oncology', clinician: 'Dr. Kavya Menon', time: 'Today · 12:30', reg: 'Complete', ref: 'Internal referral', letter: 'Letter attached', opStatus: 'Sent to Nurse', next: 'View Patient' },
-                { name: 'Deepak Verma', mrn: 'CCA-02602', age: 52, sex: 'Male', phone: '+91 98220 55019', dept: 'Surgical Oncology', clinician: 'Dr. Sameer Kulkarni', time: 'Today · 13:00', reg: 'Complete', ref: 'External hospital', letter: 'Letter attached', opStatus: 'Expected', next: 'Await Arrival' },
-                { name: 'Anjali Reddy', mrn: 'CCA-02611', age: 41, sex: 'Female', phone: '+91 99440 20871', dept: 'Radiation Oncology', clinician: 'Dr. Nisha Thomas', time: 'Today · 13:30', reg: 'Complete', ref: 'Self referral', letter: 'Letter attached', opStatus: 'Arrived', next: 'Send to Nurse' },
-            ];
-
-            document.getElementById('fd-patient-count').textContent = `${patients.length} patients`;
-            document.getElementById('fd-patient-list').innerHTML = patients.map(p => {
-                const regBadge = p.reg === 'Complete' ? 'badge-green' : p.reg === 'Incomplete' ? 'badge-rose' : 'badge-amber';
-                const opBadge = p.opStatus === 'Arrived' || p.opStatus === 'Checked in' || p.opStatus === 'Sent to Nurse' ? 'badge-green' : p.opStatus === 'Waiting' ? 'badge-amber' : p.opStatus === 'No-show' ? 'badge-rose' : 'badge-blue';
-                return `
+            const listEl = document.getElementById('fd-patient-list');
+            try {
+                const data = await Api.get('/cca/patients');
+                const patients = data.results || [];
+                document.getElementById('fd-patient-count').textContent = `${patients.length} patients`;
+                listEl.innerHTML = patients.length ? patients.map(p => `
                     <div class="fd-patient-item">
                         <div>
                             <div class="fd-col-value">${escapeHtml(p.name)}</div>
-                            <div class="fd-col-label" style="margin-top:4px;">${escapeHtml(p.mrn)} · ${p.age} years · ${escapeHtml(p.sex)}</div>
-                            <div class="fd-col-label">${escapeHtml(p.phone)}</div>
+                            <div class="fd-col-label" style="margin-top:4px;">${escapeHtml(p.mrn)} · ${p.age ?? '-'} years · ${escapeHtml(p.sex || '-')}</div>
+                            <div class="fd-col-label">${escapeHtml(p.phone || '-')}</div>
                         </div>
                         <div>
-                            <div class="fd-col-label">Visit</div>
-                            <div class="fd-col-value">${escapeHtml(p.dept)}</div>
-                            <div class="fd-col-label">${escapeHtml(p.time)} · ${escapeHtml(p.clinician)}</div>
+                            <div class="fd-col-label">Care Team</div>
+                            <div class="fd-col-value">${escapeHtml(p.primary_oncologist || 'Unassigned')}</div>
                         </div>
                         <div>
-                            <div class="fd-col-label">Registration / referral</div>
-                            <span class="badge ${regBadge}" style="margin-right:6px;">${escapeHtml(p.reg)}</span>
-                            <span class="badge badge-blue">${escapeHtml(p.ref)}</span>
-                            <div class="fd-col-label" style="margin-top:4px;">${escapeHtml(p.letter)}</div>
+                            <div class="fd-col-label">Journey State</div>
+                            <span class="badge badge-blue">${escapeHtml(p.journey_state)}</span>
                         </div>
                         <div>
-                            <div class="fd-col-label">Operational status</div>
-                            <span class="badge ${opBadge}">${escapeHtml(p.opStatus)}</span>
-                            <div class="fd-col-label" style="margin-top:6px; font-weight:700; color:var(--ink-800);">Next: ${escapeHtml(p.next)}</div>
-                            <button class="btn-navy" style="margin-top:8px;" onclick="handleQueueAction('${p.next}', '${escapeHtml(p.name)}')">Open Patient →</button>
+                            <div class="fd-col-label">Staging</div>
+                            <span class="badge ${p.staging_state === 'CLINICIAN_CONFIRMED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(p.staging_state)}</span>
+                            <div class="fd-col-label" style="margin-top:6px;">Registered ${p.created_at ? new Date(p.created_at).toLocaleDateString() : '-'}</div>
                         </div>
                     </div>
-                `;
-            }).join('');
+                `).join('') : `<p style="padding:20px; color:var(--ink-500); font-size:13px;">No patients registered yet.</p>`;
+            } catch (err) {
+                listEl.innerHTML = `<p style="padding:20px; color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`;
+            }
         }
 
         document.addEventListener('DOMContentLoaded', () => {
