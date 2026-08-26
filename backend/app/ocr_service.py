@@ -1,13 +1,18 @@
 """PDF/image text extraction with evidence-preserving, deterministic clinical parsing.
 
-OCR engine: EasyOCR (pure pip install -- torch + torchvision, no system package). Switched
-from Tesseract specifically to drop the system-binary dependency that required either a Docker
-build step (`apt-get install tesseract-ocr`) or an unverifiable PATH lookup on Render's native
-Python runtime -- EasyOCR's model weights are pulled from PyPI/its own CDN at first use and
-cached under the process's home directory, no OS package manager involved. Trade-off, stated
-plainly: Tesseract has broader Indic-script language-pack coverage than EasyOCR's supported
-list (https://www.jaided.ai/easyocr/) -- if a document language this hospital needs isn't in
-that list, this module will only extract the languages actually configured in OCR_LANGUAGES.
+OCR engine: docTR (pure pip install -- torch + torchvision, no system package). Switched from
+Tesseract specifically to drop the system-binary dependency that required either a Docker build
+step (`apt-get install tesseract-ocr`) or an unverifiable PATH lookup on Render's native Python
+runtime -- docTR's model weights download from Hugging Face at first use and cache under the
+process's home directory, no OS package manager involved. Chosen over EasyOCR/RapidOCR/PaddleOCR
+per this repo's own measured comparison (see OCR_BENCHMARK.md): docTR is the closest match to
+Tesseract's accuracy (81.72% vs. 82.71%) of any pip-only engine tested, at a latency (~11s/page
+on the benchmark machine) that's still well inside the 30s/page production timeout -- EasyOCR
+was slower and less accurate, PaddleOCR matched accuracy but took 190s/page and had Windows
+install issues, RapidOCR was both slower and less accurate. Trade-off, stated plainly: docTR's
+pretrained recognition model targets Latin-script text; unlike Tesseract or EasyOCR, it does not
+offer a per-language model or language-code setting, so it is not a fit for documents in
+non-Latin scripts (e.g. Devanagari). All the benchmark's source documents were English.
 """
 from __future__ import annotations
 
@@ -17,37 +22,38 @@ import threading
 from datetime import datetime
 from typing import Any
 
-_reader = None
-_reader_lock = threading.Lock()
+_predictor = None
+_predictor_lock = threading.Lock()
 
 
-def _get_reader():
-    """Lazy singleton: EasyOCR's Reader() loads model weights (~4s the first time, cached to
-    disk after) -- built once per process on first real OCR call, not at import time, so a
-    deployment that never actually uses OCR doesn't pay that cost on every startup."""
-    global _reader
-    if _reader is None:
-        with _reader_lock:
-            if _reader is None:
-                import easyocr
-                from .config import settings
-                languages = [lang.strip() for lang in settings.OCR_LANGUAGES.split(",") if lang.strip()] or ["en"]
-                _reader = easyocr.Reader(languages, gpu=False)
-    return _reader
+def _get_predictor():
+    """Lazy singleton: docTR's ocr_predictor() loads model weights (a few seconds the first
+    time, cached to disk after) -- built once per process on first real OCR call, not at import
+    time, so a deployment that never actually uses OCR doesn't pay that cost on every startup."""
+    global _predictor
+    if _predictor is None:
+        with _predictor_lock:
+            if _predictor is None:
+                from doctr.models import ocr_predictor
+                _predictor = ocr_predictor(pretrained=True)
+    return _predictor
 
 
 def _run_ocr(image) -> str:
-    """image: a PIL.Image. Returns extracted text, one line per detected text region.
-    Deliberately paragraph=False (EasyOCR's default): paragraph=True merges vertically-close
-    lines into one run-on string, which breaks _clinical_signals()'s regex parser below --
-    that parser identifies a field (e.g. "Medications: ...") by it starting its own line, the
-    same "Label: value" per-line structure Tesseract's line-oriented output always preserved.
-    Reading order follows EasyOCR's own detection order, not strictly guaranteed top-to-bottom
-    for complex layouts, but adequate for the mostly-linear clinical report layouts this module
-    targets."""
+    """image: a PIL.Image. Returns extracted text, one line per detected text line, words
+    space-joined within a line -- the same "Label: value" per-line structure
+    _clinical_signals()'s regex parser below depends on (it identifies a field, e.g.
+    "Medications: ...", by it starting its own line). docTR's `.export()` groups words into
+    lines/blocks/pages already in reading order, so no extra sorting is needed."""
     import numpy as np
-    reader = _get_reader()
-    lines = reader.readtext(np.array(image.convert("RGB")), detail=0, paragraph=False)
+    predictor = _get_predictor()
+    exported = predictor([np.array(image.convert("RGB"))]).export()
+    lines = [
+        " ".join(word["value"] for word in line["words"])
+        for page in exported["pages"]
+        for block in page["blocks"]
+        for line in block["lines"]
+    ]
     return "\n".join(lines).strip()
 
 
@@ -100,7 +106,7 @@ def extract_document(content: bytes, content_type: str) -> dict[str, Any]:
                     pix = doc[index].get_pixmap(matrix=pymupdf.Matrix(2.2, 2.2), alpha=False)
                     image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
                     ocr_by_page[index] = _run_ocr(image)
-                engines.append("easyocr")
+                engines.append("doctr")
             except Exception as exc:
                 # Native pages remain useful; fail only when the complete document has no text.
                 if not any(native):
@@ -115,7 +121,7 @@ def extract_document(content: bytes, content_type: str) -> dict[str, Any]:
             image = Image.open(io.BytesIO(content))
             text = _run_ocr(image)
             page_text = [{"page": 1, "text": text, "method": "ocr"}]
-            engines.append("easyocr")
+            engines.append("doctr")
         except Exception as exc:
             raise RuntimeError(f"Image OCR failed: {exc}") from exc
 

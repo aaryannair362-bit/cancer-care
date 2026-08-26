@@ -44,7 +44,7 @@ def test_scanned_pdf_uses_ocr_fallback_without_crashing():
 
     assert "Breast carcinoma" in result["text"]
     assert result["pages"][0]["method"] == "ocr"
-    assert result["engine"] == "pypdf+easyocr"
+    assert result["engine"] == "pypdf+doctr"
 
 
 @pytest.fixture
@@ -133,7 +133,7 @@ def test_ocr_failure_keeps_original_for_manual_review(client, users, auth_header
     from app.routers import patient_documents
     station, doctor, _, _ = users
     patient = _patient(client, station, auth_headers)
-    monkeypatch.setattr(patient_documents, "extract_document", lambda *_: (_ for _ in ()).throw(RuntimeError("Tesseract unavailable")))
+    monkeypatch.setattr(patient_documents, "extract_document", lambda *_: (_ for _ in ()).throw(RuntimeError("OCR engine unavailable")))
     response = client.post(f"/api/patients/{patient['id']}/documents", files={"file": ("scan.png", b"PNG bytes", "image/png")}, headers=auth_headers(station))
     assert response.status_code == 201
     assert response.json()["ocr_status"] == "NeedsReview"

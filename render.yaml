@@ -46,10 +46,6 @@ services:
         value: "true"
       - key: MAX_PATIENT_DOCUMENT_MB
         value: "25"
-      # EasyOCR language codes (see https://www.jaided.ai/easyocr for the supported list),
-      # comma-separated -- NOT Tesseract's "eng"-style codes.
-      - key: OCR_LANGUAGES
-        value: en
       # First Admin account, auto-seeded on a fresh (empty) database at startup -- see
       # backend/app/main.py's create_default_user(). Leave both blank to skip the seed and
       # register the first Admin manually via POST /api/auth/register instead.

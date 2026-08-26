@@ -74,8 +74,8 @@ uvicorn backend.app.main:app --reload
 
 Visit `http://localhost:8000` (the login page is served at `/`). See `.env.example` (or
 `backend/.env`, gitignored) for required environment variables — at minimum `DATABASE_URL` and
-`SECRET_KEY`; `GROQ_API_KEY` is required for OPD voice drafting. Document OCR (`easyocr`) needs
-no extra setup — it's a pure Python dependency already in `requirements.txt`.
+`SECRET_KEY`; `GROQ_API_KEY` is required for OPD voice drafting. Document OCR (`python-doctr`)
+needs no extra setup — it's a pure Python dependency already in `requirements.txt`.
 
 ### Tests
 

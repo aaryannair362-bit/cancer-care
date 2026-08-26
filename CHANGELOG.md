@@ -112,22 +112,28 @@ passing: the "Reject" button in the document-verification workspace called a `re
 function that was never defined anywhere in the file (the backend endpoint already existed
 with no caller) -- implemented, mirroring the existing `acceptFact()`.
 
-### Cross-platform OCR (Tesseract path resolution)
+### OCR engine: Tesseract replaced with docTR (drops the Docker/system-package dependency)
 
-`ocr_service.py` fell back to a hardcoded Windows path
-(`C:\Program Files\Tesseract-OCR\tesseract.exe`) when `TESSERACT_CMD` wasn't set -- silently
-non-functional on Render/Linux with no clear error. Added `_resolve_tesseract_cmd()`: explicit
-`TESSERACT_CMD` config, then `shutil.which("tesseract")` (works on any platform where the
-system package is installed and on `PATH`), then the Windows path as a last-resort local-dev
-convenience, then `None` (letting pytesseract raise its own clear `TesseractNotFoundError`
-instead of this silently doing nothing).
+`ocr_service.py` originally called `pytesseract`, which needs the `tesseract-ocr` system
+binary -- not installable via `pip`, and Tesseract's own path resolution fell back to a
+hardcoded Windows path (`C:\Program Files\Tesseract-OCR\tesseract.exe`) when `TESSERACT_CMD`
+wasn't set, silently non-functional on Render/Linux with no clear error. Rather than fix path
+resolution and carry a Docker build step (`apt-get install tesseract-ocr`) into production,
+replaced the engine outright with docTR (`python-doctr[torch]`) -- pure `pip install`, no
+system package, no Docker. Engine choice is backed by a real local benchmark comparing
+Tesseract/docTR/EasyOCR/RapidOCR/PaddleOCR on this repo's own documents; see
+`OCR_BENCHMARK.md` for the measured accuracy/latency numbers and the reasoning. `TESSERACT_CMD`
+and `OCR_LANGUAGES` config settings removed (docTR needs neither: no external binary to locate,
+and its pretrained recognizer has no per-language model to select). `ocr_service.py`'s
+`extract_document()` return shape, `_clinical_signals()` parsing, and every caller
+(`patient_documents.py`, `routers/cca.py`) are unchanged.
 
 ### Deployment configuration added (previously none existed in-repo)
 
-Added `Dockerfile` (installs the system `tesseract-ocr` package `pip` cannot install),
-`render.yaml` (Render Blueprint: env var list, health check, Docker runtime), `.env.example`
-(every setting `config.py` reads, documented), and fixed `.gitignore`'s `.env*` pattern, which
-was also silently excluding `.env.example` itself from version control.
+Added `render.yaml` (Render Blueprint: native Python runtime, build/start commands, env var
+list, health check -- no Docker, since every dependency including OCR now installs via `pip`
+alone), `.env.example` (every setting `config.py` reads, documented), and fixed `.gitignore`'s
+`.env*` pattern, which was also silently excluding `.env.example` itself from version control.
 
 ### Documentation drift
 

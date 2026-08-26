@@ -2,11 +2,22 @@
 
 ## Decision
 
-Use embedded PDF text first and Tesseract 5.4 LSTM as the fallback for scanned
-pages and image uploads. On the supplied documents and the target Windows CPU,
-Tesseract tied the best measured character accuracy and was by far the fastest
-turnkey recognizer. This decision is based on the benchmark below, not on a
-generic claim that one OCR engine is universally best.
+Use embedded PDF text first and docTR 1.1 (`fast_base` + `crnn_vgg16_bn`) as the
+fallback for scanned pages and image uploads.
+
+Tesseract remains the single fastest and jointly most accurate engine measured
+below, but it requires a system binary (`apt-get install tesseract-ocr` or
+equivalent) that this deployment's constraints rule out: the target is Render's
+native Python runtime, not a Docker build, specifically to avoid the
+system-package/Docker maintenance burden (see `render.yaml`'s header comment).
+Of the remaining pip-installable engines, docTR is the closest to Tesseract's
+accuracy (81.72% vs. 82.71%) at a latency (~11.3s/page on the benchmark
+machine) still well inside the 30-second per-page production timeout. EasyOCR
+was both slower and less accurate; PaddleOCR matched Tesseract's accuracy but
+took 190s/page and hit a Windows-specific runtime error on its default path;
+RapidOCR was both slower and less accurate than docTR. This decision is based
+on the benchmark below, not on a generic claim that one OCR engine is
+universally best.
 
 ## Test method
 
@@ -84,19 +95,29 @@ an unconfigured framework as a meaningful benchmark result.
 
 - PDF pages with at least 40 embedded characters use `pypdf` directly. All
   supplied role PDFs are text-native, so they normally incur no OCR at all.
-- Sparse/image-only pages render at 220 DPI and use Tesseract LSTM with
-  automatic page segmentation.
-- Each OCR page has a 30-second timeout.
+- Sparse/image-only pages render at 220 DPI and use docTR's pretrained
+  detector + recognizer (see `ocr_service.py`).
+- Each OCR page has a 30-second timeout, comfortably above docTR's measured
+  ~11.3s/page on the benchmark CPU.
 - OCR failure keeps the upload in `NeedsReview`; it never invents missing
   clinical facts or silently finalizes extracted information.
-- Deployments must install the Tesseract executable plus every language pack
-  configured by `OCR_LANGUAGES`.
+- No system package or language pack install is required -- docTR's model
+  weights are pulled from Hugging Face on first use and installed entirely
+  through `pip` (`python-doctr[torch]` in `requirements.txt`).
 
 ## Scope limitation
 
 These results apply to the supplied English, machine-printed PDFs on this CPU.
-Handwriting, photographed pages, multilingual scans, tables, and severely
-degraded faxes need a separate labelled corpus before changing the production
-engine. The benchmark's edit-distance score also penalizes differences in
-reading order, which is appropriate for the application's extracted-text use
-but is not a word-detection benchmark.
+Handwriting, photographed pages, tables, and severely degraded faxes need a
+separate labelled corpus before changing the production engine. The
+benchmark's edit-distance score also penalizes differences in reading order,
+which is appropriate for the application's extracted-text use but is not a
+word-detection benchmark.
+
+docTR's pretrained recognition model targets Latin-script text and, unlike
+Tesseract or EasyOCR, offers no per-language model or language-code setting.
+Documents in non-Latin scripts (e.g. Devanagari) are out of scope for this
+engine -- all benchmarked documents were English. If multilingual/Indic-script
+document OCR becomes a real requirement, that needs its own benchmark pass
+before picking an engine for it; it is not something this module currently
+handles.

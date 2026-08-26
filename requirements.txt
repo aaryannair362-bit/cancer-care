@@ -17,5 +17,6 @@ pypdf>=5.0.0
 PyMuPDF>=1.24.0
 Pillow>=10.0.0
 # Document OCR: pure pip install (torch/torchvision), no system package or Docker build step
-# required -- see ocr_service.py's module docstring for why this replaced pytesseract.
-easyocr>=1.7.2
+# required -- see ocr_service.py's module docstring and OCR_BENCHMARK.md for why this engine
+# was picked over Tesseract/EasyOCR/RapidOCR/PaddleOCR.
+python-doctr[torch]>=1.1.0

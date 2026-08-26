@@ -32,10 +32,6 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: str = os.getenv("ALLOWED_ORIGINS", "*")
     RATE_LIMIT_ENABLED: bool = True
     MAX_PATIENT_DOCUMENT_MB: int = 25
-    # EasyOCR language codes (comma-separated, e.g. "en,hi"), NOT Tesseract's "eng"-style codes
-    # -- see ocr_service.py's module docstring for why OCR moved off Tesseract, and
-    # https://www.jaided.ai/easyocr for the supported-language list.
-    OCR_LANGUAGES: str = os.getenv("OCR_LANGUAGES", "en")
     # Read by main.py's create_default_user() to auto-seed the first Admin account on a fresh
     # deploy (empty DB). Declared here so settings.ADMIN_EMAIL doesn't raise AttributeError --
     # it previously did on every single startup (caught by that function's broad except, so the

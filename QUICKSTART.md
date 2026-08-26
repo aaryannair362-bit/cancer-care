@@ -8,9 +8,9 @@ Get AIvana OS running locally in a few minutes.
 - A Groq API key if you want OPD voice-drafted consultations to work
   (`https://console.groq.com`). Everything else works without it.
 
-Document OCR (`easyocr`) needs no separate install — it's a normal pip dependency in
-`requirements.txt`. Its first real OCR call downloads model weights (~100MB, one-time, cached
-to disk afterward), so expect a pause the first time you upload a scanned document locally.
+Document OCR (`python-doctr`) needs no separate install — it's a normal pip dependency in
+`requirements.txt`. Its first real OCR call downloads model weights (one-time, cached to disk
+afterward), so expect a pause the first time you upload a scanned document locally.
 
 ## Setup
 
