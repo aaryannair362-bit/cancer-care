@@ -38,6 +38,13 @@ ADDITIVE_COLUMNS = [
     ("patients", "address", "TEXT"),
     ("patients", "id_proof_type", "VARCHAR(50)"),
     ("patients", "id_proof_number", "VARCHAR(100)"),
+    # Added to the Consultation model (POST /api/consultations' optional follow_up_of_id field)
+    # but never registered here, so GET /api/patients/{id}/case-summary's consultations query
+    # failed with "no such column: consultations.follow_up_of_id" on any pre-existing database.
+    ("consultations", "follow_up_of_id", "INTEGER"),
+    # Same gap on DrugBatch -- present on the model, never registered here.
+    ("drug_batches", "location", "VARCHAR(100) DEFAULT 'Main Store'"),
+    ("drug_batches", "purchase_order_line_id", "INTEGER"),
 ]
 
 

@@ -767,8 +767,8 @@
                     <!-- Wizard Stepper -->
                     <div class="wizard-stepper">
                         <div class="step-tab active" id="step-tab-1" data-label="Patient" onclick="goToWizardStep(1)">1 Patient</div>
-                        <div class="step-tab" id="step-tab-2" data-label="Referral" onclick="goToWizardStep(2)">2 Referral</div>
-                        <div class="step-tab" id="step-tab-3" data-label="Visit &amp; Appointment" onclick="goToWizardStep(3)">3 Visit &amp; Appointment</div>
+                        <div class="step-tab" id="step-tab-2" data-label="Visit &amp; Appointment" onclick="goToWizardStep(2)">2 Visit &amp; Appointment</div>
+                        <div class="step-tab" id="step-tab-3" data-label="Referral" onclick="goToWizardStep(3)">3 Referral</div>
                         <div class="step-tab" id="step-tab-4" data-label="Documents &amp; Consent" onclick="goToWizardStep(4)">4 Documents &amp; Consent</div>
                         <div class="step-tab" id="step-tab-5" data-label="Review" onclick="goToWizardStep(5)">5 Review</div>
                     </div>
@@ -1332,8 +1332,8 @@
 
         const WIZARD_STEP_SECTION_IDS = {
             1: ['wizard-section-1'],
-            2: ['wizard-section-2'],
-            3: ['wizard-section-3', 'wizard-section-3b'],
+            2: ['wizard-section-3', 'wizard-section-3b'],
+            3: ['wizard-section-2'],
             4: ['wizard-section-4', 'wizard-section-4b'],
             5: ['wizard-section-5', 'wizard-section-5b'],
         };
@@ -1429,7 +1429,7 @@
                 });
             });
 
-            const labels = ['Patient', 'Referral', 'Visit & Appointment', 'Documents & Consent', 'Review'];
+            const labels = ['Patient', 'Visit & Appointment', 'Referral', 'Documents & Consent', 'Review'];
             document.getElementById('wizard-step-subtitle').textContent = `Step ${stepNum} of 5 — ${labels[stepNum - 1]}`;
 
             document.querySelectorAll('.step-tab').forEach((tab, idx) => {
