@@ -833,8 +833,11 @@
             } catch (err) { statusEl.textContent = ''; toast(apiErrorMessage(err), 'error'); }
         }
 
+        let lastScribeMedications = [];
+        let lastDetectedLabTests = [];
+
         function renderDetectedMedications(medications) {
-            lastScribeMedications = medications || [];
+            if (medications) lastScribeMedications = medications;
             const container = document.getElementById('order-detected-medications');
             const medNote = document.getElementById('scribe-medications-note');
             if (medNote) {
@@ -843,31 +846,55 @@
                     : '';
             }
             if (!container) return;
+
+            let html = '';
             if (!lastScribeMedications.length) {
-                container.innerHTML = '<p style="color:var(--ink-500); font-size:12.5px; margin:0;">No medications detected in this transcript.</p>';
-                return;
-            }
-            container.innerHTML = 'Detected from transcript — checked prescriptions below will be saved with your consultation note:<br/>' +
-                '<div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:10px; margin-top:10px;">' +
-                lastScribeMedications.map((m, i) => {
-                    const name = escapeHtml(m.drugName || m.name || 'Medicine');
-                    const dose = escapeHtml(m.dosage || m.dose || '');
-                    const freq = escapeHtml(m.frequency || '');
-                    const dur = escapeHtml(m.duration || '');
-                    const inst = escapeHtml(m.instructions || '');
-                    return `
-                        <label style="display:flex; align-items:flex-start; gap:10px; background:#F8FAFC; border:1px solid var(--line); border-radius:var(--radius-md); padding:10px 12px; cursor:pointer;">
-                            <input type="checkbox" class="detected-medication-checkbox" value="${i}" checked style="margin-top:3px;" />
-                            <div style="flex:1;">
-                                <div style="font-weight:700; font-size:13px; color:var(--ink-900);">${name}</div>
-                                <div style="font-size:12px; color:var(--ink-600); margin-top:2px;">
-                                    ${dose ? dose : ''}${freq ? ' · ' + freq : ''}${dur ? ' · ' + dur : ''}
+                html = '<p style="color:var(--ink-500); font-size:12.5px; margin:0 0 10px 0;">No medications detected in transcript yet.</p>';
+            } else {
+                html = '<div style="font-size:12px; color:var(--ink-600); margin-bottom:8px;">Checked prescriptions below will be saved with your consultation note:</div>' +
+                    '<div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:10px; margin-bottom:12px;">' +
+                    lastScribeMedications.map((m, i) => {
+                        const name = escapeHtml(m.drugName || m.name || 'Medicine');
+                        const dose = escapeHtml(m.dosage || m.dose || '');
+                        const freq = escapeHtml(m.frequency || '');
+                        const dur = escapeHtml(m.duration || '');
+                        const inst = escapeHtml(m.instructions || '');
+                        return `
+                            <label style="display:flex; align-items:flex-start; gap:10px; background:#F8FAFC; border:1px solid var(--line); border-radius:var(--radius-md); padding:10px 12px; cursor:pointer;">
+                                <input type="checkbox" class="detected-medication-checkbox" value="${i}" checked style="margin-top:3px;" />
+                                <div style="flex:1;">
+                                    <div style="font-weight:700; font-size:13px; color:var(--ink-900);">${name}</div>
+                                    <div style="font-size:12px; color:var(--ink-600); margin-top:2px;">
+                                        ${dose ? dose : ''}${freq ? ' · ' + freq : ''}${dur ? ' · ' + dur : ''}
+                                    </div>
+                                    ${inst ? `<div style="font-size:11.5px; color:var(--ink-500); margin-top:2px;">${inst}</div>` : ''}
                                 </div>
-                                ${inst ? `<div style="font-size:11.5px; color:var(--ink-500); margin-top:2px;">${inst}</div>` : ''}
-                            </div>
-                        </label>
-                    `;
-                }).join('') + '</div>';
+                            </label>
+                        `;
+                    }).join('') + '</div>';
+            }
+            html += '<button type="button" class="btn-outline" style="font-size:12px; padding:6px 12px;" onclick="addManualMedication()">➕ Add Manual Medicine</button>';
+            container.innerHTML = html;
+        }
+
+        function addManualMedication() {
+            const drugName = prompt("Enter Medicine / Drug Name (e.g., Paracetamol 500mg):");
+            if (!drugName || !drugName.trim()) return;
+            const dosage = prompt("Enter Dosage (e.g., 500mg, 1 tablet):") || "";
+            const frequency = prompt("Enter Frequency (e.g., TDS, Twice daily):") || "";
+            const duration = prompt("Enter Duration (e.g., 5 days):") || "";
+
+            const newMed = {
+                drugName: drugName.trim(),
+                dosage: dosage.trim(),
+                frequency: frequency.trim(),
+                duration: duration.trim(),
+                instructions: "Manually added by clinician"
+            };
+
+            lastScribeMedications.push(newMed);
+            renderDetectedMedications();
+            toast(`Added "${drugName.trim()}" to prescriptions list`, 'success');
         }
 
         function getSelectedMedications() {
@@ -886,20 +913,40 @@
         }
 
         function renderDetectedLabTests(labTests, indicationContext) {
+            if (labTests) lastDetectedLabTests = labTests;
             const container = document.getElementById('order-detected-tests');
-            if (!labTests.length) {
-                container.innerHTML = 'No lab tests detected in this transcript.';
-                return;
+            if (!container) return;
+
+            let html = '';
+            if (!lastDetectedLabTests.length) {
+                html = '<p style="color:var(--ink-500); font-size:12.5px; margin:0 0 10px 0;">No lab tests detected in transcript yet.</p>';
+            } else {
+                html = '<div style="font-size:12px; color:var(--ink-600); margin-bottom:8px;">Checked lab tests below will be raised when you click Raise Order:</div>' +
+                    '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:12px;">' +
+                    lastDetectedLabTests.map((t, i) => `
+                        <label style="display:inline-flex; align-items:center; gap:5px; background:#EFF6FF; border:1px solid var(--blue-badge-bg); border-radius:999px; padding:5px 12px; cursor:pointer;">
+                            <input type="checkbox" class="detected-lab-test-checkbox" value="${escapeHtml(t)}" checked />
+                            ${escapeHtml(t)}
+                        </label>
+                    `).join('') + '</div>';
             }
-            container.innerHTML = 'Detected from transcript — all checked tests are raised together when you click Raise Order:<br/>' +
-                '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-top:8px;">' +
-                labTests.map((t, i) => `
-                    <label style="display:inline-flex; align-items:center; gap:5px; background:#EFF6FF; border:1px solid var(--blue-badge-bg); border-radius:999px; padding:5px 12px; cursor:pointer;">
-                        <input type="checkbox" class="detected-lab-test-checkbox" value="${escapeHtml(t)}" checked />
-                        ${escapeHtml(t)}
-                    </label>
-                `).join('') + '</div>';
-            document.getElementById('order-indication').value = indicationContext;
+            html += '<button type="button" class="btn-outline" style="font-size:12px; padding:6px 12px;" onclick="addManualLabTest()">➕ Add Manual Lab Test</button>';
+            container.innerHTML = html;
+            if (indicationContext && document.getElementById('order-indication')) {
+                document.getElementById('order-indication').value = indicationContext;
+            }
+        }
+
+        function addManualLabTest() {
+            const testName = prompt("Enter Lab Test Name (e.g., CBC, Serum Creatinine, PET-CT):");
+            if (!testName || !testName.trim()) return;
+
+            const name = testName.trim();
+            if (!lastDetectedLabTests.includes(name)) {
+                lastDetectedLabTests.push(name);
+            }
+            renderDetectedLabTests();
+            toast(`Added "${name}" to lab tests list`, 'success');
         }
 
         async function submitConsultationNote() {
