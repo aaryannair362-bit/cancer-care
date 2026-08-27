@@ -198,6 +198,7 @@
     </div>
 
     <script src="/static/js/api.js"></script>
+    <script src="/static/js/voice-capture.js"></script>
     <script>
         const ccaUser = Auth.requirePage(['CCARadiologist', 'Doctor', 'Admin']);
         const CCA_API = '/cca';
@@ -346,6 +347,121 @@
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
         }
 
+        let scribeVoiceRecorder = null;
+        let scribeTranscriptionProvider = 'whisper';
+        let lastScribeMedications = [];
+
+        async function initScribeRecorder() {
+            if (typeof createVoiceRecorder !== 'function') return;
+            try {
+                const provider = await Api.get('/transcribe/provider');
+                scribeTranscriptionProvider = provider.provider === 'sarvam' ? 'sarvam' : 'whisper';
+            } catch (err) { scribeTranscriptionProvider = 'whisper'; }
+            scribeVoiceRecorder = createVoiceRecorder({ apiBase: '/api', getAuthToken: () => Auth.getAccessToken(), provider: scribeTranscriptionProvider });
+        }
+
+        async function startScribeRecording() {
+            const statusEl = document.getElementById('scribe-mic-status');
+            if (!scribeVoiceRecorder) await initScribeRecorder();
+            if (!scribeVoiceRecorder || !scribeVoiceRecorder.isSupported()) {
+                if (statusEl) statusEl.textContent = '❌ Microphone not supported — type transcript manually.';
+                return;
+            }
+            try {
+                await scribeVoiceRecorder.start();
+                document.getElementById('scribe-start-btn').style.display = 'none';
+                document.getElementById('scribe-stop-btn').style.display = 'inline-block';
+                if (statusEl) statusEl.textContent = '🔴 Listening... Click Stop when finished speaking.';
+            } catch (err) {
+                if (statusEl) statusEl.textContent = `❌ ${err.message || 'Mic access denied'}`;
+            }
+        }
+
+        async function stopScribeRecording() {
+            const statusEl = document.getElementById('scribe-mic-status');
+            document.getElementById('scribe-start-btn').style.display = 'inline-block';
+            document.getElementById('scribe-stop-btn').style.display = 'none';
+            if (!scribeVoiceRecorder) return;
+            if (statusEl) statusEl.textContent = 'Transcribing...';
+            try {
+                const transcript = await scribeVoiceRecorder.stop();
+                document.getElementById('scribe-transcript').value = transcript;
+                if (statusEl) statusEl.textContent = transcript ? '✅ Transcribed. Review below, then click Generate AI Draft.' : 'No speech detected — type manually.';
+            } catch (err) {
+                if (statusEl) statusEl.textContent = `⚠️ ${err.message || 'Transcription failed'} — type transcript manually.`;
+            }
+        }
+
+        async function generateAiDraftForRadiology() {
+            const statusEl = document.getElementById('scribe-status');
+            const transcript = document.getElementById('scribe-transcript').value.trim();
+            if (transcript.length < 10) { toast('Transcript is too short to draft from', 'error'); return; }
+            if (statusEl) statusEl.textContent = 'Generating AI draft...';
+            try {
+                const data = await Api.post('/scribe', { transcript });
+                if (document.getElementById('img-findings') && (data.hpi || data.chiefComplaint)) {
+                    const findingsText = [data.chiefComplaint, data.hpi].filter(Boolean).join('\n');
+                    if (findingsText) document.getElementById('img-findings').value = findingsText;
+                }
+                if (document.getElementById('img-impression') && (data.primaryDiagnosis || data.advice)) {
+                    const impressionText = [data.primaryDiagnosis, data.advice].filter(Boolean).join('\n');
+                    if (impressionText) document.getElementById('img-impression').value = impressionText;
+                }
+                renderDetectedMedications(data.medications || []);
+                renderDetectedLabTests(data.labTests || [], data.primaryDiagnosis || '');
+                if (statusEl) statusEl.textContent = '✅ AI draft generated — review Findings, Impression, Medications, and Labs.';
+                toast('AI draft generated', 'success');
+            } catch (err) { if (statusEl) statusEl.textContent = ''; toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function renderDetectedMedications(medications) {
+            lastScribeMedications = medications || [];
+            const container = document.getElementById('order-detected-medications');
+            if (!container) return;
+            if (!lastScribeMedications.length) {
+                container.innerHTML = '<p style="color:var(--ink-500); font-size:12.5px; margin:0;">No medications detected in this transcript.</p>';
+                return;
+            }
+            container.innerHTML = 'Detected from dictation transcript — checked prescriptions below will be captured:<br/>' +
+                '<div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:10px; margin-top:10px;">' +
+                lastScribeMedications.map((m, i) => {
+                    const name = escapeHtml(m.drugName || m.name || 'Medicine');
+                    const dose = escapeHtml(m.dosage || m.dose || '');
+                    const freq = escapeHtml(m.frequency || '');
+                    const dur = escapeHtml(m.duration || '');
+                    const inst = escapeHtml(m.instructions || '');
+                    return `
+                        <label style="display:flex; align-items:flex-start; gap:10px; background:#F8FAFC; border:1px solid var(--line); border-radius:var(--radius-md); padding:10px 12px; cursor:pointer;">
+                            <input type="checkbox" class="detected-medication-checkbox" value="${i}" checked style="margin-top:3px;" />
+                            <div style="flex:1;">
+                                <div style="font-weight:700; font-size:13px; color:var(--ink-900);">${name}</div>
+                                <div style="font-size:12px; color:var(--ink-600); margin-top:2px;">
+                                    ${dose ? dose : ''}${freq ? ' · ' + freq : ''}${dur ? ' · ' + dur : ''}
+                                </div>
+                                ${inst ? `<div style="font-size:11.5px; color:var(--ink-500); margin-top:2px;">${inst}</div>` : ''}
+                            </div>
+                        </label>
+                    `;
+                }).join('') + '</div>';
+        }
+
+        function renderDetectedLabTests(labTests, indicationContext) {
+            const container = document.getElementById('order-detected-tests');
+            if (!container) return;
+            if (!labTests.length) {
+                container.innerHTML = '<p style="color:var(--ink-500); font-size:12.5px; margin:0;">No lab tests detected in this transcript.</p>';
+                return;
+            }
+            container.innerHTML = 'Detected from dictation transcript:<br/>' +
+                '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-top:8px;">' +
+                labTests.map((t, i) => `
+                    <label style="display:inline-flex; align-items:center; gap:5px; background:#EFF6FF; border:1px solid var(--blue-badge-bg); border-radius:999px; padding:5px 12px; cursor:pointer;">
+                        <input type="checkbox" class="detected-lab-test-checkbox" value="${escapeHtml(t)}" checked />
+                        ${escapeHtml(t)}
+                    </label>
+                `).join('') + '</div>';
+        }
+
         async function openImagingOrder(orderId) {
             const detail = document.getElementById('imaging-order-detail');
             try {
@@ -361,13 +477,60 @@
                     </div>
                     <button class="btn-outline" onclick="submitImagingSchedule(${orderId})">📅 Schedule</button>
                     <hr style="margin:18px 0; border:none; border-top:1px solid var(--line);" />
+
+                    <!-- AI Scribe Dictation Panel for Radiologist -->
+                    <div style="background:var(--bg-card-subtle); border:1px solid var(--line); border-radius:var(--radius-md); padding:16px; margin-bottom:18px;">
+                        <div class="section-title" style="font-size:14px; margin-bottom:4px;">AI Scribe (Voice Dictation)</div>
+                        <div class="section-sub" style="margin-bottom:10px;">Dictate findings or paste text to auto-populate Findings, Impression, Medications, and Labs.</div>
+                        <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
+                            <button class="btn-navy" id="scribe-start-btn" onclick="startScribeRecording()">🎤 Start Recording</button>
+                            <button class="btn-outline" id="scribe-stop-btn" onclick="stopScribeRecording()" style="display:none;">⏹ Stop &amp; Transcribe</button>
+                            <span id="scribe-mic-status" style="font-size:12px; color:var(--ink-500);"></span>
+                        </div>
+                        <div class="form-group" style="margin-bottom:10px;">
+                            <textarea id="scribe-transcript" class="form-textarea" rows="3" placeholder="Speak using Start Recording, or type/paste dictation transcript here..."></textarea>
+                        </div>
+                        <button class="btn-outline" onclick="generateAiDraftForRadiology()">✨ Generate AI Draft</button>
+                        <div id="scribe-status" style="font-size:12px; margin-top:6px; color:var(--ink-500);"></div>
+                    </div>
+
                     <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Findings</label><textarea id="img-findings" class="form-textarea" rows="3">${escapeHtml(draft ? draft.findings_text || '' : '')}</textarea></div>
                     <div class="form-group" style="margin-bottom:14px;"><label class="form-label">Impression</label><textarea id="img-impression" class="form-textarea" rows="2">${escapeHtml(draft ? draft.impression || '' : '')}</textarea></div>
+
+                    <!-- Prescribed Medicines / Prescriptions section -->
+                    <div style="background:var(--bg-card-subtle); border:1px solid var(--line); border-radius:var(--radius-md); padding:14px; margin-bottom:14px;">
+                        <div style="font-size:13px; font-weight:700; color:var(--ink-900); margin-bottom:4px;">Prescribed Medicines / Prescriptions</div>
+                        <div style="font-size:11.5px; color:var(--ink-500); margin-bottom:8px;">Medications mentioned during dictation/transcript.</div>
+                        <div id="order-detected-medications" style="font-size:12px; color:var(--ink-500);">No medications detected yet. Generate an AI draft to populate.</div>
+                    </div>
+
+                    <!-- Detected Lab Tests section -->
+                    <div style="background:var(--bg-card-subtle); border:1px solid var(--line); border-radius:var(--radius-md); padding:14px; margin-bottom:16px;">
+                        <div style="font-size:13px; font-weight:700; color:var(--ink-900); margin-bottom:4px;">Detected Lab Tests / Follow-up Workup</div>
+                        <div style="font-size:11.5px; color:var(--ink-500); margin-bottom:8px;">Follow-up lab tests mentioned during dictation/transcript.</div>
+                        <div id="order-detected-tests" style="font-size:12px; color:var(--ink-500);">No lab tests detected yet. Generate an AI draft to populate.</div>
+                    </div>
+
                     <button class="btn-outline" onclick="submitImagingReport(${orderId})">💾 Save Draft</button>
                     ${draft ? `<button class="btn-navy" onclick="submitImagingFinalize(${draft.id})">✍️ Finalize Report</button>` : ''}
                     <div id="imaging-detail-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
                 `;
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function getSelectedMedications() {
+            const checkboxes = document.querySelectorAll('.detected-medication-checkbox');
+            if (!checkboxes.length) return lastScribeMedications;
+            const selected = [];
+            checkboxes.forEach(cb => {
+                if (cb.checked) {
+                    const idx = parseInt(cb.value, 10);
+                    if (lastScribeMedications[idx]) {
+                        selected.push(lastScribeMedications[idx]);
+                    }
+                }
+            });
+            return selected;
         }
 
         async function submitImagingSchedule(orderId) {
@@ -379,8 +542,13 @@
         }
         async function submitImagingReport(orderId) {
             try {
-                await Api.post(`${CCA_API}/imaging/orders/${orderId}/report`, { findings_text: document.getElementById('img-findings').value, impression: document.getElementById('img-impression').value });
-                toast('Report draft saved', 'success');
+                const meds = getSelectedMedications();
+                await Api.post(`${CCA_API}/imaging/orders/${orderId}/report`, {
+                    findings_text: document.getElementById('img-findings').value,
+                    impression: document.getElementById('img-impression').value,
+                    structured_report: { medications: meds }
+                });
+                toast('Report draft saved with prescribed medicines', 'success');
                 openImagingOrder(orderId);
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }

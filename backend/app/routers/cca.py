@@ -17,6 +17,7 @@ from ..auth import (
     get_current_user, is_admin, is_doctor, is_cca_oncologist, is_cca_front_desk,
     is_cca_nurse_navigator, is_cca_medical_oncologist, is_cca_surgical_oncologist,
     is_cca_radiation_oncologist, is_cca_patient_liaison, is_cca_infusion_nurse,
+    is_cca_radiologist,
 )
 from ..config import settings
 from ..ocr_service import extract_document
