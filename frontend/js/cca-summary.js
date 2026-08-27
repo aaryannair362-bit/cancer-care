@@ -192,3 +192,79 @@ async function renderCaseSummaryPanel(containerId, patientId) {
     container.innerHTML = header + documentsSection + factsSection + encountersSection + journeySection +
         `<p style="font-size:11.5px; color:var(--ink-500); margin-top:-8px;">${escapeHtml(summary.disclaimer)}</p>`;
 }
+
+/*
+ * Patient Summary -- the compact, doctor-facing "what's the current clinical strategy and
+ * what's next" view (architecture doc section 14). Two SEPARATE cards, never collapsed into
+ * one paragraph: "Active Treatment Plan" (pulled from the signed Treatment Plan) and
+ * "Care Plan / Next Steps" (pulled from the Care Plan's open tasks). Meant to be embedded
+ * where a doctor already is -- the Consultation view's patient banner -- rather than becoming
+ * its own disconnected nav item (architecture doc: "Patient Summary opens from
+ * Patients/Consultation rather than being a disconnected duplicate module").
+ *
+ * Usage: same setup as renderCaseSummaryPanel; call `renderPatientSummaryCards('container-id', patientId)`.
+ */
+const TP_SUMMARY_BADGE = { DRAFT: 'badge-amber', PROPOSED: 'badge-amber', ACTIVE: 'badge-green', ON_HOLD: 'badge-amber', COMPLETED: 'badge-blue', SUPERSEDED: 'badge-blue', CANCELLED: 'badge-rose' };
+const CP_SUMMARY_BADGE = { ACTIVE: 'badge-green', BLOCKED: 'badge-rose', ON_HOLD: 'badge-amber', COMPLETED: 'badge-blue', CANCELLED: 'badge-rose' };
+const TASK_SUMMARY_BADGE = { OPEN: 'badge-amber', ACKNOWLEDGED: 'badge-blue', BLOCKED: 'badge-rose', ESCALATED: 'badge-rose', RESOLVED: 'badge-green' };
+
+async function renderPatientSummaryCards(containerId, patientId) {
+    _ccaSummaryEnsureStyles();
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    if (!patientId) { container.innerHTML = ''; return; }
+
+    container.innerHTML = `<div class="section-card"><p class="cca-sum-empty">Loading patient summary…</p></div>`;
+
+    let plans = [], carePlan = null, tasks = [];
+    try {
+        const [planData, careData, taskData] = await Promise.all([
+            Api.get(`/cca/patients/${patientId}/treatment-plans`).catch(() => ({ treatment_plans: [] })),
+            Api.get(`/cca/care-plans/current?patient_id=${patientId}`).catch(() => ({ care_plan: null })),
+            Api.get(`/cca/patients/${patientId}/tasks`).catch(() => ({ tasks: [] })),
+        ]);
+        plans = planData.treatment_plans || [];
+        carePlan = careData.care_plan || null;
+        tasks = taskData.tasks || [];
+    } catch (err) {
+        container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`;
+        return;
+    }
+
+    const activePlan = plans.find(p => p.status === 'ACTIVE') || plans.find(p => p.status === 'ON_HOLD') || null;
+
+    const treatmentCard = `
+        <div class="section-card" style="margin-bottom:0;">
+            <div class="section-head">
+                <div class="section-title" style="font-size:14px;">Active Treatment Plan</div>
+                ${activePlan ? `<span class="badge ${TP_SUMMARY_BADGE[activePlan.status] || 'badge-blue'}">${escapeHtml(activePlan.status)}</span>` : ''}
+            </div>
+            ${activePlan ? `
+                <div class="cca-sum-row-title">${escapeHtml(activePlan.modality)} · ${escapeHtml(activePlan.intent || '—')}</div>
+                <div class="cca-sum-row-sub" style="margin-top:2px;">${escapeHtml(activePlan.protocol_name || 'Protocol not yet recorded')}</div>
+                <div class="cca-sum-row-sub" style="margin-top:6px;">Cycle ${activePlan.completed_sessions || 0} of ${activePlan.planned_sessions || '—'} · Signed by ${escapeHtml(activePlan.signer_email || '—')}</div>
+                ${activePlan.guideline_review_required ? `<div class="cca-sum-row-sub" style="margin-top:6px; color:var(--amber-badge-text);">⚠ Guideline review required: ${escapeHtml(activePlan.guideline_review_reason || 'newer guideline version published')}</div>` : ''}
+            ` : `<p class="cca-sum-empty">No active Treatment Plan on record yet.</p>`}
+        </div>`;
+
+    const openTasks = (tasks || []).filter(t => t.status !== 'RESOLVED').slice(0, 5);
+    const careCard = `
+        <div class="section-card" style="margin-bottom:0;">
+            <div class="section-head">
+                <div class="section-title" style="font-size:14px;">Care Plan / Next Steps</div>
+                ${carePlan ? `<span class="badge ${CP_SUMMARY_BADGE[carePlan.status] || 'badge-blue'}">${escapeHtml(carePlan.status)}</span>` : ''}
+            </div>
+            ${carePlan ? `<div class="cca-sum-row-sub" style="margin-bottom:8px;">Intent: ${escapeHtml(carePlan.intent || '—')} · v${carePlan.version_no}</div>` : `<p class="cca-sum-empty" style="margin-bottom:8px;">No Care Plan on record yet.</p>`}
+            ${openTasks.length ? openTasks.map(t => `
+                <div class="cca-sum-row" style="padding:6px 0;">
+                    <div class="cca-sum-row-main">
+                        <div class="cca-sum-row-title" style="font-size:12.5px;">${escapeHtml(t.patient_visible_note || t.description)}</div>
+                        <div class="cca-sum-row-sub">${escapeHtml(t.owner_name || 'Unassigned')} · due ${t.due_date ? fmtDateTime(t.due_date) : '—'}</div>
+                    </div>
+                    <span class="badge ${TASK_SUMMARY_BADGE[t.status] || 'badge-blue'}" style="font-size:10px;">${escapeHtml(t.status)}</span>
+                </div>
+            `).join('') : '<p class="cca-sum-empty">No open tasks.</p>'}
+        </div>`;
+
+    container.innerHTML = `<div class="grid-2" style="align-items:start;">${treatmentCard}${careCard}</div>`;
+}

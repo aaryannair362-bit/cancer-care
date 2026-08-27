@@ -51,6 +51,7 @@ const ALL_NAV_ITEMS = [
     ]},
     { group: 'Delivery & Surveillance', items: [
         { tab: 'careplan', icon: '🛡️', label: 'Live Care Plan' },
+        { tab: 'treatmentplan', icon: '🧬', label: 'Treatment Plan' },
         { tab: 'treatment_day', icon: '💉', label: 'Treatment Clearance' },
         { tab: 'response', icon: '📈', label: 'Response (RECIST 1.1)' },
         { tab: 'journey', icon: '🗺️', label: 'Timeline Journey' },
@@ -77,7 +78,8 @@ const ROLE_NAV_ITEMS = {
             { tab: 'opd', icon: '👨‍⚕️', label: 'Consultation' },
         ]},
         { group: 'Clinical Intelligence', items: [
-            { tab: 'careplan', icon: '🛡️', label: 'Treatment Plan' },
+            { tab: 'careplan', icon: '🛡️', label: 'Care Plan' },
+            { tab: 'treatmentplan', icon: '🧬', label: 'Treatment Plan' },
             { tab: 'nexus', icon: '⚡', label: 'NEXUS' },
             { tab: 'nccn', icon: '📜', label: 'Guideline Pathway' },
             { tab: 'staging', icon: '🎯', label: 'Staging' },
@@ -90,7 +92,8 @@ const ROLE_NAV_ITEMS = {
             { tab: 'opd', icon: '👨‍⚕️', label: 'Consultation' },
         ]},
         { group: 'Clinical Intelligence', items: [
-            { tab: 'careplan', icon: '🛡️', label: 'Surgical Plan' },
+            { tab: 'careplan', icon: '🛡️', label: 'Care Plan' },
+            { tab: 'treatmentplan', icon: '🧬', label: 'Surgical Plan' },
             { tab: 'nexus', icon: '⚡', label: 'NEXUS' },
             { tab: 'nccn', icon: '📜', label: 'Guideline Pathway' },
             { tab: 'staging', icon: '🎯', label: 'Staging' },
@@ -103,7 +106,8 @@ const ROLE_NAV_ITEMS = {
             { tab: 'opd', icon: '👨‍⚕️', label: 'Consultation' },
         ]},
         { group: 'Clinical Intelligence', items: [
-            { tab: 'careplan', icon: '🛡️', label: 'Radiation Plan' },
+            { tab: 'careplan', icon: '🛡️', label: 'Care Plan' },
+            { tab: 'treatmentplan', icon: '🧬', label: 'Radiation Plan' },
             { tab: 'nexus', icon: '⚡', label: 'NEXUS' },
             { tab: 'nccn', icon: '📜', label: 'Guideline Pathway' },
             { tab: 'staging', icon: '🎯', label: 'Staging' },
@@ -247,6 +251,7 @@ function switchTab(tabId) {
     if (tabId === 'intake') loadIntakeView();
     if (tabId === 'opd') loadOpdView();
     if (tabId === 'results_inbox') loadResultsInbox();
+    if (tabId === 'treatmentplan') loadTreatmentPlanView();
     if (tabId === 'careplan') loadCarePlanView();
     if (tabId === 'treatment_day') loadTreatmentDayAssessment();
     if (tabId === 'imaging') loadImagingWorklist();
@@ -989,7 +994,7 @@ async function recordMDTConsensus() {
             recommendation: "Upfront Neoadjuvant Chemotherapy with Dose-dense AC-T followed by Breast Conserving Surgery + SLNB."
         });
         await loadJourneyTimeline();
-        switchTab('careplan');
+        switchTab('treatmentplan');
     } catch (err) {
         console.error("Error recording MDT consensus:", err);
         toast(apiErrorMessage(err), 'error');
@@ -1180,6 +1185,125 @@ async function acknowledgeResultRow(resultId) {
 }
 
 // ---------------------------------------------------------------------------
+// 13c. Treatment Plan (clinician-owned cancer treatment strategy -- distinct from Care
+// Plan below; drafted, then signed by the matching modality specialist, which is what
+// gives it clinical authority. See models_cca.py's TreatmentPlan docstring.)
+// ---------------------------------------------------------------------------
+
+const TREATMENT_PLAN_STATUS_BADGE = {
+    DRAFT: 'badge-warning', PROPOSED: 'badge-warning', ACTIVE: 'badge-curative',
+    ON_HOLD: 'badge-warning', COMPLETED: 'badge-curative', SUPERSEDED: 'badge-stage', CANCELLED: 'badge-danger',
+};
+
+async function loadTreatmentPlanView() {
+    const container = document.getElementById('treatmentplan-content-container');
+    try {
+        const data = await Api.get(`${CCA_API_BASE}/patients/${currentPatientId}/treatment-plans`);
+        const plans = data.treatment_plans || [];
+        if (!plans.length) {
+            container.innerHTML = `
+                <div class="workspace-card" style="text-align:center;padding:32px;">
+                    <span class="absence-token absence-not-recorded">NOT_RECORDED</span>
+                    <p style="font-size:13px;color:var(--text-secondary);margin-top:10px;">No Treatment Plan drafted for this patient yet.</p>
+                </div>
+            `;
+            return;
+        }
+        container.innerHTML = plans.map(plan => `
+            <div class="workspace-card" style="margin-bottom:12px;">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">${escapeHtml(plan.modality)} <span style="font-weight:400;color:var(--text-muted);">v${plan.version_no}</span></div>
+                        <p style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${escapeHtml(plan.protocol_name || 'Protocol not yet specified')}</p>
+                    </div>
+                    <span class="badge-pill ${TREATMENT_PLAN_STATUS_BADGE[plan.status] || 'badge-stage'}">${escapeHtml(plan.status)}</span>
+                </div>
+                <div style="font-size:12px;color:var(--text-secondary);display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;">
+                    <div>Intent: <strong>${escapeHtml(plan.intent || 'NOT_RECORDED')}</strong></div>
+                    <div>Planned sessions: <strong>${plan.planned_sessions ?? 'NOT_RECORDED'}</strong></div>
+                    <div>Signed by: <strong>${plan.signer_email ? escapeHtml(`${plan.signer_email} (${plan.signer_role})`) : 'Not yet signed'}</strong></div>
+                    <div>Signed at: <strong>${plan.signed_at ? new Date(plan.signed_at).toLocaleString() : '—'}</strong></div>
+                </div>
+                ${plan.status === 'DRAFT' || plan.status === 'PROPOSED' ? `
+                    <div style="margin-top:10px;display:flex;gap:8px;">
+                        <button class="btn-cca btn-emerald" onclick="signTreatmentPlanAction(${plan.id})">✍️ Sign Treatment Plan</button>
+                    </div>
+                ` : ''}
+                ${plan.status === 'ACTIVE' ? `
+                    <div style="margin-top:10px;display:flex;gap:8px;">
+                        <button class="btn-cca btn-outline" style="color:var(--accent-rose);" onclick="discontinueTreatmentPlanAction(${plan.id})">⛔ Discontinue</button>
+                    </div>
+                ` : ''}
+            </div>
+        `).join('');
+    } catch (err) {
+        toast(apiErrorMessage(err), 'error');
+    }
+}
+
+function openCreateTreatmentPlanModal() {
+    openModal(`
+        <div class="card-header">
+            <div class="card-title">🧬 Draft New Treatment Plan</div>
+            <button onclick="closeModal()" style="background:transparent;border:none;color:var(--text-secondary);font-size:20px;cursor:pointer;">&times;</button>
+        </div>
+        <label style="font-size:11px;color:var(--text-muted);">Modality</label>
+        <select id="txplan-modality" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;">
+            <option value="Systemic Chemotherapy">Systemic Chemotherapy (Medical Oncology)</option>
+            <option value="Surgical Resection">Surgical Resection (Surgical Oncology)</option>
+            <option value="Radiation Therapy">Radiation Therapy (Radiation Oncology)</option>
+        </select>
+        <label style="font-size:11px;color:var(--text-muted);">Intent</label>
+        <input id="txplan-intent" type="text" value="Curative" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;" />
+        <label style="font-size:11px;color:var(--text-muted);">Protocol / Procedure Name</label>
+        <input id="txplan-protocol" type="text" placeholder="e.g. Dose-dense AC-T" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:10px;" />
+        <label style="font-size:11px;color:var(--text-muted);">Planned Sessions / Fractions</label>
+        <input id="txplan-sessions" type="number" value="8" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;margin-bottom:16px;" />
+        <p style="font-size:11px;color:var(--text-muted);">This creates a DRAFT. It has no clinical authority until a matching modality specialist signs it from the Treatment Plan list.</p>
+        <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:10px;">
+            <button class="btn-cca btn-outline" onclick="closeModal()">Cancel</button>
+            <button class="btn-cca btn-emerald" onclick="submitCreateTreatmentPlan()">Create Draft</button>
+        </div>
+    `);
+}
+
+async function submitCreateTreatmentPlan() {
+    try {
+        await Api.post(`${CCA_API_BASE}/treatment-plans`, {
+            patient_id: currentPatientId,
+            modality: document.getElementById('txplan-modality').value,
+            intent: document.getElementById('txplan-intent').value,
+            protocol_name: document.getElementById('txplan-protocol').value,
+            planned_sessions: Number(document.getElementById('txplan-sessions').value) || 8,
+        });
+        toast('Treatment plan drafted', 'success');
+        closeModal();
+        await loadTreatmentPlanView();
+        await loadJourneyTimeline();
+    } catch (err) { toast(apiErrorMessage(err), 'error'); }
+}
+
+async function signTreatmentPlanAction(id) {
+    try {
+        await Api.post(`${CCA_API_BASE}/treatment-plans/${id}/sign`, {});
+        toast('Treatment plan signed and now ACTIVE', 'success');
+        await loadTreatmentPlanView();
+        await loadJourneyTimeline();
+    } catch (err) { toast(apiErrorMessage(err), 'error'); }
+}
+
+async function discontinueTreatmentPlanAction(id) {
+    const reason = prompt('Reason for discontinuing this Treatment Plan:');
+    if (!reason) return;
+    try {
+        await Api.post(`${CCA_API_BASE}/treatment-plans/${id}/discontinue`, { reason });
+        toast('Treatment plan discontinued', 'success');
+        await loadTreatmentPlanView();
+        await loadJourneyTimeline();
+    } catch (err) { toast(apiErrorMessage(err), 'error'); }
+}
+
+// ---------------------------------------------------------------------------
 // 13d. Live Care Plan (SCR-23)
 // ---------------------------------------------------------------------------
 
@@ -1187,6 +1311,7 @@ let currentCarePlanData = null;
 
 async function loadCarePlanView() {
     const container = document.getElementById('careplan-content-container');
+    const actionsContainer = document.getElementById('careplan-header-actions');
     try {
         const data = await Api.get(`${CCA_API_BASE}/care-plans/current?patient_id=${currentPatientId}`);
         const plan = data.care_plan;
@@ -1195,13 +1320,27 @@ async function loadCarePlanView() {
         document.getElementById('careplan-ver-text').textContent = plan ? `${plan.version_no}.0` : '—';
 
         if (!plan) {
+            // No Care Plan can exist without at least one already-signed Treatment Plan --
+            // offer to build one from whatever is currently ACTIVE, rather than silently
+            // creating one the way this screen used to (see routers/cca.py's create_care_plan).
+            const txData = await Api.get(`${CCA_API_BASE}/patients/${currentPatientId}/treatment-plans`);
+            const activePlans = (txData.treatment_plans || []).filter(p => p.status === 'ACTIVE');
+            if (actionsContainer) {
+                actionsContainer.innerHTML = activePlans.length
+                    ? `<button class="btn-cca btn-emerald" onclick="approveCarePlanFromActiveTreatmentPlans()">✅ Approve Care Plan from Signed Treatment Plan(s)</button>`
+                    : '';
+            }
             container.innerHTML = `
                 <div class="workspace-card" style="text-align:center;padding:32px;">
                     <span class="absence-token absence-not-recorded">NOT_RECORDED</span>
                     <p style="font-size:13px;color:var(--text-secondary);margin-top:10px;">No active care plan on record for this patient yet.</p>
+                    ${!activePlans.length ? `<p style="font-size:12px;color:var(--text-muted);margin-top:6px;">Draft and sign a Treatment Plan first.</p>` : ''}
                 </div>
             `;
             return;
+        }
+        if (actionsContainer) {
+            actionsContainer.innerHTML = `<button class="btn-cca btn-primary" onclick="openCarePlanAmendModal()">✏️ Amend Care Plan (New Version)</button>`;
         }
 
         const comps = plan.components || {};
@@ -1231,6 +1370,24 @@ async function loadCarePlanView() {
     } catch (err) {
         toast(apiErrorMessage(err), 'error');
     }
+}
+
+async function approveCarePlanFromActiveTreatmentPlans() {
+    try {
+        const [prefill, txData] = await Promise.all([
+            Api.get(`${CCA_API_BASE}/care-plans/prefill?patient_id=${currentPatientId}`),
+            Api.get(`${CCA_API_BASE}/patients/${currentPatientId}/treatment-plans`),
+        ]);
+        const activePlanIds = (txData.treatment_plans || []).filter(p => p.status === 'ACTIVE').map(p => p.id);
+        if (!activePlanIds.length) {
+            toast('No signed (ACTIVE) Treatment Plan to build a Care Plan from', 'error');
+            return;
+        }
+        await Api.post(`${CCA_API_BASE}/care-plans`, { ...prefill, patient_id: currentPatientId, treatment_plan_ids: activePlanIds });
+        toast('Care plan approved', 'success');
+        await loadCarePlanView();
+        await loadJourneyTimeline();
+    } catch (err) { toast(apiErrorMessage(err), 'error'); }
 }
 
 function openCarePlanAmendModal() {
@@ -1288,12 +1445,54 @@ async function submitCarePlanAmendment() {
 // 13e. Treatment-Day Assessment, Clearance & Toxicity (SCR-24)
 // ---------------------------------------------------------------------------
 
+let currentTreatmentOrder = null;
+let currentTreatmentPlanForOrder = null;
+
 async function loadTreatmentDayAssessment() {
     try {
         const data = await Api.get(`${CCA_API_BASE}/treatment/day-assessment?patient_id=${currentPatientId}`);
         currentClearanceExits = data.clearance_exits || [];
+        currentTreatmentOrder = data.order || null;
 
         document.getElementById('treatment-day-cycle-label').textContent = data.cycle_info || 'NOT_RECORDED';
+
+        const orderContainer = document.getElementById('treatment-day-order-container');
+        if (currentTreatmentOrder && currentTreatmentOrder.status === 'SIGNED') {
+            orderContainer.innerHTML = `
+                <div class="card-header">
+                    <div class="card-title">Treatment Order (session #${currentTreatmentOrder.treatment_session_id})</div>
+                    <span class="badge-pill badge-curative">${escapeHtml(currentTreatmentOrder.status)}</span>
+                </div>
+                <p style="font-size:12px;color:var(--text-secondary);">Signed by ${escapeHtml(currentTreatmentOrder.signer_email || '')} (${escapeHtml(currentTreatmentOrder.signer_role || '')}). Clearance decisions below act against this order.</p>
+            `;
+        } else if (currentTreatmentOrder && currentTreatmentOrder.status === 'DRAFT') {
+            orderContainer.innerHTML = `
+                <div class="card-header">
+                    <div class="card-title">Treatment Order (session #${currentTreatmentOrder.treatment_session_id})</div>
+                    <span class="badge-pill badge-warning">DRAFT -- not yet signed</span>
+                </div>
+                <div style="display:flex;justify-content:flex-end;">
+                    <button class="btn-cca btn-emerald" onclick="signCurrentTreatmentOrder(${currentTreatmentOrder.id})">✍️ Sign Treatment Order</button>
+                </div>
+            `;
+        } else {
+            // Resolve the active plan so "Write Treatment Order" has something to attach to --
+            // day-assessment intentionally doesn't require one to exist yet.
+            let planId = null;
+            try {
+                const plans = await Api.get(`${CCA_API_BASE}/patients/${currentPatientId}/treatment-plans`);
+                const active = (plans.treatment_plans || []).find(p => p.status === 'ACTIVE');
+                planId = active ? active.id : null;
+            } catch (e) { /* fall through to the no-plan message below */ }
+            currentTreatmentPlanForOrder = planId;
+            orderContainer.innerHTML = `
+                <div class="card-header">
+                    <div class="card-title">Treatment Order</div>
+                    ${planId ? `<button class="btn-cca btn-outline" onclick="openWriteTreatmentOrderModal()">📝 Write Treatment Order</button>` : ''}
+                </div>
+                <p style="font-size:12px;color:var(--text-secondary);">${escapeHtml(data.order_note || 'No signed Treatment Order on record.')}${!planId ? ' Sign a Treatment Plan first.' : ''}</p>
+            `;
+        }
 
         // lab_parameters is always empty today -- the backend explicitly has no live lab
         // integration yet (see lab_parameters_note) rather than fabricating structured values.
@@ -1313,8 +1512,55 @@ async function loadTreatmentDayAssessment() {
     } catch (err) { toast(apiErrorMessage(err), 'error'); }
 }
 
+function openWriteTreatmentOrderModal() {
+    if (!currentTreatmentPlanForOrder) {
+        toast('No active Treatment Plan to write an order against', 'error');
+        return;
+    }
+    openModal(`
+        <div class="card-header">
+            <div class="card-title">📝 Write Treatment Order</div>
+            <button onclick="closeModal()" style="background:transparent;border:none;color:var(--text-secondary);font-size:20px;cursor:pointer;">&times;</button>
+        </div>
+        <label style="font-size:11px;color:var(--text-muted);">Executable instructions (drug / dose / route / rate)</label>
+        <textarea id="order-instructions" style="width:100%;height:70px;padding:10px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);font-size:12px;margin-top:4px;margin-bottom:16px;" placeholder="e.g. Doxorubicin 60mg/m2 IV + Cyclophosphamide 600mg/m2 IV, day 1"></textarea>
+        <p style="font-size:11px;color:var(--text-muted);">This creates a DRAFT order. It has no clinical authority until signed by the matching modality specialist.</p>
+        <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:10px;">
+            <button class="btn-cca btn-outline" onclick="closeModal()">Cancel</button>
+            <button class="btn-cca btn-emerald" onclick="submitWriteTreatmentOrder()">Create Draft Order</button>
+        </div>
+    `);
+}
+
+async function submitWriteTreatmentOrder() {
+    try {
+        await Api.post(`${CCA_API_BASE}/treatment-orders`, {
+            patient_id: currentPatientId,
+            treatment_plan_id: currentTreatmentPlanForOrder,
+            instructions: { text: document.getElementById('order-instructions').value },
+        });
+        toast('Treatment order drafted', 'success');
+        closeModal();
+        await loadTreatmentDayAssessment();
+        await loadJourneyTimeline();
+    } catch (err) { toast(apiErrorMessage(err), 'error'); }
+}
+
+async function signCurrentTreatmentOrder(id) {
+    try {
+        await Api.post(`${CCA_API_BASE}/treatment-orders/${id}/sign`, {});
+        toast('Treatment order signed', 'success');
+        await loadTreatmentDayAssessment();
+        await loadJourneyTimeline();
+    } catch (err) { toast(apiErrorMessage(err), 'error'); }
+}
+
 async function openClearanceModal() {
     if (!currentClearanceExits.length) await loadTreatmentDayAssessment();
+    if (!currentTreatmentOrder || currentTreatmentOrder.status !== 'SIGNED') {
+        toast('A signed Treatment Order is required before a clearance decision can be recorded', 'error');
+        return;
+    }
     openModal(`
         <div class="card-header">
             <div class="card-title">🎯 Decide Treatment Clearance</div>
@@ -1339,6 +1585,7 @@ async function submitTreatmentClearance() {
     try {
         await Api.post(`${CCA_API_BASE}/treatment/clearance`, {
             patient_id: currentPatientId,
+            order_id: currentTreatmentOrder ? currentTreatmentOrder.id : undefined,
             decision: document.getElementById('clearance-decision').value,
             reason,
         });

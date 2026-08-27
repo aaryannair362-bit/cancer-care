@@ -66,6 +66,20 @@ def _demo_patient_id(db_session, org_id):
     return patient.id
 
 
+def _create_and_sign_treatment_plan(client, headers, patient_id, **overrides):
+    """A Care Plan can only be built from an already-signed Treatment Plan (see
+    routers/cca.py's create_care_plan) -- this drafts and signs one with the default
+    systemic-chemotherapy modality, which routes through the Medical Oncologist/Doctor
+    signer gate the `doctor` fixture satisfies."""
+    body = {"patient_id": patient_id, **overrides}
+    draft = client.post("/api/cca/treatment-plans", headers=headers, json=body)
+    assert draft.status_code == 200, draft.text
+    plan_id = draft.json()["treatment_plan"]["id"]
+    signed = client.post(f"/api/cca/treatment-plans/{plan_id}/sign", headers=headers, json={})
+    assert signed.status_code == 200, signed.text
+    return plan_id
+
+
 def test_act_1_patient_header_and_contextual_summary(client, headers, db_session, doctor):
     patient_id = _demo_patient_id(db_session, doctor.organization_id)
 
@@ -374,8 +388,13 @@ def test_act_8_live_care_plan_prefill_and_versioning(client, headers, db_session
     assert "Dose-dense AC-T" in prefill["components"]["systemic_therapy"]["regimen"]
     assert prefill["mdt_recommendation"] == "Neoadjuvant dose-dense AC-T chemotherapy recommended."
 
+    # A Care Plan can only reference an already-signed Treatment Plan.
+    tx_plan_id = _create_and_sign_treatment_plan(client, headers, patient_id)
+
     # Create Care Plan v1.0
-    plan_res = client.post("/api/cca/care-plans", headers=headers, json={"patient_id": patient_id, **prefill})
+    plan_res = client.post("/api/cca/care-plans", headers=headers, json={
+        "patient_id": patient_id, "treatment_plan_ids": [tx_plan_id], **prefill
+    })
     assert plan_res.status_code == 200
     plan_id = plan_res.json()["care_plan"]["id"]
 
@@ -410,7 +429,10 @@ def test_care_plans_current_returns_null_then_the_active_plan(client, headers, d
         "recommendation": "Neoadjuvant dose-dense AC-T chemotherapy recommended."
     })
     prefill = client.get(f"/api/cca/care-plans/prefill?patient_id={patient_id}", headers=headers).json()
-    plan_id = client.post("/api/cca/care-plans", headers=headers, json={"patient_id": patient_id, **prefill}).json()["care_plan"]["id"]
+    tx_plan_id = _create_and_sign_treatment_plan(client, headers, patient_id)
+    plan_id = client.post("/api/cca/care-plans", headers=headers, json={
+        "patient_id": patient_id, "treatment_plan_ids": [tx_plan_id], **prefill
+    }).json()["care_plan"]["id"]
 
     after = client.get(f"/api/cca/care-plans/current?patient_id={patient_id}", headers=headers).json()["care_plan"]
     assert after["id"] == plan_id
@@ -444,7 +466,19 @@ def test_act_9_treatment_day_clearance_and_toxicity(client, headers, db_session,
     case_id = mdt_res.json()["mdt_case"]["id"]
     client.post(f"/api/cca/mdt/cases/{case_id}/recommendation", headers=headers, json={"recommendation": "AC-T recommended."})
     prefill = client.get(f"/api/cca/care-plans/prefill?patient_id={patient_id}", headers=headers).json()
-    client.post("/api/cca/care-plans", headers=headers, json={"patient_id": patient_id, **prefill})
+    tx_plan_id = _create_and_sign_treatment_plan(client, headers, patient_id)
+    client.post("/api/cca/care-plans", headers=headers, json={
+        "patient_id": patient_id, "treatment_plan_ids": [tx_plan_id], **prefill
+    })
+
+    # Day-Care requires a signed Treatment Order to act against -- not the Plan/Care Plan alone.
+    order_res = client.post("/api/cca/treatment-orders", headers=headers, json={
+        "patient_id": patient_id, "treatment_plan_id": tx_plan_id
+    })
+    assert order_res.status_code == 200, order_res.text
+    order_id = order_res.json()["treatment_order"]["id"]
+    sign_order_res = client.post(f"/api/cca/treatment-orders/{order_id}/sign", headers=headers)
+    assert sign_order_res.status_code == 200, sign_order_res.text
 
     # Toxicity recording requires baseline_value (NOT NULL guard)
     bad_tox = client.post("/api/cca/treatment/toxicity", headers=headers, json={

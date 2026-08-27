@@ -34,7 +34,7 @@ from . import lab_test_matcher
 from . import discharge_summary
 from . import sarvam_transcriber
 from .scribe import scribe
-from .migrations import run_additive_migrations
+from .migrations import run_additive_migrations, run_constraint_migrations
 from .tasks_engine import (
     generate_tasks_from_consultation, get_active_medications,
     compute_admission_day, check_drug_interactions, check_allergy_conflicts,
@@ -52,6 +52,7 @@ from .routers.patient_documents import router as patient_documents_router
 from .routers import cca
 from .routers import cca_diagnostics
 from .routers import cca_coordination
+from .routers import patient_portal
 from .cca_seed import seed_cca_database
 
 
@@ -63,6 +64,7 @@ MAX_AUDIO_UPLOAD_BYTES = 25 * 1024 * 1024
 
 Base.metadata.create_all(bind=engine)
 run_additive_migrations(engine)
+run_constraint_migrations(engine)
 
 # Simple in-memory per-IP sliding-window rate limiter for auth endpoints. Single-process only
 # (this app deploys as one long-lived Render process with no Docker/CI/IaC in the repo, see
@@ -98,6 +100,7 @@ app.include_router(patient_documents_router)
 app.include_router(cca.router)
 app.include_router(cca_diagnostics.router)
 app.include_router(cca_coordination.router)
+app.include_router(patient_portal.router)
 
 @app.exception_handler(json.JSONDecodeError)
 async def json_decode_error_handler(request: Request, exc: json.JSONDecodeError):
@@ -1156,6 +1159,7 @@ def get_consultation(consultation_id: int, current_user: dict = Depends(get_curr
         "objective_findings": c.objective_findings,
         "primary_diagnosis": c.primary_diagnosis, "differential_diagnosis": c.differential_diagnosis,
         "medications": c.medications, "lab_tests": c.lab_tests, "advice": c.advice,
+        "raw_transcript": c.raw_transcript,
         "created_at": c.created_at.isoformat(),
         "patient_id": c.patient_id, "visit_type": c.visit_type, "admission_day": c.admission_day,
         "interaction_warnings": c.interaction_warnings, "allergy_warnings": c.allergy_warnings,

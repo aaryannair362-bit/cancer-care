@@ -876,7 +876,9 @@ from .models_cca import (
     CCABiomarkerResult, CCAOrder, CCAResult, StagingRecord, StagingEvidence,
     GuidelineContext, ClinicalBrief, MDTCase, MDTDecision, MDTParticipant,
     CCAExternalAccess, CCAExternalOpinion, CCAFinancialCase, CCACoordinationCase,
-    CarePlan, CarePlanVersion, CarePlanTask, TreatmentPlan, TreatmentSession,
-    ToxicityEvent, TreatmentClearance, ResponseAssessment, CCAJourneyEvent
+    CarePlan, CarePlanVersion, CarePlanTask, TreatmentPlan, TreatmentPlanVersion,
+    TreatmentPlanCoSignature, TreatmentSession, TreatmentOrder, TreatmentEvent,
+    ToxicityEvent, TreatmentClearance, ResponseAssessment, CCAJourneyEvent, DomainEvent,
+    GuidelineRegistry, TreatmentPlanGuidelineLink, PatientAccount,
 )
 

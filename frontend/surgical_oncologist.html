@@ -252,7 +252,8 @@
         <a href="/surgical_oncologist.html" class="brand-logo">Aivana</a>
         <div class="search-pill-container">
             <span class="search-icon-fixed">🔍</span>
-            <input type="text" class="search-pill-input" placeholder="Search patient or workflow" />
+            <input type="text" id="ai-search-input" class="search-pill-input" placeholder="AI Search — evidence, plans, staging, journey for the open patient" onkeydown="if(event.key==='Enter') runAiSearch()" />
+            <div id="ai-search-results" style="display:none; position:absolute; top:46px; left:0; right:0; background:#FFFFFF; border:1px solid var(--line); border-radius:var(--radius-md); box-shadow:var(--shadow-md); max-height:420px; overflow-y:auto; z-index:50;"></div>
         </div>
         <div class="header-actions">
             <button class="icon-circle-btn" title="Notifications">🔔</button>
@@ -267,7 +268,8 @@
             <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Patients</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-history" onclick="showTab('history')"><div class="nav-item-left"><span>🗂️</span><span>Patient History</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-consultation" onclick="showTab('consultation')"><div class="nav-item-left"><span>🩺</span><span>Consultation</span></div><span class="nav-chevron">›</span></a>
-            <a class="sidebar-nav-item" id="nav-careplan" onclick="showTab('careplan')"><div class="nav-item-left"><span>📋</span><span>Surgical Plan</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-careplan" onclick="showTab('careplan')"><div class="nav-item-left"><span>📋</span><span>Care Plan</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-treatmentplan" onclick="showTab('treatmentplan')"><div class="nav-item-left"><span>💊</span><span>Treatment Plan</span></div><span class="nav-chevron">›</span></a>
 
             <div class="sidebar-section-title">CLINICAL INTELLIGENCE / COORDINATION</div>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
@@ -315,6 +317,8 @@
                     <div><div class="banner-label">Oncologist</div><div class="banner-value" id="consult-hdr-onc" style="font-size:12.5px;">—</div></div>
                     <div><button class="btn-outline" onclick="showTab('patients')">Change Patient</button></div>
                 </div>
+
+                <div id="patient-summary-cards" style="margin-bottom:20px;"><!-- Populated via JS: renderPatientSummaryCards() --></div>
 
                 <div class="section-card" id="consult-no-patient-card">
                     <p style="font-size:13px; color:var(--ink-500);">Select a patient from the Patients queue first.</p>
@@ -419,11 +423,18 @@
                 </div>
             </div>
 
-            <!-- ===== TREATMENT PLAN ===== -->
+            <!-- ===== CARE PLAN ===== -->
             <div id="view-careplan" class="view-panel">
-                <h1 class="page-title">Surgical Plan</h1>
-                <p class="page-subtitle">Live, versioned surgical treatment plan. Amendments require a documented change reason.</p>
+                <h1 class="page-title">Care Plan</h1>
+                <p class="page-subtitle">Multidisciplinary execution plan — how approved treatment is coordinated across departments. Distinct from the Treatment Plan (the signed clinical strategy).</p>
                 <div id="careplan-content"><!-- Populated via JS: loadCarePlanView() --></div>
+            </div>
+
+            <!-- ===== TREATMENT PLAN ===== -->
+            <div id="view-treatmentplan" class="view-panel">
+                <h1 class="page-title">Treatment Plan</h1>
+                <p class="page-subtitle">The signed anti-cancer treatment strategy. Only an authorized oncologist of the matching modality may sign, amend, or discontinue it.</p>
+                <div id="treatmentplan-content"><!-- Populated via JS: loadTreatmentPlanView() --></div>
             </div>
 
             <!-- ===== NEXUS (static demo hub) ===== -->
@@ -536,6 +547,10 @@
         let currentPatientData = null;
         let currentCarePlanId = null;
         let currentCarePlanData = null;
+        let currentTreatmentPlanId = null;
+        let currentTreatmentPlanData = null;
+        const OWN_MODALITY_KEYWORDS = ['surg']; // Surgical Oncologist owns modalities matching this keyword
+        const DEFAULT_MODALITY = 'Surgical Resection';
         let selectedIntent = 'Curative';
         let selectedModality = 'Systemic therapy';
         let scribeVoiceRecorder = null;
@@ -552,11 +567,84 @@
             if (tab === 'history') renderCaseSummaryPanel('history-content', currentPatientId);
             if (tab === 'consultation') refreshConsultationView();
             if (tab === 'careplan') loadCarePlanView();
+            if (tab === 'treatmentplan') loadTreatmentPlanView();
             if (tab === 'guideline') loadGuidelinePathway();
             if (tab === 'staging') loadStagingWorkspace();
             if (tab === 'mdt') loadMdtWorkspace();
             if (tab === 'nexus') loadNexusBanner();
+            document.getElementById('ai-search-results').style.display = 'none';
         }
+
+        // ---------------------------------------------------------------
+        // AI Search -- global, source-cited retrieval scoped to the open patient. Retrieval
+        // and summarization only: the only way a result becomes durable is an explicit
+        // "Propose as Care Plan Task" action (architecture doc: no silent AI writes).
+        // ---------------------------------------------------------------
+        let lastAiSearchResults = [];
+
+        async function runAiSearch() {
+            const resultsEl = document.getElementById('ai-search-results');
+            const q = document.getElementById('ai-search-input').value.trim();
+            if (!currentPatientId) {
+                resultsEl.style.display = 'block';
+                resultsEl.innerHTML = '<div style="padding:12px; font-size:12.5px; color:var(--ink-500);">Open a patient first to search their record.</div>';
+                return;
+            }
+            if (q.length < 2) { resultsEl.style.display = 'none'; return; }
+            resultsEl.style.display = 'block';
+            resultsEl.innerHTML = '<div style="padding:12px; font-size:12.5px; color:var(--ink-500);">Searching…</div>';
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/search?q=${encodeURIComponent(q)}`);
+                lastAiSearchResults = data.results || [];
+                if (!lastAiSearchResults.length) {
+                    resultsEl.innerHTML = '<div style="padding:12px; font-size:12.5px; color:var(--ink-500);">No matches in this patient\'s verified record.</div>';
+                    return;
+                }
+                resultsEl.innerHTML = lastAiSearchResults.map((r, i) => `
+                    <div style="padding:10px 12px; border-bottom:1px solid var(--line-subtle);">
+                        <div style="font-size:10.5px; font-weight:700; color:var(--ink-500); text-transform:uppercase; letter-spacing:0.4px;">${escapeHtml(r.type)}</div>
+                        <div style="font-size:13px; color:var(--ink-900); margin:3px 0;">${escapeHtml(r.snippet || '')}</div>
+                        <div style="font-size:11.5px; color:var(--ink-500);">${escapeHtml(r.source_author || 'Unknown source')} · ${r.source_date ? new Date(r.source_date).toLocaleDateString() : '—'}${r.confirmation_state ? ' · ' + escapeHtml(r.confirmation_state) : ''}</div>
+                        <div style="display:flex; gap:6px; margin-top:6px;">
+                            ${r.view_source ? `<button class="nexus-mini-btn" onclick="viewAiSearchSource(${i})">View Source</button>` : ''}
+                            <button class="nexus-mini-btn primary" onclick="proposeAiSearchTask(${i})">Propose as Care Plan Task</button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (err) {
+                resultsEl.innerHTML = `<div style="padding:12px; font-size:12.5px; color:var(--rose-badge-text);">${escapeHtml(apiErrorMessage(err))}</div>`;
+            }
+        }
+
+        function viewAiSearchSource(index) {
+            const r = lastAiSearchResults[index];
+            document.getElementById('ai-search-results').style.display = 'none';
+            if (r.type === 'TreatmentPlan') { showTab('treatmentplan'); return; }
+            if (r.type === 'StagingRecord') { showTab('staging'); return; }
+            if (r.type === 'MDTDecision') { showTab('mdt'); return; }
+            toast(`Source: ${r.view_source}`, 'info');
+        }
+
+        async function proposeAiSearchTask(index) {
+            const r = lastAiSearchResults[index];
+            const description = prompt('Task description for this patient task (reviewed and edited by you before saving):', r.snippet || '');
+            if (!description) return;
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/search/propose-task`, {
+                    description, source_reference: { type: r.type, id: r.id },
+                });
+                toast('Task proposed from AI Search', 'success');
+                document.getElementById('ai-search-results').style.display = 'none';
+                document.getElementById('ai-search-input').value = '';
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        document.addEventListener('click', (e) => {
+            const container = document.querySelector('.search-pill-container');
+            if (container && !container.contains(e.target)) {
+                document.getElementById('ai-search-results').style.display = 'none';
+            }
+        });
 
         async function loadNexusBanner() {
             const bannerEl = document.getElementById('nexus-patient-banner');
@@ -653,6 +741,7 @@
                 return;
             }
             noPatientEl.style.display = 'none'; bannerEl.style.display = 'grid'; formEl.style.display = 'block';
+            renderPatientSummaryCards('patient-summary-cards', currentPatientId);
             try {
                 currentPatientData = await Api.get(`${CCA_API}/patients/${currentPatientId}`);
                 const p = currentPatientData.patient;
@@ -816,8 +905,13 @@
         }
 
         // ---------------------------------------------------------------
-        // Treatment Plan (Care Plan) -- inline amend, no modal
+        // Care Plan -- multidisciplinary execution layer. Distinct object from Treatment
+        // Plan (below): status lifecycle (ACTIVE/BLOCKED/ON_HOLD/COMPLETED/CANCELLED) and
+        // version history, in addition to the existing inline amend.
         // ---------------------------------------------------------------
+        const CARE_PLAN_STATUS_BADGE = { ACTIVE: 'badge-green', BLOCKED: 'badge-rose', ON_HOLD: 'badge-amber', COMPLETED: 'badge-blue', CANCELLED: 'badge-rose' };
+        const CARE_PLAN_NEXT_TRANSITIONS = { ACTIVE: ['BLOCKED', 'ON_HOLD', 'COMPLETED', 'CANCELLED'], BLOCKED: ['ACTIVE', 'CANCELLED'], ON_HOLD: ['ACTIVE', 'CANCELLED'] };
+
         async function loadCarePlanView() {
             const container = document.getElementById('careplan-content');
             if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
@@ -827,13 +921,18 @@
                 currentCarePlanId = data.care_plan ? data.care_plan.id : null;
 
                 if (!currentCarePlanData) {
-                    container.innerHTML = `<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">No active treatment plan on record yet for this patient.</p></div>`;
+                    container.innerHTML = `<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">No Care Plan on record yet for this patient. A Care Plan is created once a Treatment Plan is signed.</p></div>`;
                     return;
                 }
-                const comps = currentCarePlanData.components || {};
+                const cp = currentCarePlanData;
+                const comps = cp.components || {};
+                const nextStates = CARE_PLAN_NEXT_TRANSITIONS[cp.status] || [];
                 container.innerHTML = `
                     <div class="section-card">
-                        <div class="section-head"><div><div class="section-title">Regimen Protocols (v${currentCarePlanData.version_no})</div><div class="section-sub">Intent: ${escapeHtml(currentCarePlanData.intent || 'NOT_RECORDED')}</div></div></div>
+                        <div class="section-head">
+                            <div><div class="section-title">Care Plan v${cp.version_no}</div><div class="section-sub">Intent: ${escapeHtml(cp.intent || 'NOT_RECORDED')}</div></div>
+                            <span class="badge ${CARE_PLAN_STATUS_BADGE[cp.status] || 'badge-blue'}">${escapeHtml(cp.status || '—')}</span>
+                        </div>
                         <div class="grid-3">
                             ${['systemic', 'surgical', 'radiation'].map(k => `
                                 <div class="stage-card">
@@ -843,6 +942,15 @@
                             `).join('')}
                         </div>
                     </div>
+                    ${nextStates.length ? `
+                    <div class="section-card">
+                        <div class="section-title">Change Status</div>
+                        <div class="section-sub" style="margin-bottom:12px;">A completed Care Plan task does not itself clear a clinical hold — status changes are a clinician decision and require a reason.</div>
+                        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                            ${nextStates.map(s => `<button class="btn-outline" onclick="submitCarePlanStatusChange('${s}')">${escapeHtml(s.replace(/_/g, ' '))}</button>`).join('')}
+                        </div>
+                        <div id="careplan-status-msg" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                    </div>` : ''}
                     <div class="section-card">
                         <div class="section-title">Amend Care Plan</div>
                         <div class="section-sub" style="margin-bottom:12px;">Amendments require a documented change reason (Rule E-36).</div>
@@ -852,6 +960,10 @@
                         <div class="form-group" style="margin-bottom:14px;"><label class="form-label">Change reason (required)</label><textarea id="amend-reason" class="form-textarea" rows="2"></textarea></div>
                         <button class="btn-navy" onclick="submitCarePlanAmendment()">Submit Amendment</button>
                         <div id="careplan-amend-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                    </div>
+                    <div class="section-card">
+                        <div class="section-head"><div class="section-title">Version History</div><button class="btn-outline" onclick="toggleCarePlanHistory()">View History</button></div>
+                        <div id="careplan-history-list" style="display:none;"></div>
                     </div>
                 `;
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
@@ -872,6 +984,212 @@
                 toast('Care plan amended', 'success');
                 loadCarePlanView();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitCarePlanStatusChange(newStatus) {
+            const reason = prompt(`Reason for moving this Care Plan to ${newStatus.replace(/_/g, ' ')}:`);
+            if (!reason) { toast('A reason is required for a Care Plan status change', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/care-plans/${currentCarePlanId}/status`, { status: newStatus, reason });
+                toast(`Care plan moved to ${newStatus.replace(/_/g, ' ')}`, 'success');
+                loadCarePlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function toggleCarePlanHistory() {
+            const listEl = document.getElementById('careplan-history-list');
+            if (listEl.style.display !== 'none') { listEl.style.display = 'none'; return; }
+            listEl.style.display = 'block';
+            listEl.innerHTML = 'Loading…';
+            try {
+                const data = await Api.get(`${CCA_API}/care-plans/${currentCarePlanId}/versions`);
+                listEl.innerHTML = data.versions.map(v => `
+                    <div class="checklist-row" style="display:block;">
+                        <div><strong>v${v.version_no}</strong> · ${escapeHtml(v.created_by || '—')} · ${v.created_at ? new Date(v.created_at).toLocaleString() : '—'}</div>
+                        <div style="color:var(--ink-600); margin-top:2px;">${escapeHtml(v.change_reason || '')}</div>
+                    </div>
+                `).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No version history.</p>';
+            } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        // ---------------------------------------------------------------
+        // Treatment Plan -- the signed clinical strategy. Distinct object from Care Plan
+        // (above): DRAFT -> ACTIVE via explicit sign, amend/discontinue, guideline-review
+        // acknowledgement, and version history.
+        // ---------------------------------------------------------------
+        function pickOwnModalityPlan(plans) {
+            const SURG_KW = ['surg'], RT_KW = ['radiat', 'rt '];
+            if (OWN_MODALITY_KEYWORDS.length) {
+                return plans.find(p => OWN_MODALITY_KEYWORDS.some(kw => (p.modality || '').toLowerCase().includes(kw))) || null;
+            }
+            return plans.find(p => {
+                const m = (p.modality || '').toLowerCase();
+                return !SURG_KW.some(kw => m.includes(kw)) && !RT_KW.some(kw => m.includes(kw));
+            }) || null;
+        }
+
+        const TREATMENT_PLAN_STATUS_BADGE = { DRAFT: 'badge-amber', PROPOSED: 'badge-amber', ACTIVE: 'badge-green', ON_HOLD: 'badge-amber', COMPLETED: 'badge-blue', SUPERSEDED: 'badge-blue', CANCELLED: 'badge-rose' };
+
+        async function loadTreatmentPlanView() {
+            const container = document.getElementById('treatmentplan-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/treatment-plans`);
+                const plans = data.treatment_plans || [];
+                const plan = pickOwnModalityPlan(plans);
+                currentTreatmentPlanData = plan;
+                currentTreatmentPlanId = plan ? plan.id : null;
+
+                const others = plans.filter(p => !plan || p.id !== plan.id);
+                const historySection = `
+                    <div class="section-card">
+                        <div class="section-title">All Treatment Plans For This Patient</div>
+                        <div class="section-sub" style="margin-bottom:10px;">Every plan on record, including superseded/cancelled — history is never overwritten.</div>
+                        ${plans.length ? plans.map(p => `
+                            <div class="mdt-case-row">
+                                <div><div style="font-size:13.5px; font-weight:600;">${escapeHtml(p.modality)} · ${escapeHtml(p.protocol_name || 'Protocol not recorded')}</div><div style="font-size:12px; color:var(--ink-500);">v${p.version_no} · ${escapeHtml(p.intent || '')}</div></div>
+                                <span class="badge ${TREATMENT_PLAN_STATUS_BADGE[p.status] || 'badge-blue'}">${escapeHtml(p.status)}</span>
+                            </div>
+                        `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No treatment plans yet.</p>'}
+                    </div>
+                `;
+
+                if (!plan) {
+                    container.innerHTML = `
+                        <div class="section-card">
+                            <div class="section-title">Create Draft Treatment Plan</div>
+                            <div class="section-sub" style="margin-bottom:12px;">Starts as DRAFT — has no clinical authority until explicitly signed below.</div>
+                            <div class="form-grid-2">
+                                <div class="form-group"><label class="form-label">Modality</label><input type="text" id="tp-modality" class="form-input" value="${escapeHtml(DEFAULT_MODALITY)}" /></div>
+                                <div class="form-group"><label class="form-label">Intent</label><input type="text" id="tp-intent" class="form-input" value="Curative" /></div>
+                            </div>
+                            <div class="form-grid-2">
+                                <div class="form-group"><label class="form-label">Protocol / Regimen</label><input type="text" id="tp-protocol" class="form-input" placeholder="e.g. AC-T (Doxorubicin/Cyclophosphamide -> Paclitaxel)" /></div>
+                                <div class="form-group"><label class="form-label">Planned sessions/cycles</label><input type="number" id="tp-sessions" class="form-input" value="8" /></div>
+                            </div>
+                            <button class="btn-navy" onclick="submitCreateTreatmentPlan()">Create Draft</button>
+                            <div id="tp-create-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                        </div>
+                        ${historySection}
+                    `;
+                    return;
+                }
+
+                const canAmend = !['COMPLETED', 'SUPERSEDED', 'CANCELLED'].includes(plan.status);
+                const canSign = ['DRAFT', 'PROPOSED'].includes(plan.status);
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-head">
+                            <div><div class="section-title">${escapeHtml(plan.modality)} (v${plan.version_no})</div><div class="section-sub">${escapeHtml(plan.protocol_name || 'Protocol not yet recorded')} · Intent: ${escapeHtml(plan.intent || '—')}</div></div>
+                            <span class="badge ${TREATMENT_PLAN_STATUS_BADGE[plan.status] || 'badge-blue'}">${escapeHtml(plan.status)}</span>
+                        </div>
+                        <div class="grid-3">
+                            <div><div class="onc-col-label">Planned / Completed</div><div class="onc-col-value" style="font-size:13px;">${plan.completed_sessions || 0} / ${plan.planned_sessions || '—'}</div></div>
+                            <div><div class="onc-col-label">Signed By</div><div class="onc-col-value" style="font-size:13px;">${escapeHtml(plan.signer_email || 'Not yet signed')}</div></div>
+                            <div><div class="onc-col-label">Signed At</div><div class="onc-col-value" style="font-size:13px;">${plan.signed_at ? new Date(plan.signed_at).toLocaleString() : '—'}</div></div>
+                        </div>
+                        ${plan.guideline_review_required ? `
+                        <div class="disclaimer-banner" style="margin-top:14px;">
+                            ⚠️ A newer guideline version has been published since this plan was signed. ${escapeHtml(plan.guideline_review_reason || '')}
+                            <div style="margin-top:8px;"><button class="btn-outline" onclick="acknowledgeGuidelineReviewSubmit()">Acknowledge Review</button></div>
+                        </div>` : ''}
+                        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:16px;">
+                            ${canSign ? `<button class="btn-navy" onclick="signTreatmentPlanSubmit()">✍️ Sign Treatment Plan</button>` : ''}
+                            ${canAmend ? `<button class="btn-outline" onclick="discontinueTreatmentPlanSubmit()">Discontinue</button>` : ''}
+                            <button class="btn-outline" onclick="toggleTreatmentPlanHistory()">View Versions</button>
+                        </div>
+                        <div id="tp-action-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                    </div>
+                    ${canAmend ? `
+                    <div class="section-card">
+                        <div class="section-title">Amend Treatment Plan</div>
+                        <div class="section-sub" style="margin-bottom:12px;">Creates a new version — never a silent overwrite. Requires a documented change reason.</div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Protocol / Regimen</label><input type="text" id="tp-amend-protocol" class="form-input" value="${escapeHtml(plan.protocol_name || '')}" /></div>
+                            <div class="form-group"><label class="form-label">Planned sessions/cycles</label><input type="number" id="tp-amend-sessions" class="form-input" value="${plan.planned_sessions || 0}" /></div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:14px;"><label class="form-label">Change reason (required)</label><textarea id="tp-amend-reason" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-navy" onclick="amendTreatmentPlanSubmit()">Submit Amendment</button>
+                    </div>` : ''}
+                    <div class="section-card" id="tp-history-card">
+                        <div class="section-title">Version History</div>
+                        <div id="treatmentplan-history-list" style="display:none;"></div>
+                    </div>
+                    ${historySection}
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitCreateTreatmentPlan() {
+            const statusEl = document.getElementById('tp-create-status');
+            try {
+                await Api.post(`${CCA_API}/treatment-plans`, {
+                    patient_id: currentPatientId,
+                    modality: document.getElementById('tp-modality').value,
+                    intent: document.getElementById('tp-intent').value,
+                    protocol_name: document.getElementById('tp-protocol').value,
+                    planned_sessions: Number(document.getElementById('tp-sessions').value) || 8,
+                });
+                toast('Draft Treatment Plan created', 'success');
+                loadTreatmentPlanView();
+            } catch (err) { statusEl.textContent = ''; toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function signTreatmentPlanSubmit() {
+            if (!confirm('Sign this Treatment Plan? This grants it clinical authority and can activate a linked Care Plan.')) return;
+            try {
+                await Api.post(`${CCA_API}/treatment-plans/${currentTreatmentPlanId}/sign`, {});
+                toast('Treatment Plan signed', 'success');
+                loadTreatmentPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function discontinueTreatmentPlanSubmit() {
+            const reason = prompt('Reason for discontinuing this Treatment Plan:');
+            if (!reason) { toast('A reason is required to discontinue', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/treatment-plans/${currentTreatmentPlanId}/discontinue`, { reason });
+                toast('Treatment Plan discontinued', 'success');
+                loadTreatmentPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function amendTreatmentPlanSubmit() {
+            const reason = document.getElementById('tp-amend-reason').value;
+            if (!reason) { toast('Change reason is required', 'error'); return; }
+            try {
+                await Api.put(`${CCA_API}/treatment-plans/${currentTreatmentPlanId}`, {
+                    protocol_name: document.getElementById('tp-amend-protocol').value,
+                    planned_sessions: Number(document.getElementById('tp-amend-sessions').value) || undefined,
+                    change_reason: reason,
+                });
+                toast('Treatment Plan amended', 'success');
+                loadTreatmentPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function acknowledgeGuidelineReviewSubmit() {
+            try {
+                await Api.post(`${CCA_API}/treatment-plans/${currentTreatmentPlanId}/acknowledge-guideline-review`, {});
+                toast('Guideline review acknowledged', 'success');
+                loadTreatmentPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function toggleTreatmentPlanHistory() {
+            const listEl = document.getElementById('treatmentplan-history-list');
+            if (listEl.style.display !== 'none') { listEl.style.display = 'none'; return; }
+            listEl.style.display = 'block';
+            listEl.innerHTML = 'Loading…';
+            try {
+                const data = await Api.get(`${CCA_API}/treatment-plans/${currentTreatmentPlanId}/versions`);
+                listEl.innerHTML = data.versions.map(v => `
+                    <div class="checklist-row" style="display:block;">
+                        <div><strong>v${v.version_no}</strong> · ${escapeHtml(v.status_at_version || '')} · ${escapeHtml(v.created_by || '—')} · ${v.created_at ? new Date(v.created_at).toLocaleString() : '—'}</div>
+                        <div style="color:var(--ink-600); margin-top:2px;">${escapeHtml(v.change_reason || '')}</div>
+                    </div>
+                `).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No version history.</p>';
+            } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
         }
 
         // ---------------------------------------------------------------

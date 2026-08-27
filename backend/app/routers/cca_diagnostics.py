@@ -23,6 +23,7 @@ from ..auth import (
     is_cca_radiologist, is_cca_radiology_coordinator, is_cca_lab_phlebotomy,
 )
 from ..models_cca import CCAOrder, CCAResult, CCABiomarkerResult, CCAJourneyEvent, CCAPatient
+from ..events import publish
 from .cca import get_cca_db, _org_id, _actor, _get_org_patient, _check_patient_in_org
 
 router = APIRouter(prefix="/api/cca", tags=["CCA Diagnostics"])
@@ -73,6 +74,18 @@ def _result_out(r: CCAResult) -> dict:
     }
 
 
+def _require_diagnostics_read(current_user: dict, *role_checks):
+    """Least-privilege read for a specialty worklist/order (architecture doc: 'Each role sees
+    only the detail necessary for its work'). Previously these reads had no role check at all
+    -- any authenticated org member (Front Desk, Patient Liaison, Financial Counsellor...)
+    could read a Radiology/Pathology/Lab worklist. Oncologists and Admin always pass, on top
+    of whichever specialty-specific predicates the caller supplies."""
+    if is_admin(current_user) or is_cca_oncologist(current_user):
+        return
+    if not any(check(current_user) for check in role_checks):
+        raise HTTPException(403, "This role does not have read access to this diagnostics worklist")
+
+
 def _worklist(db: Session, org_id: int, order_type: str) -> list:
     rows = db.query(CCAOrder, CCAPatient).join(
         CCAPatient, CCAOrder.patient_id == CCAPatient.id
@@ -88,11 +101,13 @@ def _worklist(db: Session, org_id: int, order_type: str) -> list:
 
 @router.get("/imaging/worklist")
 def imaging_worklist(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_diagnostics_read(current_user, is_cca_radiologist, is_cca_radiology_coordinator)
     return {"worklist": _worklist(db, _org_id(current_user), "RADIOLOGY")}
 
 
 @router.get("/imaging/orders/{order_id}")
 def get_imaging_order(order_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_diagnostics_read(current_user, is_cca_radiologist, is_cca_radiology_coordinator)
     order = _get_org_order(db, order_id, _org_id(current_user))
     if order.order_type != "RADIOLOGY":
         raise HTTPException(404, "Not an imaging order")
@@ -118,6 +133,13 @@ async def schedule_imaging_order(order_id: int, request: Request, db: Session = 
     order.workflow_state = "Scheduled"
     if order.status == "RAISED":
         order.status = "SCHEDULED"
+    actor = _actor(current_user)
+    publish(
+        db, "IMAGING_ORDER_SCHEDULED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Imaging scheduled: {order.item_name}", category="INVESTIGATION",
+        description=f"{actor} scheduled {order.item_name} for {order.scheduled_at.isoformat()}.",
+        order_id=order.id,
+    )
     db.commit()
     return {"status": "success", "order": _order_out(order)}
 
@@ -135,6 +157,17 @@ async def update_imaging_preparation(order_id: int, request: Request, db: Sessio
         raise HTTPException(422, "preparation_status must be NotRequired, Pending, Completed, or NeedsReview")
     order.preparation_status = prep_status
     order.preparation_notes = body.get("preparation_notes")
+    if prep_status == "NeedsReview":
+        # 'escalates clinical questions; does not clinically interpret them' (spec) -- this is
+        # the one preparation-status value that means something needs a clinician's attention,
+        # so it's the one worth an audit event rather than routine logistics noise.
+        actor = _actor(current_user)
+        publish(
+            db, "IMAGING_PREPARATION_NEEDS_REVIEW", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+            title=f"Imaging preparation needs review: {order.item_name}", category="INVESTIGATION",
+            description=f"{actor} flagged preparation for {order.item_name} as needing clinical review." + (f" {order.preparation_notes}" if order.preparation_notes else ""),
+            order_id=order.id,
+        )
     db.commit()
     return {"status": "success", "order": _order_out(order)}
 
@@ -190,11 +223,17 @@ def finalize_imaging_report(result_id: int, db: Session = Depends(get_cca_db), c
         order.status = "RESULTED"
         order.workflow_state = "ReportFinalized"
 
-    db.add(CCAJourneyEvent(
-        patient_id=result.patient_id, event_type="IMAGING_REPORT_FINALIZED",
-        event_title=f"Imaging Report Finalized: {result.title}", event_category="INVESTIGATION",
-        description=f"{actor} finalized the imaging report.", actor_name=actor, actor_role=current_user.get("role"),
-    ))
+    # event_type kept as the pre-existing "IMAGING_REPORT_FINALIZED" (not the architecture
+    # doc's suggested "RADIOLOGY_REPORT_FINAL") since it's already what the journey timeline
+    # and tests/integration/test_cca_diagnostics_module.py look for -- the spec itself notes
+    # its event names are "implementation-oriented" suggestions to adapt to the existing
+    # naming standard, not literal strings to match.
+    publish(
+        db, "IMAGING_REPORT_FINALIZED", patient_id=result.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Imaging Report Finalized: {result.title}", category="INVESTIGATION",
+        description=f"{actor} finalized the imaging report.",
+        result_id=result.id, order_id=result.order_id, is_critical=result.is_critical,
+    )
     db.commit()
     db.refresh(result)
     return {"status": "success", "result": _result_out(result)}
@@ -206,11 +245,13 @@ def finalize_imaging_report(result_id: int, db: Session = Depends(get_cca_db), c
 
 @router.get("/pathology/worklist")
 def pathology_worklist(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_diagnostics_read(current_user, is_cca_pathologist)
     return {"worklist": _worklist(db, _org_id(current_user), "PATHOLOGY")}
 
 
 @router.get("/pathology/orders/{order_id}")
 def get_pathology_order(order_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_diagnostics_read(current_user, is_cca_pathologist)
     order = _get_org_order(db, order_id, _org_id(current_user))
     if order.order_type != "PATHOLOGY":
         raise HTTPException(404, "Not a pathology order")
@@ -265,11 +306,12 @@ def finalize_pathology_report(result_id: int, db: Session = Depends(get_cca_db),
         order.status = "RESULTED"
         order.workflow_state = "ReportFinalized"
 
-    db.add(CCAJourneyEvent(
-        patient_id=result.patient_id, event_type="PATHOLOGY_REPORT_FINALIZED",
-        event_title=f"Pathology Report Finalized: {result.title}", event_category="INVESTIGATION",
-        description=f"{actor} finalized the pathology report.", actor_name=actor, actor_role=current_user.get("role"),
-    ))
+    publish(
+        db, "PATHOLOGY_REPORT_FINALIZED", patient_id=result.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Pathology Report Finalized: {result.title}", category="INVESTIGATION",
+        description=f"{actor} finalized the pathology report.",
+        result_id=result.id, order_id=result.order_id, is_critical=result.is_critical,
+    )
     db.commit()
     db.refresh(result)
     return {"status": "success", "result": _result_out(result)}
@@ -287,6 +329,7 @@ def _biomarker_out(b: CCABiomarkerResult) -> dict:
 
 @router.get("/molecular/tests")
 def list_molecular_tests(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_diagnostics_read(current_user, is_cca_pathologist)
     _get_org_patient(db, patient_id, _org_id(current_user))
     tests = db.query(CCABiomarkerResult).filter(CCABiomarkerResult.patient_id == patient_id).order_by(CCABiomarkerResult.reported_on.desc()).all()
     return {"tests": [_biomarker_out(t) for t in tests]}
@@ -309,6 +352,14 @@ async def order_molecular_test(request: Request, db: Session = Depends(get_cca_d
         method=body.get("method"), specimen=body.get("specimen"), status="PENDING",
     )
     db.add(test)
+    db.flush()
+    actor = _actor(current_user)
+    publish(
+        db, "MOLECULAR_TEST_ORDERED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Molecular test ordered: {marker_name}", category="INVESTIGATION",
+        description=f"{actor} ordered a {marker_name} molecular test.",
+        test_id=test.id,
+    )
     db.commit()
     db.refresh(test)
     return {"status": "success", "test": _biomarker_out(test)}
@@ -333,6 +384,13 @@ async def record_molecular_result(test_id: int, request: Request, db: Session = 
     test.platform = body.get("platform", test.platform)
     test.status = body.get("status", "RESULTED")
     test.confirmatory_required = body.get("confirmatory_required")
+    actor = _actor(current_user)
+    publish(
+        db, "MOLECULAR_RESULT_RECORDED", patient_id=test.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Molecular result recorded: {test.marker_name}", category="INVESTIGATION",
+        description=f"{actor} recorded {test.marker_name}: {result_value}.",
+        test_id=test.id,
+    )
     db.commit()
     db.refresh(test)
     return {"status": "success", "test": _biomarker_out(test)}
@@ -344,6 +402,7 @@ async def record_molecular_result(test_id: int, request: Request, db: Session = 
 
 @router.get("/lab/worklist")
 def lab_worklist(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_diagnostics_read(current_user, is_cca_lab_phlebotomy)
     return {"worklist": _worklist(db, _org_id(current_user), "LAB")}
 
 
@@ -355,11 +414,18 @@ async def collect_specimen(order_id: int, request: Request, db: Session = Depend
     if order.order_type != "LAB":
         raise HTTPException(404, "Not a lab order")
     body = await request.json()
-    order.collected_by = _actor(current_user)
+    actor = _actor(current_user)
+    order.collected_by = actor
     order.collected_at = datetime.utcnow()
     order.specimen_container = body.get("specimen_container")
     order.workflow_state = "Collected"
     order.status = "IN_PROGRESS"
+    publish(
+        db, "SPECIMEN_COLLECTED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Specimen collected: {order.item_name}", category="INVESTIGATION",
+        description=f"{actor} collected the specimen for {order.item_name}.",
+        order_id=order.id,
+    )
     db.commit()
     return {"status": "success", "order": _order_out(order)}
 
@@ -375,6 +441,13 @@ async def reject_specimen(order_id: int, request: Request, db: Session = Depends
         raise HTTPException(422, "reason is required to reject a specimen")
     order.rejection_reason = reason
     order.workflow_state = "RecollectionRequired"
+    actor = _actor(current_user)
+    publish(
+        db, "SPECIMEN_REJECTED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Specimen rejected: {order.item_name}", category="INVESTIGATION",
+        description=f"{actor} rejected the specimen for {order.item_name}: {reason}",
+        order_id=order.id,
+    )
     db.commit()
     return {"status": "success", "order": _order_out(order)}
 
@@ -400,8 +473,19 @@ async def record_lab_result(order_id: int, request: Request, db: Session = Depen
         finalized_by=_actor(current_user), finalized_at=datetime.utcnow(),
     )
     db.add(result)
+    db.flush()
     order.status = "RESULTED"
     order.workflow_state = "ResultAvailable"
+    # No journey/domain event existed for lab results at all before this -- unlike imaging
+    # and pathology, which always had one. Lab results finalize immediately (no separate
+    # draft step), so this is the only point to publish from.
+    actor = _actor(current_user)
+    publish(
+        db, "LAB_RESULT_FINALIZED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Lab Result Finalized: {result.title}", category="INVESTIGATION",
+        description=f"{actor} recorded the lab result.",
+        result_id=result.id, order_id=order.id, is_critical=result.is_critical,
+    )
     db.commit()
     db.refresh(result)
     return {"status": "success", "result": _result_out(result)}

@@ -36,6 +36,9 @@
         .message { margin: 8px 0; padding: 10px 14px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; }
         .success { color: var(--green-badge-text); background: var(--green-badge-bg); }
         .error { color: var(--rose-badge-text); background: var(--rose-badge-bg); }
+        .metric-tile { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 14px 16px; }
+        .metric-tile-label { font-size: 11px; color: var(--ink-500); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 6px; }
+        .metric-tile-value { font-size: 20px; font-weight: 700; color: var(--ink-900); }
     </style>
 </head>
 <body>
@@ -118,6 +121,26 @@
     <table>
         <thead><tr><th>Test Name</th><th>Common Alias</th><th>Department</th><th>Specimen</th><th>Added By</th><th>Action</th></tr></thead>
         <tbody id="lab-test-table-body"></tbody>
+    </table>
+
+    <h1 style="margin-top:32px;">📊 CCA Oncology OS — Reports</h1>
+    <p style="color:var(--ink-500);margin-bottom:16px;">Operational and timing metrics only — never clinical interpretation, diagnosis, or treatment decisions (matches every clinical role's own least-privilege projection).</p>
+
+    <h2 style="font-size:15px; font-weight:700; color:var(--ink-900); margin-bottom:10px;">Operations Dashboard</h2>
+    <div id="cca-ops-tiles" style="display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin-bottom:28px;"></div>
+
+    <h2 style="font-size:15px; font-weight:700; color:var(--ink-900); margin-bottom:10px;">Treatment Analytics</h2>
+    <div id="cca-analytics-tiles" style="display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin-bottom:28px;"></div>
+
+    <h2 style="font-size:15px; font-weight:700; color:var(--ink-900); margin-bottom:10px;">Audit &amp; Activity</h2>
+    <div class="flex">
+        <input type="text" id="audit-category-filter" placeholder="Filter by category (e.g. TREATMENT_PLAN, MDT, FINANCIAL)" />
+        <button id="audit-filter-btn" class="btn-primary">Filter</button>
+        <button id="audit-refresh-btn" class="btn-outline">Refresh</button>
+    </div>
+    <table>
+        <thead><tr><th>Time</th><th>Patient</th><th>Category</th><th>Event</th><th>Actor</th><th>Description</th></tr></thead>
+        <tbody id="audit-table-body"></tbody>
     </table>
 </div>
 <script>
@@ -388,7 +411,77 @@ document.getElementById('add-lab-test-btn').addEventListener('click', async () =
     }
 });
 
-verifyAdmin().then(() => { loadUsers(); loadCustomMedicines(); loadCustomLabTests(); });
+// ---- CCA Oncology OS Reports (Operations Dashboard / Treatment Analytics / Audit) ----
+function metricTile(label, value) {
+    return `<div class="metric-tile"><div class="metric-tile-label">${label}</div><div class="metric-tile-value">${value === null || value === undefined ? '—' : value}</div></div>`;
+}
+
+async function loadCcaOperationsDashboard() {
+    const el = document.getElementById('cca-ops-tiles');
+    const res = await apiRequest('/cca/admin/operations-dashboard');
+    if (!res.ok) { el.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">Failed to load operations dashboard.</p>`; return; }
+    const d = await res.json();
+    el.innerHTML = [
+        metricTile('Patients (total)', d.patients_total),
+        metricTile('Nurse Intake Pending', d.nurse_intake_pending),
+        metricTile('MDT Cases Pending', d.mdt_cases_pending),
+        metricTile('Radiology Pending', d.radiology_pending),
+        metricTile('Pathology Pending', d.pathology_pending),
+        metricTile('Lab Pending', d.lab_pending),
+        metricTile('Financial Clearance Pending', d.financial_clearance_pending),
+        metricTile('Coordination Overdue Tasks', d.coordination_overdue_tasks),
+    ].join('');
+}
+
+async function loadCcaTreatmentAnalytics() {
+    const el = document.getElementById('cca-analytics-tiles');
+    const res = await apiRequest('/cca/admin/analytics/treatment-metrics');
+    if (!res.ok) { el.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">Failed to load treatment analytics.</p>`; return; }
+    const d = await res.json();
+    el.innerHTML = [
+        metricTile('Avg Days: Plan Activation → Treatment Start', d.avg_days_plan_activation_to_treatment_start),
+        metricTile('Avg Days: Plan Draft → Sign', d.avg_days_plan_draft_to_sign),
+        metricTile('Open/Escalated Tasks', d.open_or_escalated_tasks),
+        metricTile('Treatment Plan Revisions', d.treatment_plan_revisions),
+        metricTile('Treatment Holds', d.treatment_holds),
+        metricTile('Patient No-Shows', d.patient_no_shows),
+        metricTile('Sessions Completion Rate', d.sessions_completion_rate !== null && d.sessions_completion_rate !== undefined ? `${Math.round(d.sessions_completion_rate * 100)}%` : null),
+    ].join('');
+}
+
+async function loadCcaAudit() {
+    const tbody = document.getElementById('audit-table-body');
+    const category = document.getElementById('audit-category-filter').value.trim();
+    const qs = category ? `?category=${encodeURIComponent(category)}&limit=100` : '?limit=100';
+    const res = await apiRequest(`/cca/admin/audit${qs}`);
+    if (!res.ok) { tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--ink-400);">Failed to load audit trail</td></tr>`; return; }
+    const data = await res.json();
+    const rows = data.events || [];
+    if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--ink-400);">No matching events</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = rows.map(e => `
+        <tr>
+            <td>${e.timestamp ? new Date(e.timestamp).toLocaleString() : '—'}</td>
+            <td>${e.patient_name || ''}</td>
+            <td>${e.event_category || ''}</td>
+            <td>${e.event_title || e.event_type || ''}</td>
+            <td>${e.actor_name || ''}${e.actor_role ? ' (' + e.actor_role + ')' : ''}</td>
+            <td>${e.description || ''}</td>
+        </tr>
+    `).join('');
+}
+document.getElementById('audit-filter-btn').addEventListener('click', loadCcaAudit);
+document.getElementById('audit-refresh-btn').addEventListener('click', () => {
+    document.getElementById('audit-category-filter').value = '';
+    loadCcaAudit();
+});
+
+verifyAdmin().then(() => {
+    loadUsers(); loadCustomMedicines(); loadCustomLabTests();
+    loadCcaOperationsDashboard(); loadCcaTreatmentAnalytics(); loadCcaAudit();
+});
 </script>
 </body>
 </html>

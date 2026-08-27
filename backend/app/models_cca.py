@@ -48,6 +48,32 @@ class CCAConsent(Base):
     status = Column(String(30), default="ACTIVE")
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class PatientAccount(Base):
+    """Patient self-service login identity -- deliberately NOT a role on the staff `User`
+    table (models.py): patients need different fields, policies, and blast-radius than
+    hospital staff, and a patient token must never be able to reach a staff endpoint or
+    vice versa (see patient_auth.py's create_patient_access_token / get_current_patient,
+    which use a distinct token shape+type from staff tokens, checked by a dependency
+    staff endpoints never use).
+
+    Provisioning is via a one-time activation code issued in person by a staff member with
+    patient-contact responsibility (see routers/patient_portal.py's
+    issue_patient_activation_code), gated behind an already-captured
+    "patient_portal_access" consent -- not open self-signup, and not gated on an SMS/email
+    OTP channel this codebase has no infrastructure for yet. Swapping in phone/email OTP
+    later only touches activate_patient_account's verification step, not this model or the
+    token/auth layer."""
+    __tablename__ = "cca_patient_accounts"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False, unique=True)
+    is_activated = Column(Boolean, default=False)
+    activation_code_hash = Column(String(200), nullable=True)
+    activation_code_expires_at = Column(DateTime, nullable=True)
+    activated_at = Column(DateTime, nullable=True)
+    issued_by = Column(String(200), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class CCAQueueEvent(Base):
     __tablename__ = "cca_queue_events"
     id = Column(Integer, primary_key=True)
@@ -291,6 +317,40 @@ class GuidelineContext(Base):
     viewed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class GuidelineRegistry(Base):
+    """The canonical, current version of a named guideline pathway -- distinct from
+    GuidelineContext (a per-patient readiness snapshot) and from
+    TreatmentPlanGuidelineLink (what version a specific signed plan was authorized under).
+    One row per (guideline_source, pathway_name). Publishing a new version here (Admin-only,
+    see routers/cca.py's publish_guideline_version) flags already-signed plans that used an
+    older version for clinician review -- it never rewrites them; see the architecture doc's
+    non-negotiable on guideline updates."""
+    __tablename__ = "cca_guideline_registry"
+    id = Column(Integer, primary_key=True)
+    guideline_source = Column(String(100), nullable=False)
+    pathway_name = Column(String(200), nullable=True)
+    current_version = Column(String(50), nullable=False)
+    published_by = Column(String(200))
+    published_at = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("guideline_source", "pathway_name", name="uq_guideline_registry_source_pathway"),)
+
+
+class TreatmentPlanGuidelineLink(Base):
+    """What guideline version a signed Treatment Plan was authorized under, snapshotted at
+    signing time and never updated retroactively -- a later guideline version update flags
+    the plan (TreatmentPlan.guideline_review_required) instead of changing this record or
+    the plan's content. Created only when the patient actually has a guideline context to
+    snapshot (see sign_treatment_plan) -- a plan authored without ever consulting a
+    guideline pathway has no link, which is expected, not a bug."""
+    __tablename__ = "cca_treatment_plan_guideline_links"
+    id = Column(Integer, primary_key=True)
+    treatment_plan_id = Column(Integer, ForeignKey("cca_treatment_plans.id"), nullable=False)
+    guideline_source = Column(String(100), nullable=False)
+    pathway_name = Column(String(200), nullable=True)
+    version_at_signing = Column(String(50), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class ClinicalBrief(Base):
     __tablename__ = "cca_clinical_briefs"
     id = Column(Integer, primary_key=True)
@@ -449,7 +509,20 @@ class CarePlan(Base):
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     intent = Column(String(100), default="Curative")
     goals = Column(JSON)
-    components = Column(JSON)  # systemic, surgical, radiation, supportive
+    components = Column(JSON)  # systemic, surgical, radiation, supportive -- a display rollup,
+    # not the source of truth: the authoritative clinical strategy lives on the signed
+    # TreatmentPlan row(s) referenced by source_treatment_plan_ids below. See
+    # ARCHITECTURE_NOTES.md / the Care Plan & Treatment Plan architecture doc for why these
+    # were previously conflated (one CarePlan row shown as "Treatment Plan" to oncologists).
+    source_treatment_plan_ids = Column(JSON, nullable=True)  # [treatment_plan_id, ...]
+    # Patient-facing view is gated behind explicit clinical/consent review (architecture doc:
+    # "Only after clinical/consent review... never expose internal reasoning by default") --
+    # see routers/cca.py's approve_patient_facing_view / get_patient_facing_summary. Any
+    # material amendment (update_care_plan) resets this so a stale approval can never keep
+    # showing outdated content.
+    patient_facing_approved = Column(Boolean, default=False)
+    patient_facing_approved_by = Column(String(200), nullable=True)
+    patient_facing_approved_at = Column(DateTime, nullable=True)
     monitoring_plan = Column(JSON)
     follow_up_plan = Column(JSON)
     next_decision_point = Column(String(255))
@@ -466,33 +539,132 @@ class CarePlanVersion(Base):
     snapshot = Column(JSON, nullable=False)
     change_reason = Column(Text, nullable=False)
     changed_sections = Column(JSON, nullable=True)
+    # Field-level before/after -- the architecture doc's PlanAuditEvent explicitly asks for
+    # "before/after hash or equivalent audit reference", not just a full after-state snapshot
+    # (which `snapshot` above already is). See routers/cca.py's _diff_dicts.
+    before_after_diff = Column(JSON, nullable=True)
     created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class CarePlanTask(Base):
+    """A patient-scoped review/reassessment task. care_plan_id is optional -- a task is
+    patient-scoped first and a Care Plan link is added when one is available, since real
+    triggers (e.g. an MDT recommendation finalizing) routinely happen before any Care Plan
+    exists yet. Previously NOT NULL, which meant event_subscribers.py's
+    'treating clinician receives review task' effect for MDT_RECOMMENDATION_FINALIZED could
+    not be implemented at all for a patient without an active Care Plan -- see
+    migrations.py's run_constraint_migrations for how an existing Postgres deployment picks
+    up this relaxation."""
     __tablename__ = "cca_care_plan_tasks"
     id = Column(Integer, primary_key=True)
-    care_plan_id = Column(Integer, ForeignKey("cca_care_plans.id"), nullable=False)
+    care_plan_id = Column(Integer, ForeignKey("cca_care_plans.id"), nullable=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     description = Column(Text, nullable=False)
     owner_id = Column(String(100), nullable=False)
     owner_name = Column(String(200), nullable=False)
     due_date = Column(DateTime, nullable=False)
-    status = Column(String(30), default="OPEN")  # OPEN, ACKNOWLEDGED, RESOLVED, ESCALATED
+    status = Column(String(30), default="OPEN")  # OPEN, ACKNOWLEDGED, RESOLVED, ESCALATED, BLOCKED
+    # AI proposes, clinician decides (architecture doc non-negotiable): AI_SEARCH_PROPOSED
+    # tasks are created only by an explicit clinician action confirming a search result (see
+    # routers/cca.py's propose_task_from_search) -- never automatically. SYSTEM is this
+    # codebase's own event subscribers (event_subscribers.py); MANUAL is direct clinician entry.
+    source = Column(String(30), default="SYSTEM")  # SYSTEM, AI_SEARCH_PROPOSED, MANUAL
+    # A patient-safe rewrite of `description`, set only by explicit clinician action (see
+    # routers/cca.py's set_task_patient_visible_note). NULL by default -- a task is excluded
+    # from the patient-facing summary unless a clinician has deliberately authored
+    # patient-appropriate wording for it, never by exposing the raw internal `description`
+    # (which routinely names clinical detail like toxicity grade or an MDT case number).
+    patient_visible_note = Column(Text, nullable=True)
+    # owner_role is a coarse ownership *category* (TREATING_ONCOLOGIST, CARE_COORDINATION,
+    # NURSING, MDT_COORDINATION), not one of the 15 literal CCA role strings -- several roles
+    # can share a category (e.g. all three oncologist personas are TREATING_ONCOLOGIST), and
+    # this is what a role-scoped "my tasks" view filters on (see list_patient_tasks's
+    # `owner_role` query param). owner_id/owner_name above remain the specific person, when
+    # known -- this is the class of person, always known at creation time.
+    owner_role = Column(String(30), nullable=True)
+    category = Column(String(30), nullable=True)  # CLINICAL_REVIEW, MDT_REVIEW, COORDINATION, ADMINISTRATIVE
+    # CarePlanItem-style linkage (architecture doc data model, §27): what this task is
+    # blocked on. Purely additive/optional -- most tasks created so far (MDT review,
+    # treatment-hold reassessment, no-show recovery) have no natural upstream order/result to
+    # link and leave these null.
+    dependency_ids = Column(JSON, nullable=True)  # [care_plan_task_id, ...]
+    linked_order_id = Column(Integer, ForeignKey("cca_orders.id"), nullable=True)
+    linked_result_id = Column(Integer, ForeignKey("cca_results.id"), nullable=True)
+    blocker_reason = Column(Text, nullable=True)  # required when status is set to BLOCKED
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class TreatmentPlan(Base):
+    """The clinician-owned cancer treatment strategy -- distinct from CarePlan (the
+    multidisciplinary execution layer). A TreatmentPlan is drafted, then signed by an
+    authorized clinician of the matching modality (see auth.py's is_cca_medical_oncologist /
+    is_cca_surgical_oncologist / is_cca_radiation_oncologist and
+    routers/cca.py's _require_modality_signer), which is what moves it to ACTIVE. A CarePlan
+    is only ever created by referencing an already-ACTIVE (signed) TreatmentPlan -- see
+    CarePlan.source_treatment_plan_ids -- never the other way around.
+    care_plan_id is a convenience back-reference, set once a CarePlan is generated from this
+    plan; it is not the ownership direction."""
     __tablename__ = "cca_treatment_plans"
     id = Column(Integer, primary_key=True)
     care_plan_id = Column(Integer, ForeignKey("cca_care_plans.id"), nullable=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    mdt_decision_id = Column(Integer, ForeignKey("cca_mdt_decisions.id"), nullable=True)
+    intent = Column(String(100), default="Curative")
     modality = Column(String(100), default="Systemic Chemotherapy")
     protocol_name = Column(String(200), default="AC-T (Doxorubicin/Cyclophosphamide followed by Paclitaxel)")
     planned_sessions = Column(Integer, default=8)
     completed_sessions = Column(Integer, default=0)
     start_date = Column(Date, default=datetime.utcnow)
-    status = Column(String(30), default="ACTIVE")  # PLANNED, ACTIVE, COMPLETED, STOPPED
+    version_no = Column(Integer, default=1)
+    # DRAFT -> PROPOSED -> ACTIVE (signed) -> ON_HOLD / COMPLETED / SUPERSEDED / CANCELLED.
+    # Previously this defaulted straight to "ACTIVE" at creation with no signature step at
+    # all -- see the architecture doc's non-negotiable "only authorized clinicians sign an
+    # active Treatment Plan" rule.
+    status = Column(String(30), default="DRAFT")
+    supersedes_id = Column(Integer, ForeignKey("cca_treatment_plans.id"), nullable=True)
+    signer_email = Column(String(200), nullable=True)
+    signer_role = Column(String(50), nullable=True)
+    signed_at = Column(DateTime, nullable=True)
+    # Never silently rewritten by a guideline version change (architecture doc
+    # non-negotiable) -- a newer version only sets these two fields via
+    # routers/cca.py's publish_guideline_version; clearing them requires an explicit
+    # clinician action (acknowledge_guideline_review), never an automatic content change.
+    guideline_review_required = Column(Boolean, default=False)
+    guideline_review_reason = Column(Text, nullable=True)
+    created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TreatmentPlanVersion(Base):
+    """Append-only version history for TreatmentPlan, mirroring CarePlanVersion's pattern
+    (the one existing versioning convention in this codebase with a mandatory reason and a
+    full snapshot -- chosen over StagingRecord's self-referencing-pointer style for
+    consistency with CarePlan, since Care Plan and Treatment Plan should behave identically
+    from an audit standpoint)."""
+    __tablename__ = "cca_treatment_plan_versions"
+    id = Column(Integer, primary_key=True)
+    treatment_plan_id = Column(Integer, ForeignKey("cca_treatment_plans.id"), nullable=False)
+    version_no = Column(Integer, nullable=False)
+    snapshot = Column(JSON, nullable=False)
+    change_reason = Column(Text, nullable=False)
+    status_at_version = Column(String(30), nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TreatmentPlanCoSignature(Base):
+    """Scaffolding for future multimodality co-signing (e.g. a Surgical Oncologist
+    co-signing the surgical component of a plan a Medical Oncologist authored). Deliberately
+    unenforced by any endpoint in this slice -- the architecture doc's open decision on
+    multimodality signing defaulted to 'primary signer now, co-signature structure reserved
+    for later' rather than guessing at enforcement rules. Do not wire this up without
+    revisiting that decision first."""
+    __tablename__ = "cca_treatment_plan_cosignatures"
+    id = Column(Integer, primary_key=True)
+    treatment_plan_id = Column(Integer, ForeignKey("cca_treatment_plans.id"), nullable=False)
+    modality = Column(String(100), nullable=False)
+    signer_email = Column(String(200), nullable=False)
+    signer_role = Column(String(50), nullable=False)
+    signed_at = Column(DateTime, default=datetime.utcnow)
 
 class TreatmentSession(Base):
     __tablename__ = "cca_treatment_sessions"
@@ -507,6 +679,61 @@ class TreatmentSession(Base):
     administered_by = Column(String(200), nullable=True)
     status = Column(String(50), default="PLANNED")  # PLANNED, ASSESSED, ADMINISTERED, HELD, DEFERRED, CANCELLED
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class TreatmentOrder(Base):
+    """The executable instruction for one specific TreatmentSession, distinct from both
+    TreatmentPlan (the strategy) and TreatmentEvent (what actually happened). Day-Care must
+    never act on a TreatmentPlan or CarePlan directly -- only on a TreatmentOrder that is
+    itself SIGNED, by a clinician of the plan's own modality (see
+    routers/cca.py's _require_modality_signer, reused here). Each cycle/session gets its own
+    Order rather than reusing/editing a prior one, so a dose change is always a new,
+    separately authorized instruction, never a silent edit to what was already ordered."""
+    __tablename__ = "cca_treatment_orders"
+    id = Column(Integer, primary_key=True)
+    treatment_plan_id = Column(Integer, ForeignKey("cca_treatment_plans.id"), nullable=False)
+    treatment_session_id = Column(Integer, ForeignKey("cca_treatment_sessions.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    instructions = Column(JSON, nullable=True)  # e.g. {"drug":..., "dose":..., "route":..., "rate":...}
+    version_no = Column(Integer, default=1)
+    status = Column(String(30), default="DRAFT")  # DRAFT, SIGNED, EXECUTED, HELD, CANCELLED
+    signer_email = Column(String(200), nullable=True)
+    signer_role = Column(String(50), nullable=True)
+    signed_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TreatmentEvent(Base):
+    """What actually happened, as distinct from what was ordered. Always tied to a specific
+    signed TreatmentOrder (never to a Plan or Care Plan directly) -- an event with no valid
+    order reference should not be constructible through this API; see
+    routers/cca.py's record_clearance_decision, the only writer of this table."""
+    __tablename__ = "cca_treatment_events"
+    id = Column(Integer, primary_key=True)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    event_type = Column(String(30), nullable=False)  # ADMINISTERED, HELD, DEFERRED, DISCONTINUED
+    outcome = Column(String(100), nullable=True)  # e.g. "Standard Dose (100%)", "Dose Reduced 75%"
+    reason = Column(Text, nullable=True)
+    performed_by = Column(String(200), nullable=True)
+    performed_role = Column(String(50), nullable=True)
+    performed_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class DomainEvent(Base):
+    """Durable record of every domain event published through events.py's bus -- the
+    architecture doc's named event stream (CARE_PLAN_ACTIVATED, TREATMENT_PLAN_SIGNED,
+    TREATMENT_ADMINISTERED, ...), distinct from CCAJourneyEvent (a human-readable per-patient
+    timeline written from the same publish() call, not a second source of truth for the
+    same data)."""
+    __tablename__ = "cca_domain_events"
+    id = Column(Integer, primary_key=True)
+    event_type = Column(String(50), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=True)
+    payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 
 class ToxicityEvent(Base):
     __tablename__ = "cca_toxicity_events"
@@ -526,6 +753,7 @@ class TreatmentClearance(Base):
     __tablename__ = "cca_treatment_clearances"
     id = Column(Integer, primary_key=True)
     session_id = Column(Integer, ForeignKey("cca_treatment_sessions.id"), nullable=False)
+    order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     decision = Column(String(50), nullable=False)  # CLEARED, CLEARED_DOSE_REDUCTION, HELD, DEFERRED, PENDING_REASSESSMENT, DISCONTINUED
     reason = Column(Text, nullable=False)

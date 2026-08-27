@@ -618,6 +618,7 @@
                 <span class="engine-pill incomplete" id="pill-staging-engine" onclick="switchTab('staging')">🎯 STAGING: <span id="pill-staging-text">INCOMPLETE</span></span>
                 <span class="engine-pill danger" id="pill-guideline-engine" onclick="switchTab('nccn')">📖 NCCN: <span id="pill-guideline-text">NOT READY</span></span>
                 <span class="engine-pill ready" onclick="switchTab('nexus')">⚡ NEXUS BRIEF <span class="nav-badge" style="background:rgba(6,182,212,0.3);color:#22d3ee;">13 SEC</span></span>
+                <span class="engine-pill ready" onclick="switchTab('treatmentplan')">🧬 TREATMENT PLAN</span>
                 <span class="engine-pill ready" onclick="switchTab('careplan')">🛡️ CARE PLAN <span class="nav-badge" id="hdr-careplan-ver">v1.0</span></span>
             </div>
 
@@ -1057,14 +1058,34 @@
                 </div>
             </div>
 
+            <!-- SCREEN 7b: Treatment Plan (clinician-owned cancer treatment strategy -- distinct
+                 from the Care Plan below, which is the multidisciplinary execution layer built
+                 from an already-signed Treatment Plan. See ARCHITECTURE_NOTES.md / the Care Plan
+                 & Treatment Plan architecture doc.) -->
+            <div id="view-treatmentplan" class="screen-view">
+                <div class="card-header">
+                    <div>
+                        <h2 class="card-title">🧬 Treatment Plan</h2>
+                        <p style="font-size: 13px; color: var(--text-secondary);">The authorized cancer treatment strategy. Draft, then sign as the matching modality specialist -- signing is what gives a plan clinical authority and is what a Care Plan may reference.</p>
+                    </div>
+                    <button class="btn-cca btn-primary" onclick="openCreateTreatmentPlanModal()">➕ Draft New Treatment Plan</button>
+                </div>
+
+                <div id="treatmentplan-content-container">
+                    <!-- Populated via JS: loadTreatmentPlanView() -->
+                </div>
+            </div>
+
             <!-- SCREEN 8: Live Care Plan (SCR-23 / WOW 7) -->
             <div id="view-careplan" class="screen-view">
                 <div class="card-header">
                     <div>
                         <h2 class="card-title">🛡️ Live Care Plan Hub (Version <span id="careplan-ver-text">1.0</span>)</h2>
-                        <p style="font-size: 13px; color: var(--text-secondary);">Continuous multidisciplinary plan. Amendments strictly require a documented change_reason (Rule E-36).</p>
+                        <p style="font-size: 13px; color: var(--text-secondary);">Continuous multidisciplinary execution plan, built from signed Treatment Plan(s). Amendments strictly require a documented change_reason (Rule E-36).</p>
                     </div>
-                    <button class="btn-cca btn-primary" onclick="openCarePlanAmendModal()">✏️ Amend Care Plan (New Version)</button>
+                    <div id="careplan-header-actions">
+                        <button class="btn-cca btn-primary" onclick="openCarePlanAmendModal()">✏️ Amend Care Plan (New Version)</button>
+                    </div>
                 </div>
 
                 <div id="careplan-content-container">
@@ -1080,6 +1101,12 @@
                         <p style="font-size: 13px; color: var(--text-secondary);">Pre-cycle organ toxicity evaluation and structured clearance exits.</p>
                     </div>
                     <button class="btn-cca btn-emerald" onclick="openClearanceModal()">🎯 Decide Treatment Clearance</button>
+                </div>
+
+                <div class="workspace-card" id="treatment-day-order-container" style="margin-bottom: 20px;">
+                    <!-- Populated via JS: loadTreatmentDayAssessment() -- the signed Treatment
+                         Order this cockpit is acting against. Day-Care must never infer
+                         treatment from the Care Plan alone. -->
                 </div>
 
                 <div class="grid-2" style="margin-bottom: 20px;">

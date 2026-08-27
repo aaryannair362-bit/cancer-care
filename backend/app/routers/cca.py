@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 from ..models import User
 from ..auth import (
     get_current_user, is_admin, is_doctor, is_cca_oncologist, is_cca_front_desk,
-    is_cca_nurse_navigator,
+    is_cca_nurse_navigator, is_cca_medical_oncologist, is_cca_surgical_oncologist,
+    is_cca_radiation_oncologist, is_cca_patient_liaison, is_cca_infusion_nurse,
 )
 from ..config import settings
 from ..ocr_service import extract_document
@@ -25,8 +26,10 @@ from ..models_cca import (
     CCAPatient, CCAConsent, CCAQueueEvent, CCAEncounter, CCAIntakeAssessment,
     CCADocument, ClinicalFact, CCAContradiction, CCACancerDiagnosis,
     CCABiomarkerResult, CCAOrder, CCAResult, StagingRecord, StagingEvidence,
-    GuidelineContext, ClinicalBrief, MDTCase, MDTDecision, CarePlan,
-    CarePlanVersion, CarePlanTask, TreatmentPlan, TreatmentSession,
+    GuidelineRegistry, TreatmentPlanGuidelineLink,
+    ClinicalBrief, MDTCase, MDTDecision, CarePlan,
+    CarePlanVersion, CarePlanTask, TreatmentPlan, TreatmentPlanVersion, TreatmentSession,
+    TreatmentOrder, TreatmentEvent,
     ToxicityEvent, TreatmentClearance, ResponseAssessment, CCAJourneyEvent
 )
 from ..cca_engine import (
@@ -35,6 +38,13 @@ from ..cca_engine import (
     classify_document, extract_clinical_facts,
 )
 from ..cca_seed import seed_cca_database, simulate_ct_result
+from ..cca_product_decisions import CARE_PLAN_IN_PROGRESS_STATUSES, TREATMENT_ORDERS_SYSTEM_OF_RECORD
+from ..events import publish
+from .. import event_subscribers  # noqa: F401 -- import registers this module's @subscribe handlers
+from ..rbac_projection import (
+    care_plan_tier, treatment_plan_tier, treatment_order_tier, can_view_draft_plans_and_orders,
+    project_care_plan, project_treatment_plan, project_treatment_order,
+)
 
 router = APIRouter(prefix="/api/cca", tags=["CCA Oncology OS"])
 ALLOWED_DOCUMENT_TYPES = {"application/pdf", "image/jpeg", "image/png", "image/tiff"}
@@ -78,6 +88,40 @@ def _require_clinician(current_user: dict):
     Surgical/Radiation), the general Doctor role, or Admin only."""
     if not (is_doctor(current_user) or is_admin(current_user) or is_cca_oncologist(current_user)):
         raise HTTPException(403, "Only a treating oncologist or Admin may perform this action")
+
+
+# Modality -> the role predicate authorized to sign/discontinue a Treatment Plan of that
+# modality. TreatmentPlan.modality is still a free-text field (no enum exists yet -- see the
+# architecture doc's data-model diff), so this is a deliberately simple keyword match rather
+# than a real lookup table; it should become one once modality is a real enum.
+_MODALITY_SIGNER_CHECKS = [
+    (("surg",), is_cca_surgical_oncologist, "Surgical Oncologist"),
+    (("radiat", "rt "), is_cca_radiation_oncologist, "Radiation Oncologist"),
+]
+
+
+def _require_modality_signer(current_user: dict, modality: str):
+    """Only an authorized clinician of the *matching* modality may sign or discontinue a
+    Treatment Plan (architecture doc non-negotiable #1: Medical/Surgical/Radiation Oncologist
+    each own C/E/S of their own modality, R others -- previously all three were treated as
+    interchangeable via is_cca_oncologist for every plan action). Admin may always act, for
+    demo/support purposes, matching every other clinician gate in this router.
+
+    Multimodality co-signature (e.g. a second modality co-signing a shared plan) is
+    deliberately out of scope here -- see TreatmentPlanCoSignature's docstring in
+    models_cca.py. This only decides who may be the single primary signer for a given
+    modality string."""
+    if is_admin(current_user):
+        return
+    modality_lower = (modality or "").lower()
+    for keywords, predicate, label in _MODALITY_SIGNER_CHECKS:
+        if any(kw in modality_lower for kw in keywords):
+            if not predicate(current_user):
+                raise HTTPException(403, f"Only the {label} (or Admin) may sign/discontinue this modality's Treatment Plan")
+            return
+    # Default: systemic/medical therapy (and anything not matching a keyword above).
+    if not (is_cca_medical_oncologist(current_user) or is_doctor(current_user)):
+        raise HTTPException(403, "Only the Medical Oncologist (or Admin) may sign/discontinue this modality's Treatment Plan")
 
 
 def _get_org_patient(db: Session, patient_id: int, org_id: int) -> CCAPatient:
@@ -246,6 +290,74 @@ async def register_cca_patient(
             "age": patient.age, "sex": patient.sex, "journey_state": patient.journey_state,
         },
     }
+
+
+@router.post("/patients/{patient_id}/consents", status_code=201)
+async def capture_consent(
+    patient_id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Real gap this closes: CCAConsent (models_cca.py) previously had no create endpoint
+    anywhere -- the only rows that ever existed were cca_seed.py's hardcoded demo data, so
+    Front Desk's registration wizard had nothing to call and patient_portal.py's
+    'patient_portal_access' consent gate (architecture doc: 'only after clinical/consent
+    review') could never actually be satisfied outside the demo seed. Gated the same as
+    patient-facing-view preview access -- capturing consent is a patient-contact
+    responsibility, not a pure clinical decision."""
+    _require_patient_contact_role(current_user)
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    consent_types = body.get("consent_types")
+    signatory = body.get("signatory")
+    if not consent_types or not isinstance(consent_types, list):
+        raise HTTPException(422, "consent_types (a non-empty list) is required")
+    if not signatory:
+        raise HTTPException(422, "signatory is required")
+
+    actor = _actor(current_user)
+    consent = CCAConsent(
+        patient_id=patient_id,
+        consent_types=consent_types,
+        signatory=signatory,
+        signatory_reason=body.get("signatory_reason"),
+        captured_by=actor,
+        status="ACTIVE",
+    )
+    db.add(consent)
+    db.flush()
+    publish(
+        db, "CONSENT_CAPTURED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title="Consent captured", category="REGISTRATION",
+        description=f"{actor} captured consent ({', '.join(consent_types)}) signed by {signatory}.",
+        consent_id=consent.id,
+    )
+    db.commit()
+    db.refresh(consent)
+    return {
+        "status": "success",
+        "consent": {
+            "id": consent.id, "patient_id": consent.patient_id, "consent_types": consent.consent_types,
+            "signatory": consent.signatory, "status": consent.status,
+            "valid_from": consent.valid_from.isoformat() if consent.valid_from else None,
+        },
+    }
+
+
+@router.get("/patients/{patient_id}/consents")
+def list_consents(
+    patient_id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(CCAConsent).filter(CCAConsent.patient_id == patient_id).order_by(CCAConsent.id.desc()).all()
+    return {"consents": [
+        {
+            "id": c.id, "consent_types": c.consent_types, "signatory": c.signatory,
+            "signatory_reason": c.signatory_reason, "captured_by": c.captured_by, "status": c.status,
+            "valid_from": c.valid_from.isoformat() if c.valid_from else None,
+        }
+        for c in rows
+    ]}
 
 
 @router.patch("/patients/{patient_id}/visit")
@@ -801,10 +913,14 @@ def accept_fact(
     fact_id: int, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
+    """Verifying an AI-extracted fact is a clinical judgment call (architecture doc: AI
+    proposes, clinician decides) -- gated and audited the same as any other clinical
+    decision on the record."""
     fact = db.query(ClinicalFact).filter(ClinicalFact.id == fact_id).first()
     if not fact:
         raise HTTPException(404, "Fact not found")
     _check_patient_in_org(db, fact.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
 
     open_ctr = db.query(CCAContradiction).filter(
         CCAContradiction.patient_id == fact.patient_id,
@@ -814,8 +930,15 @@ def accept_fact(
         raise HTTPException(422, f"Cannot accept fact: Part of unresolved contradiction ({open_ctr.rule_id}). Resolve contradiction first.")
 
     fact.status = "VERIFIED"
-    fact.verified_by = _actor(current_user)
+    actor = _actor(current_user)
+    fact.verified_by = actor
     fact.verified_at = datetime.utcnow()
+    publish(
+        db, "CLINICAL_FACT_VERIFIED", patient_id=fact.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Fact verified: {fact.fact_type}", category="VERIFICATION",
+        description=f"{actor} verified an AI-extracted fact ({fact.fact_type}: {fact.value}).",
+        fact_id=fact.id,
+    )
     db.commit()
     return {"status": "success", "fact_id": fact.id, "state": fact.status}
 
@@ -834,8 +957,10 @@ async def correct_fact(
     if not fact:
         raise HTTPException(404, "Fact not found")
     _check_patient_in_org(db, fact.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
 
     fact.status = "SUPERSEDED"
+    actor = _actor(current_user)
 
     new_fact = ClinicalFact(
         patient_id=fact.patient_id,
@@ -848,10 +973,17 @@ async def correct_fact(
         confidence=1.0,
         status="VERIFIED",
         original_value=fact.value,
-        verified_by=_actor(current_user),
+        verified_by=actor,
         verified_at=datetime.utcnow()
     )
     db.add(new_fact)
+    db.flush()
+    publish(
+        db, "CLINICAL_FACT_CORRECTED", patient_id=fact.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Fact corrected: {fact.fact_type}", category="VERIFICATION",
+        description=f"{actor} corrected {fact.fact_type} from '{fact.value}' to '{new_value}'.",
+        fact_id=new_fact.id, superseded_fact_id=fact.id,
+    )
     db.commit()
     return {"status": "success", "new_fact_id": new_fact.id, "superseded_id": fact.id}
 
@@ -868,11 +1000,19 @@ async def reject_fact(
     if not fact:
         raise HTTPException(404, "Fact not found")
     _check_patient_in_org(db, fact.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
 
     fact.status = "REJECTED"
     fact.reject_reason = reason
-    fact.verified_by = _actor(current_user)
+    actor = _actor(current_user)
+    fact.verified_by = actor
     fact.verified_at = datetime.utcnow()
+    publish(
+        db, "CLINICAL_FACT_REJECTED", patient_id=fact.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Fact rejected: {fact.fact_type}", category="VERIFICATION",
+        description=f"{actor} rejected {fact.fact_type} ({fact.value}): {reason}",
+        fact_id=fact.id,
+    )
     db.commit()
     return {"status": "success", "fact_id": fact.id, "state": fact.status}
 
@@ -882,6 +1022,7 @@ async def bulk_accept_facts(
     request: Request, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
+    _require_clinician(current_user)
     org_id = _org_id(current_user)
     body = await request.json()
     fact_ids = body.get("fact_ids", [])
@@ -893,6 +1034,7 @@ async def bulk_accept_facts(
     for c in open_ctrs:
         conflicted_ids.update(c.conflicting_fact_ids or [])
 
+    actor = _actor(current_user)
     accepted, skipped = [], []
     for fid in fact_ids:
         if fid in conflicted_ids:
@@ -903,12 +1045,19 @@ async def bulk_accept_facts(
         ).filter(ClinicalFact.id == fid, CCAPatient.organization_id == org_id).first()
         if fact and fact.status == "PROPOSED":
             fact.status = "VERIFIED"
-            fact.verified_by = _actor(current_user)
+            fact.verified_by = actor
             fact.verified_at = datetime.utcnow()
             accepted.append(fid)
         else:
             skipped.append({"id": fid, "reason": "Not found or not in a verifiable state"})
 
+    if accepted:
+        publish(
+            db, "CLINICAL_FACT_VERIFIED", patient_id=None, actor=actor, role=current_user.get("role"),
+            title=f"{len(accepted)} facts bulk-verified", category="VERIFICATION",
+            description=f"{actor} bulk-verified {len(accepted)} AI-extracted facts.",
+            fact_ids=accepted,
+        )
     db.commit()
     return {"accepted": accepted, "skipped": skipped}
 
@@ -1116,6 +1265,7 @@ async def complete_nurse_intake(
     id: int, request: Request, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
+    _require_clinical_or_nursing_role(current_user)
     org_id = _org_id(current_user)
     body = await request.json()
     patient_id = _require_patient_id(body)
@@ -1230,6 +1380,10 @@ async def finalise_encounter_note(
     id: int, request: Request, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
+    """Finalizing turns an AI_DRAFT note into the clinical record of the consultation --
+    the explicit clinician acceptance step the architecture doc requires before an
+    AI-originated draft can stand as authored clinical content."""
+    _require_clinician(current_user)
     encounter = db.query(CCAEncounter).filter(CCAEncounter.id == id).first()
     if not encounter:
         raise HTTPException(404, "Encounter not found")
@@ -1277,6 +1431,16 @@ async def raise_order(
     request: Request, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
+    """Raising a diagnostic order is a clinical decision (architecture doc journey step 5:
+    'Doctor orders needed pathology/radiology/labs') -- gated the same way as other
+    irreversible clinical actions. If the patient already has an active Care Plan, this also
+    opens a linked milestone task (architecture doc section 19.1: 'Care Plan creates or
+    tracks an imaging milestone only after an authorized order exists') for
+    _on_diagnostic_result_finalized (event_subscribers.py) to resolve once the result comes
+    back -- the other half of the closed loop. No milestone is created pre-Care-Plan (the
+    common case for initial work-up orders), matching how every other patient-scoped task in
+    this system already tolerates care_plan_id=None."""
+    _require_clinician(current_user)
     org_id = _org_id(current_user)
     body = await request.json()
     indication = body.get("clinical_indication")
@@ -1298,6 +1462,21 @@ async def raise_order(
         requested_by=_actor(current_user)
     )
     db.add(order)
+    db.flush()
+
+    care_plan = db.query(CarePlan).filter(
+        CarePlan.patient_id == patient_id, CarePlan.status == "ACTIVE"
+    ).order_by(CarePlan.id.desc()).first()
+    if care_plan:
+        db.add(CarePlanTask(
+            care_plan_id=care_plan.id, patient_id=patient_id,
+            description=f"{order.order_type.title()} milestone: {order.item_name}",
+            owner_id="", owner_name="Care Coordination",
+            due_date=datetime.utcnow() + timedelta(days=14),
+            status="OPEN", source="SYSTEM", owner_role="CARE_COORDINATION",
+            category="COORDINATION", linked_order_id=order.id,
+        ))
+
     db.commit()
     db.refresh(order)
     return {
@@ -1349,26 +1528,35 @@ def acknowledge_result(
     id: int, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
+    """The clinician-review leg of the diagnostics closed loop (order -> result -> review),
+    gated the same way as resolve_patient_task -- reviewing a result is a clinical act. For a
+    critical result, this also resolves the review-required task
+    event_subscribers.py's _on_diagnostic_result_finalized opened when the report was
+    finalized, so the loop actually closes rather than leaving a stale open task."""
     result = db.query(CCAResult).filter(CCAResult.id == id).first()
     if not result:
         raise HTTPException(404, "Result not found")
     _check_patient_in_org(db, result.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
 
     actor = _actor(current_user)
     result.status = "ACKNOWLEDGED"
     result.acknowledged_by = actor
     result.acknowledged_at = datetime.utcnow()
 
-    j_ev = CCAJourneyEvent(
-        patient_id=result.patient_id,
-        event_type="RESULT_ACKNOWLEDGED",
-        event_title=f"Result Acknowledged: {result.title}",
-        event_category="INVESTIGATION",
-        description=f"{actor} formally acknowledged imaging/lab result in Results Inbox.",
-        actor_name=actor,
-        actor_role=current_user.get("role")
+    if result.is_critical:
+        review_task = db.query(CarePlanTask).filter(
+            CarePlanTask.linked_result_id == result.id, CarePlanTask.status == "OPEN"
+        ).first()
+        if review_task:
+            review_task.status = "RESOLVED"
+
+    publish(
+        db, "RESULT_ACKNOWLEDGED", patient_id=result.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Result Acknowledged: {result.title}", category="INVESTIGATION",
+        description=f"{actor} formally acknowledged the result in the Results Inbox.",
+        result_id=result.id,
     )
-    db.add(j_ev)
     db.commit()
     return {
         "status": "success",
@@ -1591,6 +1779,10 @@ async def create_mdt_case(
     request: Request, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
+    """Submitting a case to tumour board is the treating clinician's decision (MDT
+    Coordinator scheduling/logistics is a separate, already-gated endpoint in
+    cca_coordination.py) -- gated the same way as other clinical-strategy actions."""
+    _require_clinician(current_user)
     org_id = _org_id(current_user)
     body = await request.json()
     question = body.get("question")
@@ -1696,18 +1888,15 @@ async def record_mdt_recommendation(
         recorded_at=datetime.utcnow()
     )
     db.add(decision)
+    db.flush()
     case.status = "RECOMMENDED"
 
-    j_ev = CCAJourneyEvent(
-        patient_id=case.patient_id,
-        event_type="MDT_RECOMMENDATION",
-        event_title="Tumor Board Recommendation Formulated",
-        event_category="MDT",
+    publish(
+        db, "MDT_RECOMMENDATION_FINALIZED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title="Tumor Board Recommendation Formulated", category="MDT",
         description=f"Tumor Board Consensus recorded by {actor}: {rec}",
-        actor_name=actor,
-        actor_role=current_user.get("role")
+        mdt_case_id=case.id, mdt_decision_id=decision.id,
     )
-    db.add(j_ev)
     db.commit()
     db.refresh(decision)
     return {
@@ -1721,6 +1910,491 @@ async def record_mdt_recommendation(
 
 
 # ---------------------------------------------------------
+# 8b. Treatment Plan lifecycle -- draft / amend / sign / discontinue
+#
+# A TreatmentPlan is the clinician-owned cancer treatment strategy: distinct from CarePlan
+# (the multidisciplinary execution layer built from it). It is drafted, optionally amended,
+# then signed by an authorized clinician of the matching modality -- signing is what moves it
+# to ACTIVE. A CarePlan can only be created by referencing an already-ACTIVE TreatmentPlan
+# (see create_care_plan below), never the reverse. See models_cca.py's TreatmentPlan
+# docstring and the Care Plan & Treatment Plan architecture doc for the full rationale.
+# ---------------------------------------------------------
+
+def _apply_treatment_plan_discontinuation(db: Session, plan: TreatmentPlan, reason: str, actor: str, role: str):
+    """Shared by the explicit discontinue endpoint and the treatment-day 'Discontinue
+    Regimen' clearance exit -- both represent the same clinical act (stopping the plan) and
+    must produce the same version/audit trail. No-ops if the plan is already terminal, so a
+    clearance-driven discontinue after an explicit one (or vice versa) doesn't double-write."""
+    if plan.status in ("COMPLETED", "SUPERSEDED", "CANCELLED"):
+        return
+    plan.status = "CANCELLED"
+    # An outstanding order written against this plan is void the moment the plan is --
+    # never leave a DRAFT/SIGNED order sitting there for a later clearance call (or a
+    # careless order_id-less fallback) to act on as if the plan were still in force.
+    for order in db.query(TreatmentOrder).filter(
+        TreatmentOrder.treatment_plan_id == plan.id, TreatmentOrder.status.in_(["DRAFT", "SIGNED"])
+    ).all():
+        order.status = "CANCELLED"
+    db.add(TreatmentPlanVersion(
+        treatment_plan_id=plan.id,
+        version_no=plan.version_no,
+        snapshot=_treatment_plan_dict(plan),
+        change_reason=reason,
+        status_at_version="CANCELLED",
+        created_by=actor,
+    ))
+    publish(
+        db, "TREATMENT_PLAN_DISCONTINUED", patient_id=plan.patient_id, actor=actor, role=role,
+        title=f"Treatment Plan discontinued: {plan.modality}", category="TREATMENT_PLAN",
+        description=f"{actor} discontinued the {plan.modality} Treatment Plan (v{plan.version_no}): {reason}",
+        treatment_plan_id=plan.id,
+    )
+
+
+def _treatment_plan_dict(plan: TreatmentPlan) -> dict:
+    return {
+        "id": plan.id,
+        "patient_id": plan.patient_id,
+        "care_plan_id": plan.care_plan_id,
+        "mdt_decision_id": plan.mdt_decision_id,
+        "intent": plan.intent,
+        "modality": plan.modality,
+        "protocol_name": plan.protocol_name,
+        "planned_sessions": plan.planned_sessions,
+        "completed_sessions": plan.completed_sessions,
+        "start_date": plan.start_date.isoformat() if plan.start_date else None,
+        "version_no": plan.version_no,
+        "status": plan.status,
+        "supersedes_id": plan.supersedes_id,
+        "signer_email": plan.signer_email,
+        "signer_role": plan.signer_role,
+        "signed_at": plan.signed_at.isoformat() if plan.signed_at else None,
+        "guideline_review_required": plan.guideline_review_required,
+        "guideline_review_reason": plan.guideline_review_reason,
+        "created_by": plan.created_by,
+    }
+
+
+@router.post("/treatment-plans")
+async def create_treatment_plan(
+    request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Drafts a new Treatment Plan. Starts in DRAFT -- it has no clinical authority and
+    cannot back a Care Plan or a Treatment Order until POST /treatment-plans/{id}/sign moves
+    it to ACTIVE. Pass supersedes_id when this draft is intended to replace an existing
+    ACTIVE plan (e.g. following an MDT-recommended revision); the prior plan is only actually
+    marked SUPERSEDED once this new one is signed, never at draft time."""
+    org_id = _org_id(current_user)
+    body = await request.json()
+    patient_id = _require_patient_id(body)
+    _get_org_patient(db, patient_id, org_id)
+    _require_clinician(current_user)
+    actor = _actor(current_user)
+
+    supersedes_id = body.get("supersedes_id")
+    if supersedes_id is not None:
+        prior = db.query(TreatmentPlan).filter(TreatmentPlan.id == supersedes_id).first()
+        if not prior or prior.patient_id != patient_id:
+            raise HTTPException(422, "supersedes_id must reference an existing Treatment Plan for the same patient")
+        if prior.status != "ACTIVE":
+            # _on_treatment_plan_signed only supersedes a prior plan that is still ACTIVE at
+            # sign time -- accepting a non-ACTIVE target here would let this draft report
+            # 200 success implying a revision is queued, then silently no-op at sign time
+            # with no error and no TREATMENT_PLAN_REVISED event, leaving two same-modality
+            # plans in ambiguous concurrent state.
+            raise HTTPException(422, f"supersedes_id must reference an ACTIVE Treatment Plan (#{prior.id} is {prior.status})")
+
+    plan = TreatmentPlan(
+        patient_id=patient_id,
+        mdt_decision_id=body.get("mdt_decision_id"),
+        intent=body.get("intent", "Curative"),
+        modality=body.get("modality", "Systemic Chemotherapy"),
+        protocol_name=body.get("protocol_name"),
+        planned_sessions=_coerce_int(body, "planned_sessions", 8),
+        completed_sessions=0,
+        version_no=1,
+        status="DRAFT",
+        supersedes_id=supersedes_id,
+        created_by=actor,
+    )
+    db.add(plan)
+    db.flush()
+
+    db.add(TreatmentPlanVersion(
+        treatment_plan_id=plan.id,
+        version_no=1,
+        snapshot=body,
+        change_reason=body.get("change_reason", "Initial draft created"),
+        status_at_version="DRAFT",
+        created_by=actor,
+    ))
+    publish(
+        db, "TREATMENT_PLAN_DRAFTED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Treatment Plan drafted: {plan.modality}", category="TREATMENT_PLAN",
+        description=f"{actor} drafted a {plan.modality} Treatment Plan (v1, DRAFT).",
+        treatment_plan_id=plan.id,
+    )
+    db.commit()
+    db.refresh(plan)
+    return {"status": "success", "treatment_plan": _treatment_plan_dict(plan)}
+
+
+@router.get("/treatment-plans/{id}")
+def get_treatment_plan(
+    id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Treatment plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    # A DRAFT/PROPOSED plan is a clinician's unfinished authoring surface -- only the roles
+    # that actually author plans have a legitimate reason to see it exists at all (not just a
+    # reduced view of it), so this 404s the same way a cross-org lookup would rather than
+    # confirming a speculative plan is being drafted. Note this is independent of
+    # treatment_plan_tier: Infusion Nurse gets full fields once a plan is visible, but still
+    # never sees one before it's signed.
+    if not can_view_draft_plans_and_orders(current_user) and plan.status in ("DRAFT", "PROPOSED"):
+        raise HTTPException(404, "Treatment plan not found")
+    return {"treatment_plan": project_treatment_plan(_treatment_plan_dict(plan), current_user)}
+
+
+@router.get("/patients/{patient_id}/treatment-plans")
+def list_treatment_plans(
+    patient_id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Every Treatment Plan on record for this patient (across all modalities and all
+    statuses, including SUPERSEDED/CANCELLED), newest first -- never overwritten history.
+    Non-full-access roles never see DRAFT/PROPOSED plans in the list at all (see
+    get_treatment_plan's docstring), and every plan is field-projected per the caller's
+    role."""
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    query = db.query(TreatmentPlan).filter(TreatmentPlan.patient_id == patient_id)
+    if not can_view_draft_plans_and_orders(current_user):
+        query = query.filter(~TreatmentPlan.status.in_(["DRAFT", "PROPOSED"]))
+    plans = query.order_by(TreatmentPlan.id.desc()).all()
+    return {"treatment_plans": [project_treatment_plan(_treatment_plan_dict(p), current_user) for p in plans]}
+
+
+@router.get("/treatment-plans/{id}/versions")
+def list_treatment_plan_versions(
+    id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Every amend_treatment_plan/sign_treatment_plan/discontinue call writes a
+    TreatmentPlanVersion row (mandatory reason, full snapshot) that previously had no read
+    endpoint -- 'View Versions' on the architecture doc's own Treatment Plan screen mockup
+    had nothing to call. Gated at the same tier boundary as the plan itself: a role with no
+    legitimate view of plan content (Front Desk/Financial/minimal-tier roles) gets no access
+    to its version snapshots either, since a snapshot carries full clinical content
+    regardless of the current tier restriction on the live row."""
+    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Treatment plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    if treatment_plan_tier(current_user) in ("NONE", "FINANCE", "MINIMAL"):
+        raise HTTPException(403, "This role does not have access to Treatment Plan version history")
+    versions = db.query(TreatmentPlanVersion).filter(
+        TreatmentPlanVersion.treatment_plan_id == id
+    ).order_by(TreatmentPlanVersion.version_no.desc()).all()
+    return {"versions": [
+        {
+            "version_no": v.version_no, "change_reason": v.change_reason,
+            "status_at_version": v.status_at_version, "snapshot": v.snapshot,
+            "created_by": v.created_by, "created_at": v.created_at.isoformat() if v.created_at else None,
+        }
+        for v in versions
+    ]}
+
+
+@router.put("/treatment-plans/{id}")
+async def amend_treatment_plan(
+    id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Amends a Treatment Plan still in DRAFT/PROPOSED/ACTIVE/ON_HOLD. Mirrors CarePlan's
+    existing amend pattern: mutate the same row, increment version_no, and write an
+    immutable snapshot with a mandatory change_reason -- never a silent overwrite."""
+    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Treatment plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    # Same modality-specific authority as sign/discontinue -- amending protocol/dosing detail
+    # on someone else's modality is exactly the cross-modality interchangeability this
+    # feature's RBAC is built to close; _require_clinician alone let any of the 3 oncologist
+    # personas edit any modality's plan.
+    _require_modality_signer(current_user, plan.modality)
+
+    if plan.status in ("COMPLETED", "SUPERSEDED", "CANCELLED"):
+        raise HTTPException(409, f"Cannot amend a Treatment Plan in {plan.status} status")
+
+    body = await request.json()
+    change_reason = body.get("change_reason")
+    if not change_reason:
+        raise HTTPException(422, "Treatment plan amendments require a mandatory change_reason.")
+
+    plan.version_no += 1
+    plan.protocol_name = body.get("protocol_name", plan.protocol_name)
+    plan.planned_sessions = _coerce_int(body, "planned_sessions", plan.planned_sessions)
+    plan.intent = body.get("intent", plan.intent)
+
+    db.add(TreatmentPlanVersion(
+        treatment_plan_id=plan.id,
+        version_no=plan.version_no,
+        snapshot=body,
+        change_reason=change_reason,
+        status_at_version=plan.status,
+        created_by=_actor(current_user),
+    ))
+    actor = _actor(current_user)
+    publish(
+        db, "TREATMENT_PLAN_AMENDED", patient_id=plan.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Treatment Plan amended: {plan.modality}", category="TREATMENT_PLAN",
+        description=f"{actor} amended the {plan.modality} Treatment Plan to v{plan.version_no}: {change_reason}",
+        treatment_plan_id=plan.id,
+    )
+    db.commit()
+    return {"status": "success", "treatment_plan": {"id": plan.id, "version_no": plan.version_no, "status": plan.status}}
+
+
+@router.post("/treatment-plans/{id}/sign")
+async def sign_treatment_plan(
+    id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """The only action that grants a Treatment Plan clinical authority. Requires an
+    authorized clinician of the plan's own modality (or Admin) -- not any oncologist
+    interchangeably. If this plan supersedes a prior one, that prior plan is marked
+    SUPERSEDED only now, at the moment the replacement actually takes effect."""
+    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Treatment plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    _require_modality_signer(current_user, plan.modality)
+
+    if plan.status not in ("DRAFT", "PROPOSED"):
+        raise HTTPException(409, f"Cannot sign a Treatment Plan in {plan.status} status")
+
+    body = await request.json() if request.headers.get("content-length") not in (None, "0") else {}
+    actor = _actor(current_user)
+
+    plan.status = "ACTIVE"
+    plan.signer_email = actor
+    plan.signer_role = current_user.get("role")
+    plan.signed_at = datetime.utcnow()
+
+    # Snapshot which guideline version is current for this patient's pathway right now, at
+    # the moment of signing -- evaluate_guideline_readiness computes this live rather than
+    # reading a persisted GuidelineContext row (nothing in this codebase writes one; see
+    # cca_engine.py). This is what lets a later guideline version update
+    # (publish_guideline_version below) flag this specific plan for review without ever
+    # touching its content -- see the architecture doc's non-negotiable on guideline updates
+    # and TreatmentPlanGuidelineLink's docstring.
+    # evaluate_guideline_readiness always returns the same guideline_source/version for
+    # every patient regardless of actual diagnosis, modality, or staging readiness -- a
+    # documented, deliberate limitation of this single-cancer-type demo engine (see
+    # cca_engine.py and the CCA demo spec's N-01/N-02 on why AJCC/NCCN content itself is a
+    # licensed-content shell pending a real provider). A previous version of this code
+    # wrapped the snapshot in `if guideline_state.get("guideline_source")`, implying some
+    # patients wouldn't get one -- that was never true (the field is always present) and
+    # only made the single-pathway limitation look like a bug rather than what it is: every
+    # signed plan in this demo is, correctly for its scope, on the one guideline this build
+    # supports. Making this genuinely diagnosis-aware is out of scope here; snapshotting
+    # unconditionally is what lets a later publish_guideline_version() flag every active
+    # plan for review, which is the actual safety-relevant behavior this exists for.
+    guideline_state = evaluate_guideline_readiness(db, plan.patient_id)
+    db.add(TreatmentPlanGuidelineLink(
+        treatment_plan_id=plan.id,
+        guideline_source=guideline_state["guideline_source"],
+        pathway_name=guideline_state.get("pathway_name"),
+        version_at_signing=guideline_state["version"],
+    ))
+
+    db.add(TreatmentPlanVersion(
+        treatment_plan_id=plan.id,
+        version_no=plan.version_no,
+        snapshot=_treatment_plan_dict(plan),
+        change_reason=body.get("reason", f"Signed by {plan.signer_role}"),
+        status_at_version="ACTIVE",
+        created_by=actor,
+    ))
+    # publish() -> _on_treatment_plan_signed (event_subscribers.py) updates the patient's
+    # journey state and, if supersedes_id is set, performs the supersession + raises
+    # TREATMENT_PLAN_REVISED itself -- see that subscriber's docstring for why superseding
+    # only happens now, at sign time, not when the replacement plan was drafted.
+    publish(
+        db, "TREATMENT_PLAN_SIGNED", patient_id=plan.patient_id, actor=actor, role=plan.signer_role,
+        title=f"Treatment Plan signed: {plan.modality}", category="TREATMENT_PLAN",
+        description=f"{actor} ({plan.signer_role}) signed the {plan.modality} Treatment Plan (v{plan.version_no}).",
+        treatment_plan_id=plan.id, supersedes_id=plan.supersedes_id,
+    )
+
+    # First planned session now exists because the plan is executable -- previously this
+    # fired the moment a Care Plan was created (an unrelated object), with no signing step
+    # in between at all.
+    db.add(TreatmentSession(
+        treatment_plan_id=plan.id,
+        patient_id=plan.patient_id,
+        session_no=1,
+        cycle_no=1,
+        day_no=1,
+        planned_on=datetime.utcnow().date(),
+        status="PLANNED",
+    ))
+
+    db.commit()
+    db.refresh(plan)
+    return {"status": "success", "treatment_plan": _treatment_plan_dict(plan)}
+
+
+@router.post("/treatment-plans/{id}/discontinue")
+async def discontinue_treatment_plan(
+    id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Treatment plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    _require_modality_signer(current_user, plan.modality)
+
+    if plan.status in ("COMPLETED", "SUPERSEDED", "CANCELLED"):
+        raise HTTPException(409, f"Treatment Plan is already {plan.status}")
+
+    body = await request.json()
+    reason = body.get("reason")
+    if not reason:
+        raise HTTPException(422, "Discontinuing a Treatment Plan requires a reason.")
+
+    actor = _actor(current_user)
+    _apply_treatment_plan_discontinuation(db, plan, reason, actor, current_user.get("role"))
+    db.commit()
+    return {"status": "success", "treatment_plan": {"id": plan.id, "status": plan.status}}
+
+
+# ---------------------------------------------------------
+# 8c. Guideline version governance
+#
+# Architecture doc non-negotiable: a new guideline (NCCN) version must never silently
+# rewrite a signed Treatment Plan -- it must only flag affected plans for clinician review,
+# and only a clinician can clear that flag. GuidelineRegistry is the canonical current
+# version of a named guideline; TreatmentPlanGuidelineLink (written in sign_treatment_plan
+# above) is what version a specific plan was actually authorized under.
+# ---------------------------------------------------------
+
+@router.post("/admin/guidelines/publish-version")
+async def publish_guideline_version(
+    request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Admin-only: licensed guideline content administration is an operational/configuration
+    concern in this codebase (see N-01/N-02 in the CCA demo spec on why guideline content
+    itself is a pluggable shell pending a licensed provider), not a clinical action -- it
+    never touches any Treatment Plan's content, only flags the ones affected for review."""
+    if not is_admin(current_user):
+        raise HTTPException(403, "Only Admin may publish a guideline version")
+    body = await request.json()
+    guideline_source = body.get("guideline_source")
+    new_version = body.get("new_version")
+    if not guideline_source or not new_version:
+        raise HTTPException(422, "guideline_source and new_version are required")
+    pathway_name = body.get("pathway_name")
+    change_note = body.get("change_note")
+    actor = _actor(current_user)
+
+    registry = db.query(GuidelineRegistry).filter(
+        GuidelineRegistry.guideline_source == guideline_source,
+        GuidelineRegistry.pathway_name == pathway_name,
+    ).first()
+    old_version = registry.current_version if registry else None
+    if not registry:
+        registry = GuidelineRegistry(guideline_source=guideline_source, pathway_name=pathway_name, current_version=new_version)
+        db.add(registry)
+    else:
+        registry.current_version = new_version
+    registry.published_by = actor
+    registry.published_at = datetime.utcnow()
+
+    # Flag every currently-ACTIVE plan whose signing-time snapshot doesn't match the new
+    # version -- never plans that are already DRAFT/SUPERSEDED/CANCELLED/COMPLETED, since
+    # only an active, in-force plan needs re-review against current guidance.
+    affected_links = db.query(TreatmentPlanGuidelineLink).join(
+        TreatmentPlan, TreatmentPlan.id == TreatmentPlanGuidelineLink.treatment_plan_id
+    ).filter(
+        TreatmentPlanGuidelineLink.guideline_source == guideline_source,
+        TreatmentPlanGuidelineLink.pathway_name == pathway_name,
+        TreatmentPlanGuidelineLink.version_at_signing != new_version,
+        TreatmentPlan.status == "ACTIVE",
+    ).all()
+
+    flagged_plan_ids = []
+    for link in affected_links:
+        plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == link.treatment_plan_id).first()
+        if not plan or plan.guideline_review_required:
+            continue
+        plan.guideline_review_required = True
+        plan.guideline_review_reason = (
+            f"Guideline '{guideline_source}' updated from {link.version_at_signing} to {new_version}"
+            + (f": {change_note}" if change_note else ".")
+        )
+        flagged_plan_ids.append(plan.id)
+        publish(
+            db, "GUIDELINE_VERSION_UPDATE_FLAGGED_PLAN", patient_id=plan.patient_id, actor=actor, role=current_user.get("role"),
+            title=f"Treatment Plan flagged for guideline review: {plan.modality}", category="TREATMENT_PLAN",
+            description=plan.guideline_review_reason,
+            treatment_plan_id=plan.id, guideline_source=guideline_source, old_version=link.version_at_signing, new_version=new_version,
+        )
+
+    db.commit()
+    return {
+        "status": "success",
+        "guideline_source": guideline_source,
+        "pathway_name": pathway_name,
+        "old_version": old_version,
+        "new_version": new_version,
+        "flagged_treatment_plan_ids": flagged_plan_ids,
+    }
+
+
+@router.post("/treatment-plans/{id}/acknowledge-guideline-review")
+async def acknowledge_guideline_review(
+    id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """The only action that clears a guideline-review flag -- an explicit clinician decision
+    (by the plan's own modality specialist, same authority as signing), never automatic. The
+    plan's content is untouched either way; a clinician who decides the plan needs to change
+    does so via the normal amend/discontinue endpoints, separately from acknowledging this
+    flag."""
+    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Treatment plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    _require_modality_signer(current_user, plan.modality)
+
+    if not plan.guideline_review_required:
+        raise HTTPException(409, "This Treatment Plan has no pending guideline review")
+
+    body = await request.json() if request.headers.get("content-length") not in (None, "0") else {}
+    note = body.get("note", "")
+    actor = _actor(current_user)
+
+    plan.guideline_review_required = False
+    plan.guideline_review_reason = None
+    publish(
+        db, "GUIDELINE_REVIEW_ACKNOWLEDGED", patient_id=plan.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Guideline review acknowledged: {plan.modality}", category="TREATMENT_PLAN",
+        description=f"{actor} reviewed the guideline update against Treatment Plan #{plan.id}." + (f" Note: {note}" if note else ""),
+        treatment_plan_id=plan.id,
+    )
+    db.commit()
+    db.refresh(plan)
+    return {"status": "success", "treatment_plan": _treatment_plan_dict(plan)}
+
+
+# ---------------------------------------------------------
 # 9. Live Care Plan (SCR-23)
 # ---------------------------------------------------------
 
@@ -1729,7 +2403,12 @@ def get_care_plan_prefill(
     patient_id: int, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
+    """A speculative, not-yet-approved draft (drug names, doses, procedures) with no
+    finalized status to project against -- restricted to clinicians rather than given a
+    reduced-field version, since non-clinical roles have no legitimate use for an unapproved
+    regimen at all, partial or otherwise."""
     _get_org_patient(db, patient_id, _org_id(current_user))
+    _require_clinician(current_user)
     return generate_care_plan_prefill(db, patient_id)
 
 
@@ -1747,19 +2426,21 @@ def get_current_care_plan(
     ).order_by(CarePlan.id.desc()).first()
     if not plan:
         return {"care_plan": None}
-    return {
-        "care_plan": {
-            "id": plan.id,
-            "intent": plan.intent,
-            "goals": plan.goals,
-            "components": plan.components,
-            "monitoring_plan": plan.monitoring_plan,
-            "follow_up_plan": plan.follow_up_plan,
-            "next_decision_point": plan.next_decision_point,
-            "version_no": plan.version_no,
-            "status": plan.status
-        }
+    full = {
+        "id": plan.id,
+        "patient_id": plan.patient_id,
+        "intent": plan.intent,
+        "goals": plan.goals,
+        "components": plan.components,
+        "source_treatment_plan_ids": plan.source_treatment_plan_ids,
+        "monitoring_plan": plan.monitoring_plan,
+        "follow_up_plan": plan.follow_up_plan,
+        "next_decision_point": plan.next_decision_point,
+        "version_no": plan.version_no,
+        "status": plan.status,
+        "patient_facing_approved": plan.patient_facing_approved,
     }
+    return {"care_plan": project_care_plan(full, current_user)}
 
 
 @router.post("/care-plans")
@@ -1767,6 +2448,18 @@ async def create_care_plan(
     request: Request, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
+    """A Care Plan can only be created by referencing one or more already-signed (ACTIVE)
+    Treatment Plans -- it never creates or embeds a treatment strategy of its own. This
+    replaces the previous behavior where POST /care-plans silently created a TreatmentPlan
+    (already ACTIVE, no signature) as a side effect; see the Care Plan & Treatment Plan
+    architecture doc for why that conflation is the specific thing this change fixes.
+
+    Ratified decision (cca_product_decisions.CARE_PLAN_IN_PROGRESS_STATUSES): a Care Plan is
+    one longitudinal object per patient, not one per episode -- a second Care Plan cannot be
+    created while an existing one is still ACTIVE/BLOCKED/ON_HOLD. Amend the existing plan
+    (PUT /care-plans/{id}) or change its status instead. A new Care Plan may only be created
+    once the prior one reached a terminal state (COMPLETED/CANCELLED), representing a
+    genuinely new chapter rather than a second live copy of the same ongoing journey."""
     org_id = _org_id(current_user)
     body = await request.json()
     patient_id = _require_patient_id(body)
@@ -1774,11 +2467,36 @@ async def create_care_plan(
     _require_clinician(current_user)
     actor = _actor(current_user)
 
+    existing = db.query(CarePlan).filter(
+        CarePlan.patient_id == patient_id,
+        CarePlan.status.in_(CARE_PLAN_IN_PROGRESS_STATUSES),
+    ).order_by(CarePlan.id.desc()).first()
+    if existing:
+        raise HTTPException(
+            409,
+            f"Patient already has a Care Plan in progress (#{existing.id}, {existing.status}). "
+            f"Care Plan is a longitudinal object -- amend it (PUT /care-plans/{existing.id}) or "
+            f"change its status, rather than creating a second one."
+        )
+
+    treatment_plan_ids = body.get("treatment_plan_ids")
+    if not treatment_plan_ids:
+        raise HTTPException(422, "treatment_plan_ids is required: a Care Plan must reference at least one signed (ACTIVE) Treatment Plan.")
+    treatment_plans = db.query(TreatmentPlan).filter(TreatmentPlan.id.in_(treatment_plan_ids)).all()
+    if len(treatment_plans) != len(set(treatment_plan_ids)):
+        raise HTTPException(404, "One or more treatment_plan_ids were not found")
+    for tx_plan in treatment_plans:
+        if tx_plan.patient_id != patient_id:
+            raise HTTPException(422, f"Treatment Plan #{tx_plan.id} does not belong to this patient")
+        if tx_plan.status != "ACTIVE":
+            raise HTTPException(422, f"Treatment Plan #{tx_plan.id} is {tx_plan.status}, not signed (ACTIVE) -- a Care Plan cannot be built on an unsigned plan.")
+
     plan = CarePlan(
         patient_id=patient_id,
         intent=body.get("intent", "Curative / Neoadjuvant"),
         goals=body.get("goals", []),
         components=body.get("components", {}),
+        source_treatment_plan_ids=list(treatment_plan_ids),
         monitoring_plan=body.get("monitoring_plan", {}),
         follow_up_plan=body.get("follow_up_plan", {}),
         next_decision_point=body.get("next_decision_point"),
@@ -1798,43 +2516,17 @@ async def create_care_plan(
     )
     db.add(ver)
 
-    tx_plan = TreatmentPlan(
-        care_plan_id=plan.id,
-        patient_id=patient_id,
-        modality=body.get("modality", "Systemic Chemotherapy"),
-        protocol_name=body.get("protocol_name"),
-        planned_sessions=_coerce_int(body, "planned_sessions", 8),
-        completed_sessions=0,
-        status="ACTIVE"
-    )
-    db.add(tx_plan)
-    db.flush()
+    for tx_plan in treatment_plans:
+        tx_plan.care_plan_id = plan.id
 
-    session_1 = TreatmentSession(
-        treatment_plan_id=tx_plan.id,
-        patient_id=patient_id,
-        session_no=1,
-        cycle_no=1,
-        day_no=1,
-        planned_on=datetime.utcnow().date(),
-        status="PLANNED"
+    # publish() -> _on_care_plan_activated (event_subscribers.py) updates the patient's
+    # journey state -- previously that update was hand-written inline here.
+    publish(
+        db, "CARE_PLAN_ACTIVATED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title="Live Care Plan v1.0 Formally Approved", category="CARE_PLAN",
+        description=f"{actor} approved Live Care Plan v1.0, built from Treatment Plan(s) {sorted(treatment_plan_ids)}.",
+        care_plan_id=plan.id, treatment_plan_ids=list(treatment_plan_ids),
     )
-    db.add(session_1)
-
-    patient = db.query(CCAPatient).filter(CCAPatient.id == patient_id).first()
-    if patient:
-        patient.journey_state = "PlanApproved"
-
-    j_ev = CCAJourneyEvent(
-        patient_id=patient_id,
-        event_type="CARE_PLAN_APPROVED",
-        event_title="Live Care Plan v1.0 Formally Approved",
-        event_category="CARE_PLAN",
-        description=f"{actor} approved Live Care Plan v1.0.",
-        actor_name=actor,
-        actor_role=current_user.get("role")
-    )
-    db.add(j_ev)
     db.commit()
     db.refresh(plan)
     return {
@@ -1843,7 +2535,8 @@ async def create_care_plan(
             "id": plan.id,
             "intent": plan.intent,
             "version_no": plan.version_no,
-            "status": plan.status
+            "status": plan.status,
+            "source_treatment_plan_ids": plan.source_treatment_plan_ids,
         }
     }
 
@@ -1867,6 +2560,11 @@ async def update_care_plan(
     plan.version_no += 1
     plan.components = body.get("components", plan.components)
     plan.intent = body.get("intent", plan.intent)
+    # A material change invalidates any prior patient-facing approval -- it must never keep
+    # showing content from before the amendment; a clinician has to explicitly re-approve.
+    plan.patient_facing_approved = False
+    plan.patient_facing_approved_by = None
+    plan.patient_facing_approved_at = None
 
     ver = CarePlanVersion(
         care_plan_id=plan.id,
@@ -1878,6 +2576,639 @@ async def update_care_plan(
     db.add(ver)
     db.commit()
     return {"status": "success", "care_plan": {"id": plan.id, "version_no": plan.version_no}, "version": plan.version_no}
+
+
+# ---------------------------------------------------------
+# 9c. Care Plan status lifecycle (architecture doc section 6).
+#
+# Previously CarePlan.status was write-once ("ACTIVE" at creation, never changed again by any
+# endpoint) -- the full lifecycle the architecture doc names (DRAFT/PROPOSED/ACTIVE/BLOCKED/
+# ON_HOLD/COMPLETED/SUPERSEDED/CANCELLED) could not be represented at all, so "a required
+# dependency prevents progression" (BLOCKED) had nowhere to be recorded.
+#
+# Scoped deliberately: this covers the ACTIVE<->BLOCKED/ON_HOLD/COMPLETED/CANCELLED
+# transitions a Care Plan already created (ACTIVE, per create_care_plan's own docstring on why
+# Care Plans in this system are born ACTIVE rather than DRAFT) goes through during execution.
+# It does NOT retrofit a DRAFT/PROPOSED pre-approval stage onto create_care_plan (a distinct,
+# larger change to that endpoint's contract), and it does NOT model SUPERSEDED -- this
+# codebase's CarePlan is amended in place (update_care_plan bumps version_no on the same row)
+# rather than chained across rows the way TreatmentPlan.supersedes_id is, so there is no
+# "replaced by a newer Care Plan row" event to represent yet. Both are flagged here as
+# deliberately out of scope rather than silently done partially.
+# ---------------------------------------------------------
+
+_CARE_PLAN_STATUS_TRANSITIONS = {
+    "ACTIVE": {"BLOCKED", "ON_HOLD", "COMPLETED", "CANCELLED"},
+    "BLOCKED": {"ACTIVE", "CANCELLED"},
+    "ON_HOLD": {"ACTIVE", "CANCELLED"},
+}
+
+
+@router.post("/care-plans/{id}/status")
+async def update_care_plan_status(
+    id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Explicit, reasoned status transition -- a material clinical change, so it versions
+    like any other Care Plan amendment (architecture doc: 'operational status changes may
+    update the active version... but must remain auditable'; a status change is more than
+    operational, so it gets a full new version, not just an audit log line)."""
+    plan = db.query(CarePlan).filter(CarePlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Care plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+
+    body = await request.json()
+    new_status = body.get("status")
+    reason = body.get("reason")
+    if not reason:
+        raise HTTPException(422, "A reason is required for every Care Plan status transition.")
+    allowed = _CARE_PLAN_STATUS_TRANSITIONS.get(plan.status, set())
+    if new_status not in allowed:
+        raise HTTPException(
+            409,
+            f"Cannot transition Care Plan from {plan.status} to {new_status}. "
+            f"Allowed from {plan.status}: {sorted(allowed) or 'none (terminal state)'}."
+        )
+
+    old_status = plan.status
+    plan.status = new_status
+    plan.version_no += 1
+    actor = _actor(current_user)
+
+    db.add(CarePlanVersion(
+        care_plan_id=plan.id,
+        version_no=plan.version_no,
+        snapshot={"status": new_status, "previous_status": old_status},
+        change_reason=reason,
+        created_by=actor,
+    ))
+    publish(
+        db, "CARE_PLAN_STATUS_CHANGED", patient_id=plan.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Care Plan {old_status} -> {new_status}", category="CARE_PLAN",
+        description=f"{actor} moved Care Plan #{plan.id} from {old_status} to {new_status}: {reason}",
+        care_plan_id=plan.id, previous_status=old_status, new_status=new_status,
+    )
+    db.commit()
+    db.refresh(plan)
+    return {"status": "success", "care_plan": {"id": plan.id, "status": plan.status, "version_no": plan.version_no}}
+
+
+@router.get("/care-plans/{id}/versions")
+def list_care_plan_versions(
+    id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """update_care_plan and update_care_plan_status both write a CarePlanVersion row
+    (mandatory reason, full snapshot) that previously had no read endpoint -- 'View History'
+    on the architecture doc's own Care Plan screen mockup had nothing to call."""
+    plan = db.query(CarePlan).filter(CarePlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Care plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    if care_plan_tier(current_user) == "OPERATIONAL":
+        raise HTTPException(403, "This role does not have access to Care Plan version history")
+    versions = db.query(CarePlanVersion).filter(
+        CarePlanVersion.care_plan_id == id
+    ).order_by(CarePlanVersion.version_no.desc()).all()
+    return {"versions": [
+        {
+            "version_no": v.version_no, "change_reason": v.change_reason,
+            "snapshot": v.snapshot, "created_by": v.created_by,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+        }
+        for v in versions
+    ]}
+
+
+# ---------------------------------------------------------
+# 9d. Patient-facing plan view -- gated behind explicit clinical/consent review.
+#
+# Architecture doc non-negotiable: patient-facing surfaces get a controlled subset only,
+# never raw clinical reasoning/MDT discussion/full rationale, and only after clinical/consent
+# review. Note the scope limit: this builds the content projection and the clinician-approval
+# gate (the safety-relevant part), and exposes it through a staff-facing preview endpoint --
+# it does NOT build genuine patient self-service login, which would need an entirely separate
+# patient-authentication/account/consent-provisioning system this codebase has no trace of
+# today. Any staff role with legitimate patient-contact responsibility can preview "what the
+# patient would see"; a real patient portal is a distinct, larger initiative.
+# ---------------------------------------------------------
+
+def _require_patient_contact_role(current_user: dict):
+    if not (
+        is_doctor(current_user) or is_admin(current_user) or is_cca_oncologist(current_user)
+        or is_cca_nurse_navigator(current_user) or is_cca_patient_liaison(current_user) or is_cca_front_desk(current_user)
+    ):
+        raise HTTPException(403, "This role has no patient-contact responsibility for the patient-facing view")
+
+
+@router.post("/care-plans/{id}/approve-patient-facing")
+def approve_patient_facing_view(
+    id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    plan = db.query(CarePlan).filter(CarePlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Care plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+
+    actor = _actor(current_user)
+    plan.patient_facing_approved = True
+    plan.patient_facing_approved_by = actor
+    plan.patient_facing_approved_at = datetime.utcnow()
+    publish(
+        db, "CARE_PLAN_PATIENT_FACING_APPROVED", patient_id=plan.patient_id, actor=actor, role=current_user.get("role"),
+        title="Care Plan approved for patient-facing view", category="CARE_PLAN",
+        description=f"{actor} approved the patient-facing view of Care Plan #{plan.id} (v{plan.version_no}).",
+        care_plan_id=plan.id,
+    )
+    db.commit()
+    return {"status": "success", "care_plan_id": plan.id, "patient_facing_approved": True}
+
+
+@router.post("/care-plans/{id}/revoke-patient-facing")
+def revoke_patient_facing_view(
+    id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    plan = db.query(CarePlan).filter(CarePlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Care plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+
+    plan.patient_facing_approved = False
+    plan.patient_facing_approved_by = None
+    plan.patient_facing_approved_at = None
+    db.commit()
+    return {"status": "success", "care_plan_id": plan.id, "patient_facing_approved": False}
+
+
+@router.get("/patients/{patient_id}/patient-facing-summary")
+def get_patient_facing_summary(
+    patient_id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Returns {"available": False} rather than an error when nothing has been approved yet
+    -- that is the normal, expected state for most patients, not a fault condition. When
+    available, the payload is deliberately minimal: a coarse phase label (the same
+    operational-label tier Front Desk already gets for Care Plan) and only the tasks a
+    clinician has explicitly written patient-safe wording for (see
+    set_task_patient_visible_note) -- never a raw CarePlanTask.description, which routinely
+    names clinical detail (toxicity grade, an MDT case number) that has no business reaching
+    a patient-facing surface."""
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    _require_patient_contact_role(current_user)
+    return build_patient_facing_summary(db, patient_id)
+
+
+def build_patient_facing_summary(db: Session, patient_id: int) -> dict:
+    """The actual content logic, factored out so the staff preview endpoint above and the
+    real patient-authenticated endpoint (routers/patient_portal.py) return byte-identical
+    content -- there is exactly one definition of what's safe to show a patient, not two
+    that could drift apart."""
+    plan = db.query(CarePlan).filter(
+        CarePlan.patient_id == patient_id, CarePlan.status == "ACTIVE"
+    ).order_by(CarePlan.id.desc()).first()
+    if not plan or not plan.patient_facing_approved:
+        return {"available": False}
+
+    tasks = db.query(CarePlanTask).filter(
+        CarePlanTask.patient_id == patient_id,
+        CarePlanTask.status == "OPEN",
+        CarePlanTask.patient_visible_note.isnot(None),
+    ).order_by(CarePlanTask.due_date.asc()).limit(5).all()
+
+    # Upcoming appointments: scheduled diagnostic orders, not a separate Appointment entity --
+    # this codebase has none for CCA (the general HMS `appointments` table is a different
+    # product entirely, unrelated to the oncology patient population). item_name/location are
+    # scheduling metadata (the same tier Front Desk already gets), not clinical rationale --
+    # clinical_indication is deliberately excluded from what reaches the patient here.
+    appointments = db.query(CCAOrder).filter(
+        CCAOrder.patient_id == patient_id,
+        CCAOrder.scheduled_at.isnot(None),
+        CCAOrder.scheduled_at >= datetime.utcnow(),
+        CCAOrder.status.in_(["SCHEDULED", "RAISED", "IN_PROGRESS"]),
+    ).order_by(CCAOrder.scheduled_at.asc()).limit(5).all()
+
+    return {
+        "available": True,
+        "current_phase_label": plan.intent,
+        "next_steps": [{"note": t.patient_visible_note, "due_date": t.due_date.isoformat() if t.due_date else None} for t in tasks],
+        "upcoming_appointments": [
+            {"what": a.item_name, "when": a.scheduled_at.isoformat(), "location": a.location}
+            for a in appointments
+        ],
+        "approved_by": plan.patient_facing_approved_by,
+        "approved_at": plan.patient_facing_approved_at.isoformat() if plan.patient_facing_approved_at else None,
+    }
+
+
+# ---------------------------------------------------------
+# 9a. Patient Task / Review Queue
+#
+# CarePlanTask previously had no read/write surface at all beyond being a side effect of a
+# treatment hold -- every row this system created (including the ones from
+# event_subscribers.py) was invisible through the API. care_plan_id is nullable (see
+# models_cca.py's CarePlanTask docstring) since a task is patient-scoped first; a Care Plan
+# link is attached when one exists, not required for the task to exist.
+# ---------------------------------------------------------
+
+def _care_plan_task_dict(task: CarePlanTask) -> dict:
+    return {
+        "id": task.id,
+        "care_plan_id": task.care_plan_id,
+        "patient_id": task.patient_id,
+        "description": task.description,
+        "owner_id": task.owner_id,
+        "owner_name": task.owner_name,
+        "due_date": task.due_date.isoformat() if task.due_date else None,
+        "status": task.status,
+        "source": task.source,
+        "patient_visible_note": task.patient_visible_note,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+    }
+
+
+@router.get("/patients/{patient_id}/tasks")
+def list_patient_tasks(
+    patient_id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Every open-or-closed review/reassessment task for this patient, with or without a
+    Care Plan link, oldest-due first. Not role-projected in this slice -- a task description
+    is short, already-actionable operational text (e.g. "Review MDT recommendation..."), a
+    materially smaller disclosure than a full plan; per-role filtering by task category is a
+    reasonable future refinement once tasks carry an owner_role/category field, not invented
+    here without one."""
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    tasks = db.query(CarePlanTask).filter(
+        CarePlanTask.patient_id == patient_id
+    ).order_by(CarePlanTask.due_date.asc()).all()
+    return {"tasks": [_care_plan_task_dict(t) for t in tasks]}
+
+
+@router.post("/tasks/{id}/resolve")
+def resolve_patient_task(
+    id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Resolving a review/reassessment task is treated as a clinical act requiring a
+    clinician (or Admin) -- deliberately coarse-grained rather than guessing at a
+    per-task-category permission scheme (see list_patient_tasks's docstring)."""
+    task = db.query(CarePlanTask).filter(CarePlanTask.id == id).first()
+    if not task:
+        raise HTTPException(404, "Task not found")
+    _check_patient_in_org(db, task.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+
+    if task.status == "RESOLVED":
+        raise HTTPException(409, "Task is already resolved")
+
+    task.status = "RESOLVED"
+    db.commit()
+    db.refresh(task)
+    return {"status": "success", "task": _care_plan_task_dict(task)}
+
+
+@router.patch("/tasks/{id}/patient-visible-note")
+async def set_task_patient_visible_note(
+    id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """The only way a task's raw internal description becomes visible in the patient-facing
+    summary: a clinician deliberately authors patient-safe wording for it. Passing an empty
+    note removes it from the patient-facing view again."""
+    task = db.query(CarePlanTask).filter(CarePlanTask.id == id).first()
+    if not task:
+        raise HTTPException(404, "Task not found")
+    _check_patient_in_org(db, task.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+
+    body = await request.json()
+    task.patient_visible_note = body.get("note") or None
+    db.commit()
+    db.refresh(task)
+    return {"status": "success", "task": _care_plan_task_dict(task)}
+
+
+# ---------------------------------------------------------
+# 9a2. AI Search -- source-cited retrieval, no silent writes.
+#
+# This is deterministic keyword retrieval over the patient's own already-verified structured
+# data (facts, MDT decisions, treatment plans, staging, journey events) -- not a generative
+# LLM call. A real RAG/LLM-backed AI Search is a larger, separate initiative needing its own
+# safety review (prompt injection, hallucination, citation-grounding validation); this slice
+# satisfies the architecture doc's safety-relevant requirements for this feature --
+# every result carries a source/date/author and a view_source reference, and the only way a
+# result becomes a Care Plan task is an explicit clinician action, never automatic -- without
+# that much larger lift. Restricted to clinical-adjacent roles (same access line as Care
+# Plan's CLINICAL_CONTEXT/FULL projection tiers): search results surface fairly raw
+# clinical text that Front Desk/Patient Liaison/Financial Counsellor have no role-defined
+# need for, per the same least-privilege reasoning as rbac_projection.py.
+# ---------------------------------------------------------
+
+def _require_search_access(current_user: dict):
+    if care_plan_tier(current_user) == "OPERATIONAL":
+        raise HTTPException(403, "AI Search is available to clinical-adjacent roles only")
+
+
+@router.get("/patients/{patient_id}/search")
+def search_patient_evidence(
+    patient_id: int, q: str, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    _require_search_access(current_user)
+    query = (q or "").strip().lower()
+    if len(query) < 2:
+        raise HTTPException(422, "q (search query) must be at least 2 characters")
+
+    results = []
+
+    for f in db.query(ClinicalFact).filter(ClinicalFact.patient_id == patient_id).all():
+        if query in f"{f.fact_type or ''} {f.value or ''}".lower():
+            results.append({
+                "type": "ClinicalFact", "id": f.id,
+                "snippet": f"{f.fact_type}: {f.value}",
+                "source_date": f.created_at.isoformat() if f.created_at else None,
+                "source_author": f.verified_by or "AI-extracted (unverified)",
+                "confirmation_state": f.status,
+                "view_source": f"/api/cca/patients/{patient_id}/documents/{f.document_id}" if f.document_id else None,
+            })
+
+    for d in db.query(MDTDecision).filter(MDTDecision.patient_id == patient_id).all():
+        if query in f"{d.recommendation or ''} {d.rationale or ''} {d.modality_direction or ''}".lower():
+            results.append({
+                "type": "MDTDecision", "id": d.id,
+                "snippet": d.recommendation,
+                "source_date": d.recorded_at.isoformat() if d.recorded_at else None,
+                "source_author": d.recorded_by,
+                "confirmation_state": d.status,
+                "view_source": f"/api/cca/mdt/cases/{d.case_id}",
+            })
+
+    for p in db.query(TreatmentPlan).filter(TreatmentPlan.patient_id == patient_id).all():
+        if query in f"{p.modality or ''} {p.protocol_name or ''} {p.intent or ''}".lower():
+            results.append({
+                "type": "TreatmentPlan", "id": p.id,
+                "snippet": f"{p.modality}: {p.protocol_name or 'NOT_RECORDED'} ({p.status})",
+                "source_date": (p.signed_at or p.created_at).isoformat() if (p.signed_at or p.created_at) else None,
+                "source_author": p.signer_email or p.created_by,
+                "confirmation_state": p.status,
+                "view_source": f"/api/cca/treatment-plans/{p.id}",
+            })
+
+    for s in db.query(StagingRecord).filter(StagingRecord.patient_id == patient_id).all():
+        if query in f"{s.stage_value or ''} {s.t_stage or ''} {s.n_stage or ''} {s.m_stage or ''}".lower():
+            results.append({
+                "type": "StagingRecord", "id": s.id,
+                "snippet": f"Stage {s.stage_value or 'NOT_RECORDED'} (T{s.t_stage or '?'}N{s.n_stage or '?'}M{s.m_stage or '?'})",
+                "source_date": (s.confirmed_at or s.created_at).isoformat() if (s.confirmed_at or s.created_at) else None,
+                "source_author": s.confirmed_by,
+                "confirmation_state": s.status,
+                "view_source": f"/api/cca/patients/{patient_id}/staging",
+            })
+
+    for j in db.query(CCAJourneyEvent).filter(CCAJourneyEvent.patient_id == patient_id).all():
+        if query in f"{j.event_title or ''} {j.description or ''}".lower():
+            results.append({
+                "type": "JourneyEvent", "id": j.id,
+                "snippet": j.event_title,
+                "source_date": j.timestamp.isoformat() if j.timestamp else None,
+                "source_author": j.actor_name,
+                "confirmation_state": None,
+                "view_source": f"/api/cca/patients/{patient_id}/journey",
+            })
+
+    return {"query": q, "results": results}
+
+
+@router.post("/patients/{patient_id}/search/propose-task")
+async def propose_task_from_search(
+    patient_id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """The only way a search result becomes anything durable: an explicit clinician action
+    (this endpoint), never an automatic write from the search itself -- architecture doc
+    non-negotiable on AI proposals. The resulting task is tagged AI_SEARCH_PROPOSED, not
+    SYSTEM or MANUAL, so it stays distinguishable in the task queue."""
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    description = body.get("description")
+    if not description:
+        raise HTTPException(422, "description is required")
+    source_reference = body.get("source_reference")  # e.g. {"type": "MDTDecision", "id": 4} -- informational only
+    actor = _actor(current_user)
+
+    task = CarePlanTask(
+        care_plan_id=body.get("care_plan_id"),
+        patient_id=patient_id,
+        description=description,
+        owner_id="", owner_name=body.get("owner_name") or actor,
+        due_date=datetime.fromisoformat(body["due_date"]) if body.get("due_date") else datetime.utcnow() + timedelta(days=7),
+        status="OPEN",
+        source="AI_SEARCH_PROPOSED",
+    )
+    db.add(task)
+    db.flush()
+    publish(
+        db, "AI_SEARCH_TASK_PROPOSED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title="Task proposed from AI Search", category="AI_SEARCH",
+        description=f"{actor} confirmed a task from AI Search: {description}",
+        task_id=task.id, source_reference=source_reference,
+    )
+    db.commit()
+    db.refresh(task)
+    return {"status": "success", "task": _care_plan_task_dict(task)}
+
+
+# ---------------------------------------------------------
+# 9b. Treatment Order lifecycle -- the executable instruction Day-Care actually acts on.
+#
+# Day-Care must never infer treatment from a Care Plan or Treatment Plan alone -- it requires
+# a valid, signed, executable Treatment Order (architecture doc non-negotiable). Each planned
+# TreatmentSession gets its own Order; a dose/instruction change is always a new Order, never
+# a silent edit to one already signed. See models_cca.py's TreatmentOrder/TreatmentEvent
+# docstrings.
+# ---------------------------------------------------------
+
+def _treatment_order_dict(order: TreatmentOrder) -> dict:
+    return {
+        "id": order.id,
+        "treatment_plan_id": order.treatment_plan_id,
+        "treatment_session_id": order.treatment_session_id,
+        "patient_id": order.patient_id,
+        "instructions": order.instructions,
+        "version_no": order.version_no,
+        "status": order.status,
+        "signer_email": order.signer_email,
+        "signer_role": order.signer_role,
+        "signed_at": order.signed_at.isoformat() if order.signed_at else None,
+        "created_by": order.created_by,
+    }
+
+
+@router.post("/treatment-orders")
+async def create_treatment_order(
+    request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Writes a new order against the next open session of an already-signed Treatment Plan.
+    A session may only ever have one open (non-cancelled) order at a time -- a revised
+    instruction is a fresh order on that same session, requiring its own sign-off, never an
+    edit to the existing one.
+
+    Ratified decision (cca_product_decisions.TREATMENT_ORDERS_SYSTEM_OF_RECORD = "in_os"):
+    this endpoint IS the system of record for the executable order, not a mirror of an order
+    authored in an external oncology/pharmacy system. See that module for why."""
+    assert TREATMENT_ORDERS_SYSTEM_OF_RECORD == "in_os"  # this endpoint only makes sense under this decision
+    org_id = _org_id(current_user)
+    body = await request.json()
+    patient_id = _require_patient_id(body)
+    _get_org_patient(db, patient_id, org_id)
+    _require_clinician(current_user)
+    actor = _actor(current_user)
+
+    treatment_plan_id = body.get("treatment_plan_id")
+    if not treatment_plan_id:
+        raise HTTPException(422, "treatment_plan_id is required")
+    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == treatment_plan_id).first()
+    if not plan or plan.patient_id != patient_id:
+        raise HTTPException(404, "Treatment plan not found for this patient")
+    if plan.status != "ACTIVE":
+        raise HTTPException(422, f"Treatment Plan #{plan.id} is {plan.status}, not signed (ACTIVE) -- cannot write an order against it.")
+
+    session = db.query(TreatmentSession).filter(
+        TreatmentSession.treatment_plan_id == plan.id, TreatmentSession.status == "PLANNED"
+    ).order_by(TreatmentSession.session_no.desc()).first()
+    if not session:
+        raise HTTPException(422, "No pending (PLANNED) session on this Treatment Plan to write an order against.")
+
+    existing_open_order = db.query(TreatmentOrder).filter(
+        TreatmentOrder.treatment_session_id == session.id, TreatmentOrder.status != "CANCELLED"
+    ).first()
+    if existing_open_order:
+        raise HTTPException(409, f"Session #{session.session_no} already has an open order (#{existing_open_order.id}, {existing_open_order.status}).")
+
+    order = TreatmentOrder(
+        treatment_plan_id=plan.id,
+        treatment_session_id=session.id,
+        patient_id=patient_id,
+        instructions=body.get("instructions", {}),
+        version_no=1,
+        status="DRAFT",
+        created_by=actor,
+    )
+    db.add(order)
+    db.flush()
+    publish(
+        db, "TREATMENT_ORDER_DRAFTED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Treatment Order drafted: session #{session.session_no}", category="TREATMENT_ORDER",
+        description=f"{actor} drafted a Treatment Order for session #{session.session_no} of {plan.modality}.",
+        treatment_order_id=order.id,
+    )
+    db.commit()
+    db.refresh(order)
+    return {"status": "success", "treatment_order": _treatment_order_dict(order)}
+
+
+@router.get("/treatment-orders/{id}")
+def get_treatment_order(
+    id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    order = db.query(TreatmentOrder).filter(TreatmentOrder.id == id).first()
+    if not order:
+        raise HTTPException(404, "Treatment order not found")
+    _check_patient_in_org(db, order.patient_id, _org_id(current_user))
+    if not can_view_draft_plans_and_orders(current_user) and order.status == "DRAFT":
+        raise HTTPException(404, "Treatment order not found")
+    return {"treatment_order": project_treatment_order(_treatment_order_dict(order), current_user)}
+
+
+@router.get("/patients/{patient_id}/treatment-orders")
+def list_treatment_orders(
+    patient_id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    query = db.query(TreatmentOrder).filter(TreatmentOrder.patient_id == patient_id)
+    if not can_view_draft_plans_and_orders(current_user):
+        query = query.filter(TreatmentOrder.status != "DRAFT")
+    orders = query.order_by(TreatmentOrder.id.desc()).all()
+    return {"treatment_orders": [project_treatment_order(_treatment_order_dict(o), current_user) for o in orders]}
+
+
+@router.post("/treatment-orders/{id}/sign")
+async def sign_treatment_order(
+    id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """The action that gives an order clinical authority. Gated to the matching modality
+    specialist, same as signing the parent Treatment Plan -- not any oncologist
+    interchangeably, and not a nurse (Day-Care may document administration against an
+    already-signed order, but may not authorize it)."""
+    order = db.query(TreatmentOrder).filter(TreatmentOrder.id == id).first()
+    if not order:
+        raise HTTPException(404, "Treatment order not found")
+    _check_patient_in_org(db, order.patient_id, _org_id(current_user))
+    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == order.treatment_plan_id).first()
+    _require_modality_signer(current_user, plan.modality if plan else "")
+
+    if order.status != "DRAFT":
+        raise HTTPException(409, f"Cannot sign a Treatment Order in {order.status} status")
+
+    actor = _actor(current_user)
+    order.status = "SIGNED"
+    order.signer_email = actor
+    order.signer_role = current_user.get("role")
+    order.signed_at = datetime.utcnow()
+
+    publish(
+        db, "TREATMENT_ORDER_SIGNED", patient_id=order.patient_id, actor=actor, role=order.signer_role,
+        title="Treatment Order signed", category="TREATMENT_ORDER",
+        description=f"{actor} ({order.signer_role}) signed Treatment Order #{order.id}.",
+        treatment_order_id=order.id,
+    )
+    db.commit()
+    db.refresh(order)
+    return {"status": "success", "treatment_order": _treatment_order_dict(order)}
+
+
+@router.post("/treatment-orders/{id}/cancel")
+async def cancel_treatment_order(
+    id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    order = db.query(TreatmentOrder).filter(TreatmentOrder.id == id).first()
+    if not order:
+        raise HTTPException(404, "Treatment order not found")
+    _check_patient_in_org(db, order.patient_id, _org_id(current_user))
+    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == order.treatment_plan_id).first()
+    _require_modality_signer(current_user, plan.modality if plan else "")
+
+    if order.status in ("EXECUTED", "CANCELLED"):
+        raise HTTPException(409, f"Treatment Order is already {order.status}")
+
+    body = await request.json()
+    reason = body.get("reason")
+    if not reason:
+        raise HTTPException(422, "Cancelling a Treatment Order requires a reason.")
+
+    actor = _actor(current_user)
+    order.status = "CANCELLED"
+    publish(
+        db, "TREATMENT_ORDER_CANCELLED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+        title="Treatment Order cancelled", category="TREATMENT_ORDER",
+        description=f"{actor} cancelled Treatment Order #{order.id}: {reason}",
+        treatment_order_id=order.id,
+    )
+    db.commit()
+    return {"status": "success", "treatment_order": {"id": order.id, "status": order.status}}
 
 
 # ---------------------------------------------------------
@@ -1893,11 +3224,18 @@ def get_treatment_day_assessment(
     intake = db.query(CCAIntakeAssessment).filter(CCAIntakeAssessment.patient_id == patient_id).order_by(CCAIntakeAssessment.created_at.desc()).first()
     plan = db.query(TreatmentPlan).filter(TreatmentPlan.patient_id == patient_id, TreatmentPlan.status == "ACTIVE").first()
     toxicities = db.query(ToxicityEvent).filter(ToxicityEvent.patient_id == patient_id).all()
+    # DRAFT as well as SIGNED -- the UI needs to know about an open-but-unsigned order too
+    # (to offer "sign" rather than "write a new one"), not just a fully executable one.
+    order = db.query(TreatmentOrder).filter(
+        TreatmentOrder.patient_id == patient_id, TreatmentOrder.status.in_(["DRAFT", "SIGNED"])
+    ).order_by(TreatmentOrder.id.desc()).first()
 
     return {
         "patient": {"name": patient.name, "mrn": patient.mrn, "bsa": intake.bsa if intake else None},
         "protocol": plan.protocol_name if plan else "[NOT_RECORDED] No active treatment plan on record.",
-        "cycle_info": f"Cycle {toxicities and len(toxicities) or 1}" if plan else "[NOT_RECORDED]",
+        "cycle_info": f"Cycle {plan.completed_sessions + 1}" if plan else "[NOT_RECORDED]",
+        "order": project_treatment_order(_treatment_order_dict(order), current_user) if order else None,
+        "order_note": None if order else "No Treatment Order on record -- a clearance decision cannot be recorded until a signed one exists.",
         "lab_parameters": [],
         "lab_parameters_note": "Live laboratory integration is not yet connected -- treatment-day lab values must be reviewed directly in the lab system before clearance.",
         "toxicity_history": [
@@ -1919,11 +3257,23 @@ def get_treatment_day_assessment(
     }
 
 
+def _require_clinical_or_nursing_role(current_user: dict):
+    """CTCAE toxicity grading is a clinical/nursing assessment, not an administrative one --
+    narrower than _require_patient_contact_role (which also admits Front Desk/Patient
+    Liaison, who have no basis to grade a toxicity)."""
+    if not (
+        is_doctor(current_user) or is_admin(current_user) or is_cca_oncologist(current_user)
+        or is_cca_nurse_navigator(current_user) or is_cca_infusion_nurse(current_user)
+    ):
+        raise HTTPException(403, "Only a treating clinician or nurse may record a toxicity assessment")
+
+
 @router.post("/treatment/toxicity")
 async def record_toxicity(
     request: Request, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
+    _require_clinical_or_nursing_role(current_user)
     org_id = _org_id(current_user)
     body = await request.json()
     baseline = body.get("baseline_value")
@@ -1957,11 +3307,19 @@ async def record_toxicity(
     }
 
 
+_VALID_CLEARANCE_DECISIONS = {"CLEARED", "CLEARED_DOSE_REDUCTION", "HELD", "DEFERRED", "DISCONTINUED"}
+
+
 @router.post("/treatment/clearance")
 async def record_clearance_decision(
     request: Request, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
+    """Day-Care never infers treatment from a Care Plan/Treatment Plan alone -- this requires
+    a signed (executable) Treatment Order to act against (architecture doc non-negotiable),
+    and every decision produces a TreatmentEvent: the closed-loop 'actual outcome' record
+    that a plan-only, one-way pipeline would otherwise lose. This replaces the previous
+    behavior of mutating TreatmentSession.status directly with no order in the loop at all."""
     org_id = _org_id(current_user)
     _require_clinician(current_user)
     body = await request.json()
@@ -1969,68 +3327,112 @@ async def record_clearance_decision(
     reason = body.get("reason")
     if not decision:
         raise HTTPException(422, "decision is required to record a treatment clearance.")
+    if decision not in _VALID_CLEARANCE_DECISIONS:
+        raise HTTPException(422, f"Unknown decision code '{decision}'. Must be one of {sorted(_VALID_CLEARANCE_DECISIONS)}.")
     if not reason:
         raise HTTPException(422, "reason is required to record a treatment clearance.")
     patient_id = _require_patient_id(body)
     _get_org_patient(db, patient_id, org_id)
     actor = _actor(current_user)
+    role = current_user.get("role")
 
-    session = db.query(TreatmentSession).filter(TreatmentSession.patient_id == patient_id).order_by(TreatmentSession.id.desc()).first()
+    order_id = body.get("order_id")
+    if order_id is not None:
+        order = db.query(TreatmentOrder).filter(TreatmentOrder.id == order_id, TreatmentOrder.patient_id == patient_id).first()
+    else:
+        # Defense in depth alongside _apply_treatment_plan_discontinuation now cancelling an
+        # outstanding order on discontinue: still require the order's own plan to be ACTIVE
+        # here too, so a stale SIGNED order from any code path that predates that fix (or a
+        # future one that misses it) can never be picked up as if its plan were still in force.
+        order = db.query(TreatmentOrder).join(
+            TreatmentPlan, TreatmentPlan.id == TreatmentOrder.treatment_plan_id
+        ).filter(
+            TreatmentOrder.patient_id == patient_id, TreatmentOrder.status == "SIGNED",
+            TreatmentPlan.status == "ACTIVE",
+        ).order_by(TreatmentOrder.id.desc()).first()
+    if not order or order.status != "SIGNED":
+        raise HTTPException(422, "No signed Treatment Order on record for this patient -- cannot record a clearance decision.")
+
+    session = db.query(TreatmentSession).filter(TreatmentSession.id == order.treatment_session_id).first()
+    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == order.treatment_plan_id).first()
 
     clearance = TreatmentClearance(
-        session_id=session.id if session else None,
+        session_id=session.id,
+        order_id=order.id,
         patient_id=patient_id,
         decision=decision,
         reason=reason,
-        reassess_on=(datetime.utcnow() + timedelta(days=7)).date() if decision in ["HELD", "DEFERRED"] else None,
+        reassess_on=(datetime.utcnow() + timedelta(days=7)).date() if decision in ("HELD", "DEFERRED") else None,
         task_owner_id=body.get("task_owner_id", actor),
         decided_by=actor,
         decided_at=datetime.utcnow()
     )
-    if clearance.session_id is None:
-        raise HTTPException(422, "No treatment session on record for this patient -- cannot record a clearance decision.")
     db.add(clearance)
 
-    if decision in ["HELD", "DEFERRED"]:
-        care_plan_id = None
-        if session and session.treatment_plan_id:
-            tx_plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == session.treatment_plan_id).first()
-            care_plan_id = tx_plan.care_plan_id if tx_plan else None
-        if care_plan_id is not None:
-            task = CarePlanTask(
-                care_plan_id=care_plan_id,
-                patient_id=patient_id,
-                description=f"Reassessment following Treatment Hold: {reason}",
-                owner_id=str(current_user.get("id")),
-                owner_name=actor,
-                due_date=datetime.utcnow() + timedelta(days=7),
-                status="OPEN"
-            )
-            db.add(task)
-        if session:
-            session.status = "HELD"
-    elif decision == "CLEARED":
-        if session:
-            session.status = "ADMINISTERED"
-            session.administered_on = datetime.utcnow()
-            session.administered_by = actor
+    if decision in ("HELD", "DEFERRED"):
+        # The order is deliberately left SIGNED, not cancelled -- once the hold resolves, the
+        # same already-authorized order can still be executed via a later clearance decision.
+        session.status = "HELD"
+        db.add(TreatmentEvent(
+            treatment_order_id=order.id, patient_id=patient_id, event_type=decision,
+            reason=reason, performed_by=actor, performed_role=role, performed_at=datetime.utcnow(),
+        ))
+        # publish() -> _on_treatment_held (event_subscribers.py) opens the mandatory
+        # reassessment CarePlanTask -- previously that CarePlanTask construction was
+        # hand-written inline here.
+        publish(
+            db, "TREATMENT_HELD", patient_id=patient_id, actor=actor, role=role,
+            title=f"Treatment Clearance: {decision}", category="TREATMENT",
+            description=f"Decision by {actor}: {decision}. Reason: {reason}",
+            treatment_order_id=order.id, care_plan_id=plan.care_plan_id if plan else None,
+            reason=reason, decision=decision, owner_id=current_user.get("id"),
+        )
 
-    j_ev = CCAJourneyEvent(
-        patient_id=patient_id,
-        event_type="TREATMENT_CLEARANCE",
-        event_title=f"Treatment Clearance: {decision}",
-        event_category="TREATMENT",
-        description=f"Decision by {actor}: {decision}. Reason: {reason}",
-        actor_name=actor,
-        actor_role=current_user.get("role")
-    )
-    db.add(j_ev)
+    elif decision in ("CLEARED", "CLEARED_DOSE_REDUCTION"):
+        order.status = "EXECUTED"
+        session.status = "ADMINISTERED"
+        session.administered_on = datetime.utcnow()
+        session.administered_by = actor
+        db.add(TreatmentEvent(
+            treatment_order_id=order.id, patient_id=patient_id, event_type="ADMINISTERED",
+            outcome="Standard Dose (100%)" if decision == "CLEARED" else "Dose Reduced",
+            reason=reason, performed_by=actor, performed_role=role, performed_at=datetime.utcnow(),
+        ))
+        # publish() -> _on_treatment_administered (event_subscribers.py) advances
+        # completed_sessions and opens the next planned session if more remain --
+        # previously that logic was hand-written inline here.
+        publish(
+            db, "TREATMENT_ADMINISTERED", patient_id=patient_id, actor=actor, role=role,
+            title=f"Treatment Clearance: {decision}", category="TREATMENT",
+            description=f"Decision by {actor}: {decision}. Reason: {reason}",
+            treatment_plan_id=plan.id if plan else None, treatment_order_id=order.id,
+            treatment_session_id=session.id,
+        )
+
+    elif decision == "DISCONTINUED":
+        order.status = "CANCELLED"
+        session.status = "CANCELLED"
+        db.add(TreatmentEvent(
+            treatment_order_id=order.id, patient_id=patient_id, event_type="DISCONTINUED",
+            reason=reason, performed_by=actor, performed_role=role, performed_at=datetime.utcnow(),
+        ))
+        if plan:
+            # Publishes TREATMENT_PLAN_DISCONTINUED itself -- see that helper.
+            _apply_treatment_plan_discontinuation(db, plan, reason, actor, role)
+        publish(
+            db, "TREATMENT_CLEARANCE_DISCONTINUED", patient_id=patient_id, actor=actor, role=role,
+            title=f"Treatment Clearance: {decision}", category="TREATMENT",
+            description=f"Decision by {actor}: {decision}. Reason: {reason}",
+            treatment_order_id=order.id,
+        )
+
     db.commit()
     db.refresh(clearance)
     return {
         "status": "success",
         "clearance": {
             "id": clearance.id,
+            "order_id": clearance.order_id,
             "decision": clearance.decision,
             "reason": clearance.reason,
             "reassess_on": clearance.reassess_on.isoformat() if clearance.reassess_on else None
@@ -2047,6 +3449,9 @@ async def record_response_assessment(
     request: Request, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
+    """RECIST response categorization is a clinical/radiological judgment call on the
+    treatment record, gated like the other clinical-decision endpoints in this router."""
+    _require_clinician(current_user)
     org_id = _org_id(current_user)
     body = await request.json()
     category = body.get("response_category")

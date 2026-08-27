@@ -23,12 +23,15 @@ from sqlalchemy.orm import Session
 from ..auth import (
     get_current_user, is_admin, is_cca_oncologist, is_cca_mdt_coordinator,
     is_cca_external_mdt_specialist, is_cca_financial_counsellor, is_cca_patient_liaison,
+    is_cca_front_desk,
 )
 from ..models_cca import (
     CCAPatient, MDTCase, MDTDecision, MDTParticipant, CCAExternalAccess, CCAExternalOpinion,
     CCAFinancialCase, CCACoordinationCase, CCAIntakeAssessment, CCAEncounter, CCAOrder,
-    CarePlan, StagingRecord, CCAJourneyEvent,
+    CarePlan, StagingRecord, CCAJourneyEvent, TreatmentPlan, CarePlanTask, DomainEvent,
 )
+from ..events import publish
+from ..cca_product_decisions import EXTERNAL_SPECIALIST_CAN_SIGN_RECOMMENDATIONS
 from .cca import get_cca_db, _org_id, _actor, _get_org_patient, _check_patient_in_org
 
 router = APIRouter(prefix="/api/cca", tags=["CCA Coordination & Ops"])
@@ -120,6 +123,13 @@ async def schedule_mdt_case(case_id: int, request: Request, db: Session = Depend
     case.referring_department = body.get("referring_department", case.referring_department)
     case.referring_clinician = body.get("referring_clinician", case.referring_clinician)
     case.status = "SCHEDULED"
+    actor = _actor(current_user)
+    publish(
+        db, "MDT_CASE_SCHEDULED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"MDT case scheduled: {case.tumor_board}", category="MDT",
+        description=f"{actor} scheduled case #{case.id} for {case.board_date or 'a date TBD'}.",
+        mdt_case_id=case.id,
+    )
     db.commit()
     return {"status": "success", "case": _mdt_case_out(case)}
 
@@ -136,7 +146,15 @@ async def update_mdt_case_state(case_id: int, request: Request, db: Session = De
     allowed = ("PROPOSED", "PREPARED", "SCHEDULED", "DISCUSSED", "RECOMMENDED", "RETURNED_TO_RECORD", "ACTIONED_BY_CLINICIAN", "WITHDRAWN")
     if new_status not in allowed:
         raise HTTPException(422, f"status must be one of {', '.join(allowed)}")
+    old_status = case.status
     case.status = new_status
+    actor = _actor(current_user)
+    publish(
+        db, "MDT_CASE_STATE_CHANGED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"MDT case {old_status} -> {new_status}", category="MDT",
+        description=f"{actor} moved case #{case.id} from {old_status} to {new_status}.",
+        mdt_case_id=case.id, previous_status=old_status, new_status=new_status,
+    )
     db.commit()
     return {"status": "success", "case": _mdt_case_out(case)}
 
@@ -166,6 +184,14 @@ async def add_participant(case_id: int, request: Request, db: Session = Depends(
         raise HTTPException(422, "specialist_name and specialist_role are required")
     participant = MDTParticipant(case_id=case.id, specialist_name=name, specialist_role=role, invitation_status="Invited")
     db.add(participant)
+    db.flush()
+    actor = _actor(current_user)
+    publish(
+        db, "MDT_PARTICIPANT_INVITED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"MDT participant invited: {name} ({role})", category="MDT",
+        description=f"{actor} invited {name} ({role}) to case #{case.id}.",
+        mdt_case_id=case.id, participant_id=participant.id,
+    )
     db.commit()
     db.refresh(participant)
     return {"status": "success", "participant": _participant_out(participant)}
@@ -187,6 +213,17 @@ async def update_participant(participant_id: int, request: Request, db: Session 
         if body["attendance_status"] not in ("Present", "Absent", "JoinedRemotely", None):
             raise HTTPException(422, "invalid attendance_status")
         participant.attendance_status = body["attendance_status"]
+    if participant.invitation_status == "Declined":
+        # A needed specialist declining to attend is the one participant-state change worth an
+        # audit event -- routine invite acceptance / in-meeting attendance marking is not.
+        case = _get_org_case(db, participant.case_id, _org_id(current_user))
+        actor = _actor(current_user)
+        publish(
+            db, "MDT_PARTICIPANT_DECLINED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+            title=f"MDT participant declined: {participant.specialist_name}", category="MDT",
+            description=f"{participant.specialist_name} ({participant.specialist_role}) declined case #{case.id}.",
+            mdt_case_id=case.id, participant_id=participant.id,
+        )
     db.commit()
     return {"status": "success", "participant": _participant_out(participant)}
 
@@ -228,6 +265,14 @@ async def grant_external_access(case_id: int, request: Request, db: Session = De
         granted_by=_actor(current_user), expires_at=expires_at,
     )
     db.add(access)
+    db.flush()
+    actor = _actor(current_user)
+    publish(
+        db, "EXTERNAL_ACCESS_GRANTED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"External access granted to {name}", category="MDT",
+        description=f"{actor} granted case-scoped external access to {name} ({email}), expiring {expires_at.isoformat()}.",
+        mdt_case_id=case.id, access_id=access.id,
+    )
     db.commit()
     db.refresh(access)
     return {"status": "success", "access": _access_out(access)}
@@ -245,6 +290,13 @@ async def update_external_access(access_id: int, request: Request, db: Session =
     if body.get("revoke"):
         access.access_status = "Revoked"
         access.revoked_at = datetime.utcnow()
+        actor = _actor(current_user)
+        publish(
+            db, "EXTERNAL_ACCESS_REVOKED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+            title=f"External access revoked for {access.specialist_name}", category="MDT",
+            description=f"{actor} revoked external access for {access.specialist_name} ({access.specialist_email}).",
+            mdt_case_id=case.id, access_id=access.id,
+        )
     db.commit()
     return {"status": "success", "access": _access_out(access)}
 
@@ -311,6 +363,12 @@ def list_opinions(case_id: int, db: Session = Depends(get_cca_db), current_user:
 
 @router.post("/mdt/cases/{case_id}/opinions", status_code=201)
 async def submit_opinion(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Ratified decision (cca_product_decisions.EXTERNAL_SPECIALIST_CAN_SIGN_RECOMMENDATIONS
+    = False): this writes a CCAExternalOpinion, never an MDTDecision -- an External MDT
+    Specialist's contribution is separately-attributable input, not a binding recommendation.
+    There is deliberately no sign/finalize endpoint for CCAExternalOpinion; see that module
+    for why. Do not add one without revisiting that decision first."""
+    assert not EXTERNAL_SPECIALIST_CAN_SIGN_RECOMMENDATIONS  # this endpoint's behavior only makes sense under this decision
     if not is_cca_external_mdt_specialist(current_user):
         raise HTTPException(403, "Only an External MDT Specialist submits an opinion here")
     access = _external_access_for(db, case_id, current_user.get("email"))
@@ -420,6 +478,13 @@ async def update_counselling(case_id: int, request: Request, db: Session = Depen
     case.counselling_notes = body.get("counselling_notes", case.counselling_notes)
     case.counselling_outcome = body.get("counselling_outcome", case.counselling_outcome)
     case.patient_decision = body.get("patient_decision", case.patient_decision)
+    actor = _actor(current_user)
+    publish(
+        db, "FINANCIAL_COUNSELLING_UPDATED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Financial counselling: {case.counselling_status}", category="FINANCIAL",
+        description=f"{actor} updated financial counselling to {case.counselling_status}." + (f" Patient decision: {case.patient_decision}." if case.patient_decision else ""),
+        financial_case_id=case.id,
+    )
     db.commit()
     return {"status": "success", "case": _financial_out(case)}
 
@@ -435,6 +500,16 @@ async def update_estimate(case_id: int, request: Request, db: Session = Depends(
     if status_val and status_val not in ("NotStarted", "Draft", "Ready", "Shared", "Revised", "Accepted", "Expired"):
         raise HTTPException(422, "invalid estimate_status")
     case.estimate_status = status_val or case.estimate_status
+    if status_val in ("Ready", "Shared", "Revised", "Accepted"):
+        # The estimate states worth an audit trail for -- a draft-in-progress isn't yet a
+        # decision point, but the patient seeing/accepting a number is.
+        actor = _actor(current_user)
+        publish(
+            db, "FINANCIAL_ESTIMATE_UPDATED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+            title=f"Financial estimate: {case.estimate_status}", category="FINANCIAL",
+            description=f"{actor} moved the financial estimate to {case.estimate_status}.",
+            financial_case_id=case.id,
+        )
     db.commit()
     return {"status": "success", "case": _financial_out(case)}
 
@@ -447,6 +522,13 @@ async def update_insurance(case_id: int, request: Request, db: Session = Depends
     case.payer_route = body.get("payer_route", case.payer_route)
     case.insurance_status = body.get("insurance_status", case.insurance_status)
     case.scheme_status = body.get("scheme_status", case.scheme_status)
+    actor = _actor(current_user)
+    publish(
+        db, "FINANCIAL_INSURANCE_UPDATED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Insurance/scheme status updated ({case.payer_route or 'route not set'})", category="FINANCIAL",
+        description=f"{actor} updated insurance status to {case.insurance_status or '—'}, scheme status to {case.scheme_status or '—'}.",
+        financial_case_id=case.id,
+    )
     db.commit()
     return {"status": "success", "case": _financial_out(case)}
 
@@ -461,6 +543,13 @@ async def update_clearance(case_id: int, request: Request, db: Session = Depends
     if status_val not in allowed:
         raise HTTPException(422, f"financial_clearance_status must be one of {', '.join(allowed)}")
     case.financial_clearance_status = status_val
+    actor = _actor(current_user)
+    publish(
+        db, "FINANCIAL_CLEARANCE_UPDATED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Financial clearance: {status_val}", category="FINANCIAL",
+        description=f"{actor} set financial clearance to {status_val}.",
+        financial_case_id=case.id, financial_clearance_status=status_val,
+    )
     db.commit()
     return {"status": "success", "case": _financial_out(case)}
 
@@ -569,6 +658,15 @@ async def update_contact_status(case_id: int, request: Request, db: Session = De
     case.communication_status = status_val
     case.preferred_contact_method = body.get("preferred_contact_method", case.preferred_contact_method)
     case.last_contact_at = datetime.utcnow()
+    if status_val in ("UnableToReach", "CallbackRequired"):
+        # The two contact outcomes that mean something needs follow-up, not routine logistics.
+        actor = _actor(current_user)
+        publish(
+            db, "COORDINATION_CONTACT_UPDATED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+            title=f"Contact status: {status_val}", category="COORDINATION",
+            description=f"{actor} recorded contact attempt outcome: {status_val}.",
+            coordination_case_id=case.id,
+        )
     db.commit()
     return {"status": "success", "case": _coordination_out(case)}
 
@@ -588,6 +686,64 @@ async def add_barrier(case_id: int, request: Request, db: Session = Depends(get_
         "owner": body.get("owner") or _actor(current_user),
     })
     case.barriers = barriers
+    db.commit()
+    return {"status": "success", "case": _coordination_out(case)}
+
+
+@router.patch("/coordination/cases/{case_id}/barriers/{index}")
+async def update_barrier_status(case_id: int, index: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Barriers could previously only ever be added, never resolved or escalated -- the
+    architecture doc's CARE_PLAN_TASK_BLOCKED event ('Care Coordinator + treating team see
+    blocker') had nothing to actually trigger it. Escalating one now opens a review task for
+    the treating team via the same patient-scoped task queue used elsewhere (see
+    event_subscribers.py's _on_care_plan_task_blocked)."""
+    if not (is_cca_patient_liaison(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Patient Liaison or Admin may update a barrier")
+    case = _get_org_coordination_case(db, case_id, _org_id(current_user))
+    barriers = list(case.barriers or [])
+    if index < 0 or index >= len(barriers):
+        raise HTTPException(404, "Barrier not found")
+    body = await request.json()
+    new_status = body.get("status")
+    if new_status not in ("Open", "Resolved", "Escalated"):
+        raise HTTPException(422, "status must be one of Open, Resolved, Escalated")
+    barriers[index] = {**barriers[index], "status": new_status}
+    case.barriers = barriers
+
+    actor = _actor(current_user)
+    if new_status == "Escalated":
+        publish(
+            db, "CARE_PLAN_TASK_BLOCKED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+            title="Care barrier escalated", category="COORDINATION",
+            description=f"{actor} escalated barrier '{barriers[index].get('type')}': {barriers[index].get('notes', '')}",
+            barrier_type=barriers[index].get("type"), barrier_notes=barriers[index].get("notes"),
+        )
+    db.commit()
+    return {"status": "success", "case": _coordination_out(case)}
+
+
+@router.post("/coordination/cases/{case_id}/no-show")
+async def record_no_show(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Architecture doc event: PATIENT_NO_SHOW, triggered by Front Desk / coordinator ->
+    'Care Coordinator receives recovery task'. Also recorded as a barrier on the
+    coordination case for visibility alongside every other barrier."""
+    if not (is_cca_front_desk(current_user) or is_cca_patient_liaison(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only Front Desk, Patient Liaison, or Admin may record a no-show")
+    case = _get_org_coordination_case(db, case_id, _org_id(current_user))
+    body = await request.json()
+    context = body.get("context", "")
+
+    barriers = list(case.barriers or [])
+    barriers.append({"type": "NoShow", "notes": context, "status": "Open", "owner": _actor(current_user)})
+    case.barriers = barriers
+
+    actor = _actor(current_user)
+    publish(
+        db, "PATIENT_NO_SHOW", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title="Patient no-show recorded", category="COORDINATION",
+        description=f"{actor} recorded a no-show." + (f" {context}" if context else ""),
+        coordination_case_id=case.id, context=context,
+    )
     db.commit()
     return {"status": "success", "case": _coordination_out(case)}
 
@@ -648,6 +804,72 @@ def operations_dashboard(db: Session = Depends(get_cca_db), current_user: dict =
         "coordination_overdue_tasks": db.query(CCACoordinationCase).join(CCAPatient, CCACoordinationCase.patient_id == CCAPatient.id).filter(
             CCAPatient.organization_id == org_id, CCACoordinationCase.next_action_status == "Overdue"
         ).count(),
+    }
+
+
+@router.get("/admin/analytics/treatment-metrics")
+def treatment_analytics(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Historical/timing metrics computed from the domain event log (see events.py's
+    DomainEvent -- the P0 event-dispatch slice is what makes this possible at all) and
+    current TreatmentPlan/CarePlanTask state, distinct from operations_dashboard's live
+    point-in-time snapshot above. Every number here is an operational/timing metric, never
+    a clinical interpretation -- same restriction as operations_dashboard."""
+    if not is_admin(current_user):
+        raise HTTPException(403, "Only Admin has analytics")
+    org_id = _org_id(current_user)
+
+    def _events(event_type):
+        return db.query(DomainEvent).join(CCAPatient, DomainEvent.patient_id == CCAPatient.id).filter(
+            CCAPatient.organization_id == org_id, DomainEvent.event_type == event_type
+        ).order_by(DomainEvent.created_at.asc()).all()
+
+    def _avg_days(deltas):
+        return round(sum(deltas) / len(deltas), 2) if deltas else None
+
+    # Time from Care Plan activation to first treatment administration, per patient.
+    activated_at_by_patient = {}
+    for e in _events("CARE_PLAN_ACTIVATED"):
+        activated_at_by_patient.setdefault(e.patient_id, e.created_at)
+    activation_to_treatment_days = []
+    for e in _events("TREATMENT_ADMINISTERED"):
+        activated_at = activated_at_by_patient.get(e.patient_id)
+        if activated_at and e.created_at >= activated_at:
+            activation_to_treatment_days.append((e.created_at - activated_at).total_seconds() / 86400)
+
+    # Draft-to-sign turnaround, per Treatment Plan.
+    drafted_at_by_plan = {
+        e.payload.get("treatment_plan_id"): e.created_at for e in _events("TREATMENT_PLAN_DRAFTED") if e.payload
+    }
+    draft_to_sign_days = []
+    for e in _events("TREATMENT_PLAN_SIGNED"):
+        plan_id = e.payload.get("treatment_plan_id") if e.payload else None
+        drafted_at = drafted_at_by_plan.get(plan_id)
+        if drafted_at and e.created_at >= drafted_at:
+            draft_to_sign_days.append((e.created_at - drafted_at).total_seconds() / 86400)
+
+    plans = db.query(TreatmentPlan).join(CCAPatient, TreatmentPlan.patient_id == CCAPatient.id).filter(
+        CCAPatient.organization_id == org_id, TreatmentPlan.status.in_(["ACTIVE", "COMPLETED"])
+    ).all()
+    total_planned = sum(p.planned_sessions or 0 for p in plans)
+    total_completed = sum(p.completed_sessions or 0 for p in plans)
+
+    open_tasks = db.query(CarePlanTask).join(CCAPatient, CarePlanTask.patient_id == CCAPatient.id).filter(
+        CCAPatient.organization_id == org_id, CarePlanTask.status.in_(["OPEN", "ESCALATED"])
+    ).count()
+
+    return {
+        "generated_at": datetime.utcnow().isoformat(),
+        "avg_days_plan_activation_to_treatment_start": _avg_days(activation_to_treatment_days),
+        "avg_days_plan_draft_to_sign": _avg_days(draft_to_sign_days),
+        "open_or_escalated_tasks": open_tasks,
+        "treatment_plan_revisions": len(_events("TREATMENT_PLAN_REVISED")),
+        "treatment_holds": len(_events("TREATMENT_HELD")),
+        "patient_no_shows": len(_events("PATIENT_NO_SHOW")),
+        "sessions_completion_rate": round(total_completed / total_planned, 3) if total_planned else None,
+        "sample_sizes": {
+            "plan_activation_to_treatment_start": len(activation_to_treatment_days),
+            "plan_draft_to_sign": len(draft_to_sign_days),
+        },
     }
 
 

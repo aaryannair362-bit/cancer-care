@@ -52,6 +52,35 @@ ADDITIVE_COLUMNS = [
     ("cca_patients", "id_proof_name", "VARCHAR(200)"),
     ("cca_patients", "id_proof_dob", "VARCHAR(20)"),
     ("cca_patients", "id_proof_verification_status", "VARCHAR(30)"),
+    # Care Plan / Treatment Plan separation (see the Care Plan & Treatment Plan architecture
+    # doc): CarePlan now references its authorizing TreatmentPlan(s) explicitly instead of
+    # embedding modality content as its own source of truth, and TreatmentPlan gains a real
+    # versioning + signature lifecycle instead of being born directly into "ACTIVE".
+    ("cca_care_plans", "source_treatment_plan_ids", "JSON"),
+    ("cca_treatment_plans", "mdt_decision_id", "INTEGER"),
+    ("cca_treatment_plans", "intent", "VARCHAR(100) DEFAULT 'Curative'"),
+    ("cca_treatment_plans", "version_no", "INTEGER DEFAULT 1"),
+    ("cca_treatment_plans", "supersedes_id", "INTEGER"),
+    ("cca_treatment_plans", "signer_email", "VARCHAR(200)"),
+    ("cca_treatment_plans", "signer_role", "VARCHAR(50)"),
+    ("cca_treatment_plans", "signed_at", "TIMESTAMP"),
+    # Treatment Order / Treatment Event separation: Day-Care must act on a signed Order, not
+    # infer administration directly from a Plan or Care Plan -- see the Care Plan & Treatment
+    # Plan architecture doc.
+    ("cca_treatment_clearances", "order_id", "INTEGER"),
+    # Guideline-update review flagging (architecture doc non-negotiable: a new guideline
+    # version must never silently rewrite a signed plan, only flag it for clinician review).
+    ("cca_treatment_plans", "guideline_review_required", "BOOLEAN DEFAULT FALSE"),
+    ("cca_treatment_plans", "guideline_review_reason", "TEXT"),
+    # AI Search's explicit-confirmation task origin tag (architecture doc non-negotiable:
+    # AI proposes, clinician decides).
+    ("cca_care_plan_tasks", "source", "VARCHAR(30) DEFAULT 'SYSTEM'"),
+    # Patient-facing view, gated behind explicit clinical/consent review (architecture doc
+    # non-negotiable: never expose internal reasoning by default).
+    ("cca_care_plans", "patient_facing_approved", "BOOLEAN DEFAULT FALSE"),
+    ("cca_care_plans", "patient_facing_approved_by", "VARCHAR(200)"),
+    ("cca_care_plans", "patient_facing_approved_at", "TIMESTAMP"),
+    ("cca_care_plan_tasks", "patient_visible_note", "TEXT"),
 ]
 
 
@@ -69,3 +98,40 @@ def run_additive_migrations(engine):
             if column in existing_columns:
                 continue
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+
+
+# (table_name, column_name) pairs whose NOT NULL constraint needs relaxing on an existing
+# database -- distinct from ADD COLUMN above because DROP NOT NULL isn't expressible as one
+# portable statement across SQLite and Postgres.
+NULLABLE_RELAXATIONS = [
+    # CarePlanTask.care_plan_id: a task is patient-scoped first: real triggers (e.g. an MDT
+    # recommendation finalizing) routinely happen before any Care Plan exists yet. See
+    # models_cca.py's CarePlanTask docstring and the Care Plan & Treatment Plan architecture
+    # doc's flagged gap on task assignment without a Care Plan.
+    ("cca_care_plan_tasks", "care_plan_id"),
+]
+
+
+def run_constraint_migrations(engine):
+    """Postgres (the production backend, per config.py's DATABASE_URL) supports `ALTER
+    COLUMN ... DROP NOT NULL` directly as a fast, safe, metadata-only change -- no table
+    rewrite, no lock beyond a brief schema-change lock. SQLite has no equivalent ALTER
+    COLUMN support at all (it would require rebuilding the whole table), and since SQLite is
+    this project's disposable local/test fallback only (tests/conftest.py always points it
+    at a throwaway file; see also ARCHITECTURE_NOTES.md), a local aivana.db predating this
+    change should simply be deleted and let create_all rebuild it with the relaxed
+    constraint already in place, rather than this helper building SQLite table-rebuild
+    machinery for dev convenience alone."""
+    if engine.dialect.name != "postgresql":
+        return
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    with engine.begin() as conn:
+        for table, column in NULLABLE_RELAXATIONS:
+            if table not in existing_tables:
+                continue
+            columns = {c["name"]: c for c in inspector.get_columns(table)}
+            col = columns.get(column)
+            if col is None or col.get("nullable"):
+                continue
+            conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN {column} DROP NOT NULL"))
