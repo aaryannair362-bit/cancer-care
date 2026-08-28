@@ -1910,6 +1910,44 @@ async def record_mdt_recommendation(
     }
 
 
+@router.post("/mdt/cases/{id}/approve")
+async def approve_mdt_recommendation(
+    id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Enforces Non-Negotiable Constraint: MDT recommendations require an authorized treating
+    clinician's explicit approval before altering active clinical treatment plans."""
+    if not can_sign_treatment_plan(current_user):
+        raise HTTPException(403, "Only treating oncologists or authorized clinicians may approve MDT recommendations into binding treatment directives")
+
+    case = db.query(MDTCase).filter(MDTCase.id == id).first()
+    if not case:
+        raise HTTPException(404, "MDT case not found")
+    _check_patient_in_org(db, case.patient_id, _org_id(current_user))
+
+    decision = db.query(MDTDecision).filter(MDTDecision.case_id == case.id).order_by(MDTDecision.id.desc()).first()
+    if not decision:
+        raise HTTPException(400, "Cannot approve MDT case before recommendation is drafted")
+
+    actor = _actor(current_user)
+    decision.status = "APPROVED"
+    case.status = "APPROVED"
+
+    publish(
+        db, "MDT_RECOMMENDATION_APPROVED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title="MDT Recommendation Approved by Clinician", category="MDT",
+        description=f"Treating clinician {actor} approved MDT recommendation for case #{case.id}",
+        mdt_case_id=case.id, mdt_decision_id=decision.id,
+    )
+    db.commit()
+    return {
+        "status": "success",
+        "case_status": case.status,
+        "decision_status": decision.status,
+        "approved_by": actor
+    }
+
+
 # ---------------------------------------------------------
 # 8b. Treatment Plan lifecycle -- draft / amend / sign / discontinue
 #
