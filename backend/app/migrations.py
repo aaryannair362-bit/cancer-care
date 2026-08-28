@@ -93,6 +93,21 @@ ADDITIVE_COLUMNS = [
     ("cca_care_plans", "patient_facing_approved_by", "VARCHAR(200)"),
     ("cca_care_plans", "patient_facing_approved_at", "TIMESTAMP"),
     ("cca_care_plan_tasks", "patient_visible_note", "TEXT"),
+    # Found via a direct audit of the live production Postgres schema (information_schema.columns)
+    # against every SQLAlchemy model column, after the same "column on model, never registered
+    # here" bug (already fixed twice above for cca_patients/cca_clinical_facts) broke
+    # GET /patients/{id}/treatment-plans in production with
+    # "column cca_treatment_plans.created_by does not exist". This audit method is authoritative
+    # -- a local SQLite recreated via create_all always has every current column already, which
+    # is why earlier local-only comparisons missed these.
+    ("cca_care_plan_versions", "before_after_diff", "JSON"),
+    ("cca_care_plan_tasks", "owner_role", "VARCHAR(30)"),
+    ("cca_care_plan_tasks", "category", "VARCHAR(30)"),
+    ("cca_care_plan_tasks", "dependency_ids", "JSON"),
+    ("cca_care_plan_tasks", "linked_order_id", "INTEGER"),
+    ("cca_care_plan_tasks", "linked_result_id", "INTEGER"),
+    ("cca_care_plan_tasks", "blocker_reason", "TEXT"),
+    ("cca_treatment_plans", "created_by", "VARCHAR(200)"),
     # MDT recommendation disposition: treating-clinician accept/partially-accept/reject with
     # reason (architecture doc Sec 18), not a bare binary approve.
     ("cca_mdt_decisions", "disposition_reason", "TEXT"),
