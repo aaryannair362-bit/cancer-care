@@ -205,7 +205,7 @@ async function renderCaseSummaryPanel(containerId, patientId) {
  * Usage: same setup as renderCaseSummaryPanel; call `renderPatientSummaryCards('container-id', patientId)`.
  */
 const TP_SUMMARY_BADGE = { DRAFT: 'badge-amber', PROPOSED: 'badge-amber', ACTIVE: 'badge-green', ON_HOLD: 'badge-amber', COMPLETED: 'badge-blue', SUPERSEDED: 'badge-blue', CANCELLED: 'badge-rose' };
-const CP_SUMMARY_BADGE = { ACTIVE: 'badge-green', BLOCKED: 'badge-rose', ON_HOLD: 'badge-amber', COMPLETED: 'badge-blue', CANCELLED: 'badge-rose' };
+const CP_SUMMARY_BADGE = { DRAFT: 'badge-amber', PROPOSED: 'badge-amber', ACTIVE: 'badge-green', BLOCKED: 'badge-rose', ON_HOLD: 'badge-amber', COMPLETED: 'badge-blue', CANCELLED: 'badge-rose' };
 const TASK_SUMMARY_BADGE = { OPEN: 'badge-amber', ACKNOWLEDGED: 'badge-blue', BLOCKED: 'badge-rose', ESCALATED: 'badge-rose', RESOLVED: 'badge-green' };
 
 async function renderPatientSummaryCards(containerId, patientId) {
@@ -268,3 +268,157 @@ async function renderPatientSummaryCards(containerId, patientId) {
 
     container.innerHTML = `<div class="grid-2" style="align-items:start;">${treatmentCard}${careCard}</div>`;
 }
+
+/*
+ * NEXUS Clinical Reasoning Brief -- the 13 (+1 Must-Not-Miss) source-linked sections from
+ * synthesize_nexus_brief (architecture doc Sec 20). Previously only the retired cca_os.html
+ * single-page app rendered this; every live role page's NEXUS tab showed static demo content
+ * instead. Ported from cca-app.js's loadNexusBrief() and generalized (shared containerId/
+ * patientId args, section keys read generically) so every role page's NEXUS tab can call it.
+ */
+async function renderNexusBrief(containerId, patientId) {
+    _ccaSummaryEnsureStyles();
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    if (!patientId) { container.innerHTML = ''; return; }
+    container.innerHTML = `<div class="section-card"><p class="cca-sum-empty">Loading NEXUS clinical brief…</p></div>`;
+    try {
+        const data = await Api.get(`/cca/patients/${patientId}/clinical-brief`);
+        const sections = data.sections || {};
+        const keys = Object.keys(sections).sort();
+        if (!keys.length) {
+            container.innerHTML = `<div class="section-card"><p class="cca-sum-empty">No clinical brief available yet.</p></div>`;
+            return;
+        }
+        container.innerHTML = keys.map((key) => {
+            const sec = sections[key];
+            const num = (key.match(/^\d+/) || ['?'])[0];
+            return `
+                <div class="section-card" style="margin-bottom:10px;">
+                    <div class="section-title" style="font-size:13px; display:flex; gap:8px; align-items:baseline;">
+                        <span style="font-family:monospace; color:var(--ink-500); font-size:11px;">${escapeHtml(num)}</span>
+                        ${escapeHtml(sec.title || key)}
+                    </div>
+                    <p style="font-size:12.5px; color:var(--ink-700); line-height:1.6; margin-top:6px;">${escapeHtml(sec.content || '')}</p>
+                </div>
+            `;
+        }).join('') + `<p style="font-size:11px; color:var(--ink-500);">Clinical uncertainty: ${escapeHtml(data.clinical_uncertainty || '—')} · Generated ${data.generated_at ? new Date(data.generated_at).toLocaleString() : '—'}</p>`;
+    } catch (err) {
+        container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`;
+    }
+}
+
+/*
+ * AI Search -- global, source-cited, scope-governed retrieval (Spec Section 30). Shared by
+ * every role page that has the #ai-search-input / #ai-search-results search-pill markup, so
+ * there is one implementation of the scope selector, result rendering and propose-task flow
+ * instead of one per (already copy-pasted) page. Retrieval and summarization only: the only
+ * way a result becomes durable is an explicit "Propose as Care Plan Task" action (architecture
+ * doc: no silent AI writes).
+ *
+ * Depends on page globals: CCA_API (or falls back to '/cca'), currentPatientId, and (for
+ * "View Source" tab-jumping) an optional page-level showTab(tabName) function.
+ */
+const CCA_SEARCH_SCOPES = [
+    { value: 'THIS_PATIENT', label: 'This Patient' },
+    { value: 'HOSPITAL_RECORDS', label: 'Hospital Records' },
+    { value: 'CLINICAL_KNOWLEDGE', label: 'Clinical Knowledge' },
+];
+let lastAiSearchResults = [];
+let currentAiSearchScope = 'THIS_PATIENT';
+
+function _ccaSearchEnsureScopeControl() {
+    const input = document.getElementById('ai-search-input');
+    if (!input || document.getElementById('ai-search-scope')) return;
+    const select = document.createElement('select');
+    select.id = 'ai-search-scope';
+    select.title = 'Search scope';
+    select.style.cssText = 'flex:0 0 auto; font-size:11.5px; color:var(--ink-600); background:transparent; border:none; border-right:1px solid var(--line); padding:0 8px 0 4px; margin-right:4px; cursor:pointer;';
+    select.innerHTML = CCA_SEARCH_SCOPES.map(s => `<option value="${s.value}">${escapeHtml(s.label)}</option>`).join('');
+    select.addEventListener('change', () => {
+        currentAiSearchScope = select.value;
+        if (input.value.trim().length >= 2) runAiSearch();
+    });
+    input.parentElement.insertBefore(select, input);
+}
+
+async function runAiSearch() {
+    _ccaSearchEnsureScopeControl();
+    const resultsEl = document.getElementById('ai-search-results');
+    const input = document.getElementById('ai-search-input');
+    const q = input.value.trim();
+    const apiBase = (typeof CCA_API !== 'undefined' && CCA_API) ? CCA_API : '/cca';
+    if (currentAiSearchScope !== 'HOSPITAL_RECORDS' && currentAiSearchScope !== 'CLINICAL_KNOWLEDGE' && !currentPatientId) {
+        resultsEl.style.display = 'block';
+        resultsEl.innerHTML = '<div style="padding:12px; font-size:12.5px; color:var(--ink-500);">Open a patient first to search their record.</div>';
+        return;
+    }
+    if (q.length < 2) { resultsEl.style.display = 'none'; return; }
+    resultsEl.style.display = 'block';
+    resultsEl.innerHTML = '<div style="padding:12px; font-size:12.5px; color:var(--ink-500);">Searching…</div>';
+    try {
+        const patientForSearch = currentPatientId || 0;
+        const data = await Api.get(`${apiBase}/patients/${patientForSearch}/search?query=${encodeURIComponent(q)}&scope=${encodeURIComponent(currentAiSearchScope)}`);
+        lastAiSearchResults = data.results || [];
+        if (!lastAiSearchResults.length) {
+            resultsEl.innerHTML = '<div style="padding:12px; font-size:12.5px; color:var(--ink-500);">No matches in this scope.</div>';
+            return;
+        }
+        resultsEl.innerHTML = lastAiSearchResults.map((r, i) => {
+            const heading = r.snippet !== undefined ? r.snippet : (r.title || '');
+            const body = r.content ? r.content : '';
+            const metaBits = [];
+            if (r.source_author) metaBits.push(escapeHtml(r.source_author));
+            else if (r.citation) metaBits.push(escapeHtml(r.citation));
+            if (r.source_date) metaBits.push(new Date(r.source_date).toLocaleDateString());
+            if (r.confirmation_state) metaBits.push(escapeHtml(r.confirmation_state));
+            return `
+                <div style="padding:10px 12px; border-bottom:1px solid var(--line-subtle);">
+                    <div style="font-size:10.5px; font-weight:700; color:var(--ink-500); text-transform:uppercase; letter-spacing:0.4px;">${escapeHtml((r.type || '').replace(/_/g, ' '))}</div>
+                    ${heading ? `<div style="font-size:13px; color:var(--ink-900); margin:3px 0;">${escapeHtml(heading)}</div>` : ''}
+                    ${body ? `<div style="font-size:12px; color:var(--ink-700); margin:3px 0;">${escapeHtml(body)}</div>` : ''}
+                    <div style="font-size:11.5px; color:var(--ink-500);">${metaBits.length ? metaBits.join(' · ') : 'Unknown source'}</div>
+                    <div style="display:flex; gap:6px; margin-top:6px;">
+                        ${r.view_source ? `<button class="nexus-mini-btn" onclick="viewAiSearchSource(${i})">View Source</button>` : ''}
+                        ${r.id != null ? `<button class="nexus-mini-btn primary" onclick="proposeAiSearchTask(${i})">Propose as Care Plan Task</button>` : ''}
+                    </div>
+                </div>
+            `;
+        }).join('');
+    } catch (err) {
+        resultsEl.innerHTML = `<div style="padding:12px; font-size:12.5px; color:var(--rose-badge-text);">${escapeHtml(apiErrorMessage(err))}</div>`;
+    }
+}
+
+const CCA_SEARCH_RESULT_TAB = { CLINICAL_FACT: 'history', MDT_DECISION: 'mdt', TREATMENT_PLAN: 'treatmentplan', STAGING_RECORD: 'staging', JOURNEY_EVENT: 'history' };
+
+function viewAiSearchSource(index) {
+    const r = lastAiSearchResults[index];
+    document.getElementById('ai-search-results').style.display = 'none';
+    const tab = CCA_SEARCH_RESULT_TAB[r.type];
+    if (tab && typeof showTab === 'function' && document.getElementById(`nav-${tab}`)) { showTab(tab); return; }
+    toast(`Source: ${r.view_source}`, 'info');
+}
+
+async function proposeAiSearchTask(index) {
+    const r = lastAiSearchResults[index];
+    const apiBase = (typeof CCA_API !== 'undefined' && CCA_API) ? CCA_API : '/cca';
+    const description = prompt('Task description for this patient task (reviewed and edited by you before saving):', r.snippet || '');
+    if (!description) return;
+    try {
+        await Api.post(`${apiBase}/patients/${currentPatientId}/search/propose-task`, {
+            description, source_reference: { type: r.type, id: r.id },
+        });
+        toast('Task proposed from AI Search', 'success');
+        document.getElementById('ai-search-results').style.display = 'none';
+        document.getElementById('ai-search-input').value = '';
+    } catch (err) { toast(apiErrorMessage(err), 'error'); }
+}
+
+document.addEventListener('click', (e) => {
+    const container = document.querySelector('.search-pill-container');
+    const resultsEl = document.getElementById('ai-search-results');
+    if (container && resultsEl && !container.contains(e.target)) {
+        resultsEl.style.display = 'none';
+    }
+});

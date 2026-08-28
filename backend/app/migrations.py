@@ -81,6 +81,9 @@ ADDITIVE_COLUMNS = [
     ("cca_care_plans", "patient_facing_approved_by", "VARCHAR(200)"),
     ("cca_care_plans", "patient_facing_approved_at", "TIMESTAMP"),
     ("cca_care_plan_tasks", "patient_visible_note", "TEXT"),
+    # MDT recommendation disposition: treating-clinician accept/partially-accept/reject with
+    # reason (architecture doc Sec 18), not a bare binary approve.
+    ("cca_mdt_decisions", "disposition_reason", "TEXT"),
 ]
 
 

@@ -203,13 +203,17 @@ def is_cca_financial_counsellor(user: dict) -> bool:
 
 
 def can_sign_treatment_plan(user: dict) -> bool:
-    """Only treating oncologists, Doctor, or Admin can sign treatment plans."""
-    return is_admin(user) or is_doctor(user) or is_cca_oncologist(user)
+    """Only treating oncologists or Doctor can sign treatment plans -- deliberately NOT Admin
+    (architecture doc: Admin/Operations "cannot edit signed clinical notes, diagnoses,
+    finalized radiology/pathology reports or clinician-approved treatment plans"). Also gates
+    MDT recommendation disposition (approve_mdt_recommendation), for the same reason."""
+    return is_doctor(user) or is_cca_oncologist(user)
 
 
 def can_finalize_diagnostic_report(user: dict) -> bool:
-    """Only Radiologist, Pathologist, Doctor, or Admin can sign diagnostic reports."""
-    return is_admin(user) or is_doctor(user) or is_cca_radiologist(user) or is_cca_pathologist(user)
+    """Only Radiologist, Pathologist, or Doctor can sign diagnostic reports -- deliberately
+    NOT Admin, for the same reason as can_sign_treatment_plan above."""
+    return is_doctor(user) or is_cca_radiologist(user) or is_cca_pathologist(user)
 
 
 def create_external_specialist_token(case_id: int, specialist_email: str, expires_hours: int = 72) -> str:

@@ -17,7 +17,7 @@ from ..auth import (
     get_current_user, is_admin, is_doctor, is_cca_oncologist, is_cca_front_desk,
     is_cca_nurse_navigator, is_cca_medical_oncologist, is_cca_surgical_oncologist,
     is_cca_radiation_oncologist, is_cca_patient_liaison, is_cca_infusion_nurse,
-    is_cca_radiologist,
+    is_cca_radiologist, log_audit,
 )
 from ..config import settings
 from ..ocr_service import extract_document
@@ -86,9 +86,13 @@ def _actor(current_user: dict) -> str:
 def _require_clinician(current_user: dict):
     """Gate for irreversible clinical decisions (staging confirm, treatment clearance,
     MDT recommendation, care-plan approval/amendment): a treating oncologist (Medical/
-    Surgical/Radiation), the general Doctor role, or Admin only."""
-    if not (is_doctor(current_user) or is_admin(current_user) or is_cca_oncologist(current_user)):
-        raise HTTPException(403, "Only a treating oncologist or Admin may perform this action")
+    Surgical/Radiation) or the general Doctor role only -- deliberately NOT Admin (architecture
+    doc: Admin/Operations "cannot edit signed clinical notes, diagnoses, finalized
+    radiology/pathology reports or clinician-approved treatment plans"). Admin retains full
+    read/oversight access everywhere via rbac_projection.py's "FULL" tiers; only the ability to
+    author these specific clinical actions is withdrawn here."""
+    if not (is_doctor(current_user) or is_cca_oncologist(current_user)):
+        raise HTTPException(403, "Only a treating oncologist may perform this action")
 
 
 # Modality -> the role predicate authorized to sign/discontinue a Treatment Plan of that
@@ -105,24 +109,25 @@ def _require_modality_signer(current_user: dict, modality: str):
     """Only an authorized clinician of the *matching* modality may sign or discontinue a
     Treatment Plan (architecture doc non-negotiable #1: Medical/Surgical/Radiation Oncologist
     each own C/E/S of their own modality, R others -- previously all three were treated as
-    interchangeable via is_cca_oncologist for every plan action). Admin may always act, for
-    demo/support purposes, matching every other clinician gate in this router.
+    interchangeable via is_cca_oncologist for every plan action). Admin does NOT bypass this
+    (architecture doc: Admin/Operations cannot sign clinician-approved treatment plans) --
+    this previously matched every other clinician gate in this router in granting Admin a
+    bypass; that bypass has since been withdrawn from all of them together, deliberately, not
+    just here.
 
     Multimodality co-signature (e.g. a second modality co-signing a shared plan) is
     deliberately out of scope here -- see TreatmentPlanCoSignature's docstring in
     models_cca.py. This only decides who may be the single primary signer for a given
     modality string."""
-    if is_admin(current_user):
-        return
     modality_lower = (modality or "").lower()
     for keywords, predicate, label in _MODALITY_SIGNER_CHECKS:
         if any(kw in modality_lower for kw in keywords):
             if not predicate(current_user):
-                raise HTTPException(403, f"Only the {label} (or Admin) may sign/discontinue this modality's Treatment Plan")
+                raise HTTPException(403, f"Only the {label} may sign/discontinue this modality's Treatment Plan")
             return
     # Default: systemic/medical therapy (and anything not matching a keyword above).
     if not (is_cca_medical_oncologist(current_user) or is_doctor(current_user)):
-        raise HTTPException(403, "Only the Medical Oncologist (or Admin) may sign/discontinue this modality's Treatment Plan")
+        raise HTTPException(403, "Only the Medical Oncologist may sign/discontinue this modality's Treatment Plan")
 
 
 def _get_org_patient(db: Session, patient_id: int, org_id: int) -> CCAPatient:
@@ -1790,6 +1795,9 @@ async def confirm_stage(
         actor_role=current_user.get("role")
     )
     db.add(j_ev)
+    log_audit(db, current_user.get("id"), _actor(current_user), _org_id(current_user),
+              "confirm_stage", f"cca/patients/{patient_id}/staging", "Success",
+              f"Stage {stage_value} ({group}), version {next_ver}")
     db.commit()
     db.refresh(record)
     return {
@@ -1927,6 +1935,13 @@ def list_mdt_cases(
     patient_id: Optional[int] = None, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
+    # Data-sharing review finding: this endpoint had no role gate at all beyond org-scoping --
+    # any authenticated CCA role, including Front Desk/Patient Liaison/Financial Counsellor,
+    # could read every patient's MDT clinical question and case status (architecture doc's
+    # role matrix gives none of those roles read access to MDT content). Same access line as
+    # AI Search/Care Plan's CLINICAL_CONTEXT+ tiers -- no live page for an OPERATIONAL-tier
+    # role calls this endpoint, so this closes the leak without removing any working feature.
+    _require_search_access(current_user)
     org_id = _org_id(current_user)
     if patient_id is not None:
         _get_org_patient(db, patient_id, org_id)
@@ -2003,13 +2018,23 @@ async def record_mdt_recommendation(
     }
 
 
+_MDT_DISPOSITION_STATUS = {"ACCEPT": "APPROVED", "PARTIAL": "PARTIALLY_APPROVED", "REJECT": "REJECTED"}
+# REJECT returns the case to the treating team's record instead of a dead-end "REJECTED" case
+# status -- a rejected recommendation is not the end of the patient's MDT journey, it's a
+# prompt to resubmit with a revised question/evidence (architecture doc Sec 23's lifecycle).
+_MDT_DISPOSITION_CASE_STATUS = {"ACCEPT": "APPROVED", "PARTIAL": "PARTIALLY_APPROVED", "REJECT": "RETURNED_TO_RECORD"}
+
+
 @router.post("/mdt/cases/{id}/approve")
 async def approve_mdt_recommendation(
     id: int, request: Request, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
     """Enforces Non-Negotiable Constraint: MDT recommendations require an authorized treating
-    clinician's explicit approval before altering active clinical treatment plans."""
+    clinician's explicit disposition before altering active clinical treatment plans. Per the
+    architecture doc (Sec 18), that disposition is a genuine three-way choice -- ACCEPT (the
+    recommendation stands as written), PARTIAL (accepted with modification), or REJECT (not
+    adopted) -- not a bare approve/deny; PARTIAL and REJECT require the clinician's reason."""
     if not can_sign_treatment_plan(current_user):
         raise HTTPException(403, "Only treating oncologists or authorized clinicians may approve MDT recommendations into binding treatment directives")
 
@@ -2022,19 +2047,33 @@ async def approve_mdt_recommendation(
     if not decision:
         raise HTTPException(400, "Cannot approve MDT case before recommendation is drafted")
 
+    body = await request.json() if request.headers.get("content-length") not in (None, "0") else {}
+    disposition = (body.get("disposition") or "ACCEPT").upper()
+    if disposition not in _MDT_DISPOSITION_STATUS:
+        raise HTTPException(422, "disposition must be one of ACCEPT, PARTIAL, REJECT")
+    reason = body.get("reason")
+    if disposition != "ACCEPT" and not reason:
+        raise HTTPException(422, "A reason is required unless the disposition is a full ACCEPT")
+
     actor = _actor(current_user)
-    decision.status = "APPROVED"
-    case.status = "APPROVED"
+    decision.status = _MDT_DISPOSITION_STATUS[disposition]
+    decision.disposition_reason = reason
+    case.status = _MDT_DISPOSITION_CASE_STATUS[disposition]
 
     publish(
         db, "MDT_RECOMMENDATION_APPROVED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
-        title="MDT Recommendation Approved by Clinician", category="MDT",
-        description=f"Treating clinician {actor} approved MDT recommendation for case #{case.id}",
-        mdt_case_id=case.id, mdt_decision_id=decision.id,
+        title=f"MDT Recommendation {disposition.title()} by Clinician", category="MDT",
+        description=f"Treating clinician {actor} recorded disposition {disposition} on MDT recommendation for case #{case.id}"
+                    + (f": {reason}" if reason else ""),
+        mdt_case_id=case.id, mdt_decision_id=decision.id, disposition=disposition,
     )
+    log_audit(db, current_user.get("id"), actor, _org_id(current_user),
+              "approve_mdt_recommendation", f"cca/mdt/cases/{case.id}", "Success",
+              f"disposition={disposition}" + (f", reason={reason}" if reason else ""))
     db.commit()
     return {
         "status": "success",
+        "disposition": disposition,
         "case_status": case.status,
         "decision_status": decision.status,
         "approved_by": actor
@@ -2376,6 +2415,9 @@ async def sign_treatment_plan(
         status="PLANNED",
     ))
 
+    log_audit(db, current_user.get("id"), actor, _org_id(current_user),
+              "sign_treatment_plan", f"cca/treatment-plans/{plan.id}", "Success",
+              f"{plan.modality} v{plan.version_no}, signer role {plan.signer_role}")
     db.commit()
     db.refresh(plan)
     return {"status": "success", "treatment_plan": _treatment_plan_dict(plan)}
@@ -2730,6 +2772,13 @@ async def update_care_plan(
 # ---------------------------------------------------------
 
 _CARE_PLAN_STATUS_TRANSITIONS = {
+    # DRAFT/PROPOSED are additive states (architecture doc Sec 6): create_care_plan itself still
+    # defaults new plans straight to ACTIVE (a distinct, larger change to that endpoint's own
+    # contract -- see its docstring), but a plan that *is* created/moved into DRAFT or PROPOSED
+    # (e.g. an MDT-recommendation-originated draft awaiting the treating clinician's review) can
+    # now be advanced through this same transition endpoint instead of hitting a dead end.
+    "DRAFT": {"PROPOSED", "CANCELLED"},
+    "PROPOSED": {"ACTIVE", "DRAFT", "CANCELLED"},
     "ACTIVE": {"BLOCKED", "ON_HOLD", "COMPLETED", "CANCELLED"},
     "BLOCKED": {"ACTIVE", "CANCELLED"},
     "ON_HOLD": {"ACTIVE", "CANCELLED"},
@@ -2782,6 +2831,9 @@ async def update_care_plan_status(
         description=f"{actor} moved Care Plan #{plan.id} from {old_status} to {new_status}: {reason}",
         care_plan_id=plan.id, previous_status=old_status, new_status=new_status,
     )
+    log_audit(db, current_user.get("id"), actor, _org_id(current_user),
+              "update_care_plan_status", f"cca/care-plans/{plan.id}", "Success",
+              f"{old_status} -> {new_status}: {reason}")
     db.commit()
     db.refresh(plan)
     return {"status": "success", "care_plan": {"id": plan.id, "status": plan.status, "version_no": plan.version_no}}
@@ -3045,77 +3097,6 @@ async def set_task_patient_visible_note(
 def _require_search_access(current_user: dict):
     if care_plan_tier(current_user) == "OPERATIONAL":
         raise HTTPException(403, "AI Search is available to clinical-adjacent roles only")
-
-
-@router.get("/patients/{patient_id}/search")
-def search_patient_evidence(
-    patient_id: int, q: str, db: Session = Depends(get_cca_db),
-    current_user: dict = Depends(get_current_user)
-):
-    _get_org_patient(db, patient_id, _org_id(current_user))
-    _require_search_access(current_user)
-    query = (q or "").strip().lower()
-    if len(query) < 2:
-        raise HTTPException(422, "q (search query) must be at least 2 characters")
-
-    results = []
-
-    for f in db.query(ClinicalFact).filter(ClinicalFact.patient_id == patient_id).all():
-        if query in f"{f.fact_type or ''} {f.value or ''}".lower():
-            results.append({
-                "type": "ClinicalFact", "id": f.id,
-                "snippet": f"{f.fact_type}: {f.value}",
-                "source_date": f.created_at.isoformat() if f.created_at else None,
-                "source_author": f.verified_by or "AI-extracted (unverified)",
-                "confirmation_state": f.status,
-                "view_source": f"/api/cca/patients/{patient_id}/documents/{f.document_id}" if f.document_id else None,
-            })
-
-    for d in db.query(MDTDecision).filter(MDTDecision.patient_id == patient_id).all():
-        if query in f"{d.recommendation or ''} {d.rationale or ''} {d.modality_direction or ''}".lower():
-            results.append({
-                "type": "MDTDecision", "id": d.id,
-                "snippet": d.recommendation,
-                "source_date": d.recorded_at.isoformat() if d.recorded_at else None,
-                "source_author": d.recorded_by,
-                "confirmation_state": d.status,
-                "view_source": f"/api/cca/mdt/cases/{d.case_id}",
-            })
-
-    for p in db.query(TreatmentPlan).filter(TreatmentPlan.patient_id == patient_id).all():
-        if query in f"{p.modality or ''} {p.protocol_name or ''} {p.intent or ''}".lower():
-            results.append({
-                "type": "TreatmentPlan", "id": p.id,
-                "snippet": f"{p.modality}: {p.protocol_name or 'NOT_RECORDED'} ({p.status})",
-                "source_date": (p.signed_at or p.created_at).isoformat() if (p.signed_at or p.created_at) else None,
-                "source_author": p.signer_email or p.created_by,
-                "confirmation_state": p.status,
-                "view_source": f"/api/cca/treatment-plans/{p.id}",
-            })
-
-    for s in db.query(StagingRecord).filter(StagingRecord.patient_id == patient_id).all():
-        if query in f"{s.stage_value or ''} {s.t_stage or ''} {s.n_stage or ''} {s.m_stage or ''}".lower():
-            results.append({
-                "type": "StagingRecord", "id": s.id,
-                "snippet": f"Stage {s.stage_value or 'NOT_RECORDED'} (T{s.t_stage or '?'}N{s.n_stage or '?'}M{s.m_stage or '?'})",
-                "source_date": (s.confirmed_at or s.created_at).isoformat() if (s.confirmed_at or s.created_at) else None,
-                "source_author": s.confirmed_by,
-                "confirmation_state": s.status,
-                "view_source": f"/api/cca/patients/{patient_id}/staging",
-            })
-
-    for j in db.query(CCAJourneyEvent).filter(CCAJourneyEvent.patient_id == patient_id).all():
-        if query in f"{j.event_title or ''} {j.description or ''}".lower():
-            results.append({
-                "type": "JourneyEvent", "id": j.id,
-                "snippet": j.event_title,
-                "source_date": j.timestamp.isoformat() if j.timestamp else None,
-                "source_author": j.actor_name,
-                "confirmation_state": None,
-                "view_source": f"/api/cca/patients/{patient_id}/journey",
-            })
-
-    return {"query": q, "results": results}
 
 
 @router.post("/patients/{patient_id}/search/propose-task")
@@ -3640,46 +3621,75 @@ def search_patient_records_and_knowledge(
     current_user: dict = Depends(get_current_user)
 ):
     """Enforces Spec Section 30: AI Search governance across 3 distinct scopes:
-    - THIS_PATIENT: Patient's longitudinal chart, verified facts, documents.
+    - THIS_PATIENT: Patient's longitudinal chart -- verified facts, MDT decisions, treatment
+      plans, staging records, and journey events (the full set the single-scope predecessor of
+      this endpoint used to cover; kept here so merging the two never regresses coverage).
     - HOSPITAL_RECORDS: Hospital clinical SOPs, protocols, and policies.
     - CLINICAL_KNOWLEDGE: NCCN guidelines, AJCC staging references.
 
     Guarantees:
-    - Cites source provenance for every answer.
+    - Cites source provenance (id, date, author/system, confirmation state, view-source link)
+      for every THIS_PATIENT answer.
     - Distinguishes patient facts from general medical knowledge.
     - Any proposed action (e.g. task proposal) requires explicit clinician acceptance."""
     org_id = _org_id(current_user)
     _get_org_patient(db, patient_id, org_id)
+    _require_search_access(current_user)
 
     q = (query or "").lower().strip()
-    if not q:
-        return {"query": query, "scope": scope, "results": [], "citations": []}
+    if len(q) < 2:
+        raise HTTPException(422, "query must be at least 2 characters")
 
     results = []
     citations = []
 
+    def _add(rtype, rid, snippet, source_date, source_author, confirmation_state, view_source, citation_label):
+        source_date_iso = source_date.isoformat() if source_date else None
+        results.append({
+            "scope": "THIS_PATIENT", "type": rtype, "id": rid, "snippet": snippet,
+            "source_date": source_date_iso, "source_author": source_author,
+            "confirmation_state": confirmation_state, "view_source": view_source,
+            "citation": citation_label,
+        })
+        citations.append({
+            "source_id": rid, "source_type": rtype, "title": citation_label,
+            "provenance": snippet, "source_date": source_date_iso,
+            "source_author": source_author, "confirmation_state": confirmation_state,
+            "view_source": view_source,
+        })
+
     if scope in ("THIS_PATIENT", "ALL"):
-        facts = db.query(ClinicalFact).filter(
-            ClinicalFact.patient_id == patient_id
-        ).all()
-        for f in facts:
-            if q in f.fact_type.lower() or q in f.value.lower() or (f.verbatim_span and q in f.verbatim_span.lower()):
-                results.append({
-                    "scope": "THIS_PATIENT",
-                    "type": "CLINICAL_FACT",
-                    "fact_type": f.fact_type,
-                    "value": f.value,
-                    "verbatim": f.verbatim_span,
-                    "status": f.status,
-                    "confidence": f.confidence,
-                    "citation": f"Fact #{f.id} (Doc #{f.document_id or 'Manual'}, Page {f.page_number})"
-                })
-                citations.append({
-                    "source_id": f.id,
-                    "source_type": "ClinicalFact",
-                    "title": f.fact_type,
-                    "provenance": f.verbatim_span or f.value
-                })
+        for f in db.query(ClinicalFact).filter(ClinicalFact.patient_id == patient_id).all():
+            if q in f"{f.fact_type or ''} {f.value or ''} {f.verbatim_span or ''}".lower():
+                _add("CLINICAL_FACT", f.id, f"{f.fact_type}: {f.value}",
+                     f.created_at, f.verified_by or "AI-extracted (unverified)", f.status,
+                     f"/api/cca/patients/{patient_id}/documents/{f.document_id}" if f.document_id else None,
+                     f"Fact #{f.id} (Doc #{f.document_id or 'Manual'}, Page {f.page_number})")
+
+        for d in db.query(MDTDecision).filter(MDTDecision.patient_id == patient_id).all():
+            if q in f"{d.recommendation or ''} {d.rationale or ''} {d.modality_direction or ''}".lower():
+                _add("MDT_DECISION", d.id, d.recommendation,
+                     d.recorded_at, d.recorded_by, d.status, f"/api/cca/mdt/cases/{d.case_id}",
+                     f"MDT case #{d.case_id}")
+
+        for p in db.query(TreatmentPlan).filter(TreatmentPlan.patient_id == patient_id).all():
+            if q in f"{p.modality or ''} {p.protocol_name or ''} {p.intent or ''}".lower():
+                _add("TREATMENT_PLAN", p.id, f"{p.modality}: {p.protocol_name or 'NOT_RECORDED'} ({p.status})",
+                     p.signed_at or p.created_at, p.signer_email or p.created_by, p.status,
+                     f"/api/cca/treatment-plans/{p.id}", f"Treatment Plan #{p.id}")
+
+        for s in db.query(StagingRecord).filter(StagingRecord.patient_id == patient_id).all():
+            if q in f"{s.stage_value or ''} {s.t_stage or ''} {s.n_stage or ''} {s.m_stage or ''}".lower():
+                _add("STAGING_RECORD", s.id,
+                     f"Stage {s.stage_value or 'NOT_RECORDED'} (T{s.t_stage or '?'}N{s.n_stage or '?'}M{s.m_stage or '?'})",
+                     s.confirmed_at or s.created_at, s.confirmed_by, s.status,
+                     f"/api/cca/patients/{patient_id}/staging", f"Staging record #{s.id}")
+
+        for j in db.query(CCAJourneyEvent).filter(CCAJourneyEvent.patient_id == patient_id).all():
+            if q in f"{j.event_title or ''} {j.description or ''}".lower():
+                _add("JOURNEY_EVENT", j.id, j.event_title,
+                     j.timestamp, j.actor_name, None, f"/api/cca/patients/{patient_id}/journey",
+                     f"Journey event #{j.id}")
 
     if scope in ("HOSPITAL_RECORDS", "ALL"):
         results.append({

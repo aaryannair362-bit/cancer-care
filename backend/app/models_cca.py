@@ -502,7 +502,11 @@ class MDTDecision(Base):
     rationale = Column(Text)
     outstanding_items = Column(JSON, nullable=True)
     attendees = Column(JSON, nullable=True)  # [{"name": "Dr. Aris", "role": "Surgical Oncologist"}]
-    status = Column(String(30), default="FINAL")
+    status = Column(String(30), default="FINAL")  # FINAL -> APPROVED / PARTIALLY_APPROVED / REJECTED
+    # The treating clinician's explicit disposition on this recommendation (architecture doc
+    # Sec 18: "Accept / partially accept / reject with reason" -- not a bare approve/deny).
+    # Required whenever the disposition isn't a full ACCEPT; see approve_mdt_recommendation.
+    disposition_reason = Column(Text, nullable=True)
     recorded_by = Column(String(200))
     recorded_at = Column(DateTime, default=datetime.utcnow)
 
@@ -530,7 +534,15 @@ class CarePlan(Base):
     follow_up_plan = Column(JSON)
     next_decision_point = Column(String(255))
     version_no = Column(Integer, default=1)
-    status = Column(String(30), default="ACTIVE")  # DRAFT, ACTIVE, SUSPENDED, COMPLETED
+    # DRAFT, PROPOSED, ACTIVE, BLOCKED, ON_HOLD, COMPLETED, CANCELLED -- see
+    # routers/cca.py's _CARE_PLAN_STATUS_TRANSITIONS for the allowed transition graph.
+    # create_care_plan defaults new plans straight to ACTIVE; DRAFT/PROPOSED exist for the
+    # (currently opt-in) MDT-recommendation-originated draft path. No SUPERSEDED here, unlike
+    # TreatmentPlan: this model is amended in place (version_no bumps on the same row) rather
+    # than chained across rows via a supersedes_id, so there is nothing for a status of
+    # SUPERSEDED to point to yet -- adding the label without that chaining would be a fake
+    # completion, not a fix.
+    status = Column(String(30), default="ACTIVE")
     created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
 

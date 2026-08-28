@@ -128,6 +128,9 @@
                     <div style="display:flex; align-items:center;"><button class="btn-outline" onclick="showTab('patients')">Change Patient</button></div>
                 </div>
                 <div class="section-card" id="nexus-empty-state" style="display:none; text-align:center; padding:40px 20px; color:var(--ink-500); font-size:13.5px;">No patient selected. Open a patient from the Patients list to view their NEXUS coordination state.</div>
+                <h2 class="section-title" style="margin:18px 0 10px;">Clinical Brief</h2>
+                <div id="nexus-brief-container"></div>
+                <h2 class="section-title" style="margin:18px 0 10px;">Coordination</h2>
                 <div class="nexus-metrics-grid">
                     <div class="nexus-metric-tile"><div class="nexus-metric-label">Cases Awaiting Scheduling</div><div class="nexus-metric-value">2</div></div>
                     <div class="nexus-metric-tile"><div class="nexus-metric-label">Boards This Week</div><div class="nexus-metric-value">1</div></div>
@@ -141,6 +144,7 @@
     </div>
 
     <script src="/static/js/api.js"></script>
+    <script src="/static/js/cca-summary.js"></script>
     <script>
         const ccaUser = Auth.requirePage(['CCAMDTCoordinator', 'Admin']);
         const CCA_API = '/cca';
@@ -157,70 +161,13 @@
             document.getElementById('ai-search-results').style.display = 'none';
         }
 
-        // ---------------------------------------------------------------
-        // AI Search -- global, source-cited retrieval scoped to the open patient. Retrieval
-        // and summarization only: the only way a result becomes durable is an explicit
-        // "Propose as Care Plan Task" action (architecture doc: no silent AI writes).
-        // ---------------------------------------------------------------
-        let lastAiSearchResults = [];
-
-        async function runAiSearch() {
-            const resultsEl = document.getElementById('ai-search-results');
-            const q = document.getElementById('ai-search-input').value.trim();
-            if (!currentPatientId) {
-                resultsEl.style.display = 'block';
-                resultsEl.innerHTML = '<div style="padding:12px; font-size:12.5px; color:var(--ink-500);">Open a patient first to search their record.</div>';
-                return;
-            }
-            if (q.length < 2) { resultsEl.style.display = 'none'; return; }
-            resultsEl.style.display = 'block';
-            resultsEl.innerHTML = '<div style="padding:12px; font-size:12.5px; color:var(--ink-500);">Searching…</div>';
-            try {
-                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/search?q=${encodeURIComponent(q)}`);
-                lastAiSearchResults = data.results || [];
-                if (!lastAiSearchResults.length) {
-                    resultsEl.innerHTML = '<div style="padding:12px; font-size:12.5px; color:var(--ink-500);">No matches in this patient\'s verified record.</div>';
-                    return;
-                }
-                resultsEl.innerHTML = lastAiSearchResults.map((r, i) => `
-                    <div style="padding:10px 12px; border-bottom:1px solid var(--line-subtle);">
-                        <div style="font-size:10.5px; font-weight:700; color:var(--ink-500); text-transform:uppercase; letter-spacing:0.4px;">${escapeHtml(r.type)}</div>
-                        <div style="font-size:13px; color:var(--ink-900); margin:3px 0;">${escapeHtml(r.snippet || '')}</div>
-                        <div style="font-size:11.5px; color:var(--ink-500);">${escapeHtml(r.source_author || 'Unknown source')} · ${r.source_date ? new Date(r.source_date).toLocaleDateString() : '—'}${r.confirmation_state ? ' · ' + escapeHtml(r.confirmation_state) : ''}</div>
-                        <div style="display:flex; gap:6px; margin-top:6px;">
-                            <button class="nexus-mini-btn primary" onclick="proposeAiSearchTask(${i})">Propose as Care Plan Task</button>
-                        </div>
-                    </div>
-                `).join('');
-            } catch (err) {
-                resultsEl.innerHTML = `<div style="padding:12px; font-size:12.5px; color:var(--rose-badge-text);">${escapeHtml(apiErrorMessage(err))}</div>`;
-            }
-        }
-
-        async function proposeAiSearchTask(index) {
-            const r = lastAiSearchResults[index];
-            const description = prompt('Task description for this patient task (reviewed and edited by you before saving):', r.snippet || '');
-            if (!description) return;
-            try {
-                await Api.post(`${CCA_API}/patients/${currentPatientId}/search/propose-task`, {
-                    description, source_reference: { type: r.type, id: r.id },
-                });
-                toast('Task proposed from AI Search', 'success');
-                document.getElementById('ai-search-results').style.display = 'none';
-                document.getElementById('ai-search-input').value = '';
-            } catch (err) { toast(apiErrorMessage(err), 'error'); }
-        }
-
-        document.addEventListener('click', (e) => {
-            const container = document.querySelector('.search-pill-container');
-            if (container && !container.contains(e.target)) {
-                document.getElementById('ai-search-results').style.display = 'none';
-            }
-        });
+        // AI Search (scope selector, result rendering, propose-task) is implemented once,
+        // shared across role pages, in cca-summary.js -- see runAiSearch() there.
 
         async function loadNexusBanner() {
             const bannerEl = document.getElementById('nexus-patient-banner');
             const emptyEl = document.getElementById('nexus-empty-state');
+            renderNexusBrief('nexus-brief-container', currentPatientId);
             if (!currentPatientId) {
                 bannerEl.style.display = 'none';
                 emptyEl.style.display = 'block';

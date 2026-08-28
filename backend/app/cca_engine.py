@@ -220,6 +220,22 @@ def evaluate_guideline_readiness(db: Session, patient_id: int) -> Dict:
     }
 
 
+def _must_not_miss_items(staging: Dict, contradictions: List, unverified_facts: List, biomarkers: List, diagnosis) -> List[str]:
+    """The NEXUS brief's 'Must-Not-Miss Considerations' section (architecture doc Sec 20):
+    dangerous possibilities not yet excluded, and the reason they matter -- derived only from
+    what the record itself indicates is unresolved, never a manufactured clinical judgment."""
+    items = []
+    if any(m["input"] == "M_EVIDENCE" for m in staging["missing"]):
+        items.append("Distant metastatic disease has not been excluded (M-stage evidence missing) -- confirm before finalizing treatment intent.")
+    if any(c.status == "OPEN" for c in contradictions):
+        items.append("An unresolved contradiction is present in the record -- verify source documents before relying on the affected fact; it may indicate a wrong-attribution or reporting error.")
+    if unverified_facts:
+        items.append(f"{len(unverified_facts)} AI-extracted fact(s) are still pending clinician verification -- do not treat as confirmed until reviewed.")
+    if diagnosis and not biomarkers:
+        items.append("No biomarker/molecular results are on record for a confirmed diagnosis -- receptor/molecular status may materially change guideline pathway and treatment intent.")
+    return items
+
+
 def synthesize_nexus_brief(db: Session, patient_id: int) -> Dict:
     """
     Synthesizes the 13-section NEXUS Clinical Brief purely from verified facts.
@@ -249,13 +265,14 @@ def synthesize_nexus_brief(db: Session, patient_id: int) -> Dict:
 
     docs = db.query(CCADocument).filter(CCADocument.patient_id == patient_id).all()
 
-    verified_facts = db.query(ClinicalFact).filter(
-        ClinicalFact.patient_id == patient_id,
-        ClinicalFact.status == "VERIFIED"
-    ).all()
+    all_facts = db.query(ClinicalFact).filter(ClinicalFact.patient_id == patient_id).all()
+    verified_facts = [f for f in all_facts if f.status == "VERIFIED"]
+    unverified_facts = [f for f in all_facts if f.status == "PROPOSED"]
     fact_by_type = {f.fact_type: f for f in verified_facts}
     lab_results = [f for f in verified_facts if f.fact_type == "LAB_RESULT"]
-    
+
+    mdt_cases = db.query(MDTCase).filter(MDTCase.patient_id == patient_id).order_by(MDTCase.id.desc()).all()
+
     uncertainty_reasons = []
     if staging["state"] != "CLINICIAN_CONFIRMED":
         uncertainty_reasons.append("Clinical stage has not yet been confirmed by the treating oncologist.")
@@ -322,7 +339,20 @@ def synthesize_nexus_brief(db: Session, patient_id: int) -> Dict:
         },
         "10_mdt_topics": {
             "title": "Multidisciplinary Tumor Board (MDT) Focus",
-            "content": "Review sequencing: Neoadjuvant Chemotherapy + HER2-directed vs Upfront Breast Conserving Surgery with SLNB."
+            "content": (
+                f"Active MDT case: \"{mdt_cases[0].question}\" (status: {mdt_cases[0].status})."
+                if mdt_cases else (
+                    "No MDT case on record yet. "
+                    + (
+                        "Complete " + " and ".join(
+                            ([ "clinical staging" ] if staging["state"] != "CLINICIAN_CONFIRMED" else [])
+                            + ([ "biomarker/molecular profiling" ] if not biomarkers else [])
+                        ) + " before referral, or refer now if clinical urgency requires it."
+                        if staging["state"] != "CLINICIAN_CONFIRMED" or not biomarkers
+                        else "Refer to tumour board for treatment sequencing discussion when the treating clinician determines complexity warrants it."
+                    )
+                )
+            )
         },
         "11_uncertainty_analysis": {
             "title": "Clinical Uncertainty & Diagnostic Confidence",
@@ -337,7 +367,20 @@ def synthesize_nexus_brief(db: Session, patient_id: int) -> Dict:
         },
         "13_decision_support": {
             "title": "Clinical Decision Support Options",
-            "content": "For Hormone Receptor-Positive, HER2-Negative Stage IIA Breast Cancer: Discuss systemic therapy sequencing with MDT and formulate clinician-approved Live Care Plan."
+            "content": (
+                "Diagnosis and/or staging not yet clinician-confirmed -- decision support unavailable until both are complete."
+                if not diagnosis or staging["state"] != "CLINICIAN_CONFIRMED"
+                else (
+                    f"Confirmed: {diagnosis.histology}, Stage {staging['confirmed_record']['stage_value']}. "
+                    f"Biomarkers: {', '.join(f'{b.marker_name} {b.result_as_reported}' for b in biomarkers) if biomarkers else '[NOT_RECORDED]'}. "
+                    f"Guideline pathway state: {guidelines['state']}. "
+                    "No treatment modality, regimen or dose is suggested here -- discuss treatment strategy and sequencing with MDT before finalizing a Treatment Plan."
+                )
+            )
+        },
+        "14_must_not_miss": {
+            "title": "Must-Not-Miss Considerations",
+            "content": " ".join(_must_not_miss_items(staging, contradictions, unverified_facts, biomarkers, diagnosis)) or "No unresolved must-not-miss considerations identified from the current verified record."
         }
     }
     

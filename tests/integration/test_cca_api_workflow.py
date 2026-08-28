@@ -337,17 +337,22 @@ def test_act_6_clinician_staging_confirmation_and_guideline_flip(client, headers
 def test_act_7_nexus_clinical_brief_and_mdt_package(client, headers, db_session, doctor):
     patient_id = _demo_patient_id(db_session, doctor.organization_id)
 
-    # NEXUS 13-Section Clinical Brief
+    # NEXUS 13+1-Section Clinical Brief (13 core sections plus Must-Not-Miss Considerations,
+    # architecture doc Sec 20's 7th required brief component)
     brief_res = client.get(f"/api/cca/patients/{patient_id}/clinical-brief", headers=headers)
     assert brief_res.status_code == 200
     brief = brief_res.json()
     sections = brief["sections"]
-    assert len(sections) == 13
+    assert len(sections) == 14
     assert "1_demographics" in sections
     assert "3_staging_extent" in sections
     assert "4_biomarker_profile" in sections
     assert "7_best_next_investigation" in sections
     assert "13_decision_support" in sections
+    assert "14_must_not_miss" in sections
+    # Must be fact-derived, not the previously hardcoded named-regimen text (architecture doc:
+    # AI must never suggest a specific treatment modality/regimen).
+    assert "Hormone Receptor-Positive" not in sections["13_decision_support"]["content"]
 
     # 1-Click MDT Case Package (WOW 6)
     mdt_res = client.post("/api/cca/mdt/cases", headers=headers, json={
