@@ -199,4 +199,27 @@ def is_cca_patient_liaison(user: dict) -> bool:
 
 
 def is_cca_financial_counsellor(user: dict) -> bool:
-    return user.get("role") == "CCAFinancialCounsellor"
+    return user.get("role") == "CCAFinancialCounsellor"
+
+
+def can_sign_treatment_plan(user: dict) -> bool:
+    """Only treating oncologists, Doctor, or Admin can sign treatment plans."""
+    return is_admin(user) or is_doctor(user) or is_cca_oncologist(user)
+
+
+def can_finalize_diagnostic_report(user: dict) -> bool:
+    """Only Radiologist, Pathologist, Doctor, or Admin can sign diagnostic reports."""
+    return is_admin(user) or is_doctor(user) or is_cca_radiologist(user) or is_cca_pathologist(user)
+
+
+def create_external_specialist_token(case_id: int, specialist_email: str, expires_hours: int = 72) -> str:
+    """Create a case-scoped, time-bounded JWT token for External MDT Specialist access."""
+    expire = datetime.utcnow() + timedelta(hours=expires_hours)
+    payload = {
+        "sub": specialist_email,
+        "role": "CCAExternalMDTSpecialist",
+        "case_id": case_id,
+        "type": "external_specialist",
+        "exp": expire
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)

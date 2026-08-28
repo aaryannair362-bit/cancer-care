@@ -9,6 +9,7 @@ from .models import Base
 class CCAPatient(Base):
     __tablename__ = "cca_patients"
     id = Column(Integer, primary_key=True)
+    hms_patient_id = Column(Integer, ForeignKey("patients.id"), nullable=True)
     mrn = Column(String(50), unique=True, nullable=False)
     name = Column(String(200), nullable=False)
     dob = Column(String(20))
@@ -151,6 +152,8 @@ class ClinicalFact(Base):
     id = Column(Integer, primary_key=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     document_id = Column(Integer, ForeignKey("cca_documents.id"), nullable=True)
+    parent_fact_id = Column(Integer, ForeignKey("cca_clinical_facts.id"), nullable=True)
+    version_no = Column(Integer, default=1)
     fact_type = Column(String(100), nullable=False)  # see cca_engine.FACT_TYPES for the authoritative, current list
     value = Column(String(500), nullable=False)
     verbatim_span = Column(Text)
