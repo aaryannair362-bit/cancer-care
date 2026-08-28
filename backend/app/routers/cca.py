@@ -637,6 +637,45 @@ def get_case_summary(
     def _note_field(note_content, key):
         return note_content.get(key) if isinstance(note_content, dict) else None
 
+    # --- Role-specific projections (Spec Section 39/58) ---
+    if is_cca_financial_counsellor(current_user):
+        return {
+            "generated_at": datetime.utcnow().isoformat(),
+            "patient": {
+                "id": patient.id, "mrn": patient.mrn, "name": patient.name, "age": patient.age,
+                "sex": patient.sex, "journey_state": patient.journey_state,
+                "primary_oncologist": patient.primary_oncologist,
+            },
+            "overview": {
+                "order_count": len(orders),
+                "is_returning_patient": len(encounters) > 1 or len(docs) > 0,
+            },
+            "financial_projection": {
+                "orders": [{"id": o.id, "order_type": o.order_type, "item_name": o.item_name, "status": o.status} for o in orders],
+                "active_plans": [project_treatment_plan(_treatment_plan_dict(p), current_user) for p in db.query(TreatmentPlan).filter(TreatmentPlan.patient_id == patient_id).all()]
+            },
+            "disclaimer": "Financial projection view: includes billing, modality counts, and operational status only."
+        }
+
+    if is_cca_front_desk(current_user):
+        return {
+            "generated_at": datetime.utcnow().isoformat(),
+            "patient": {
+                "id": patient.id, "mrn": patient.mrn, "name": patient.name, "age": patient.age,
+                "sex": patient.sex, "dob": patient.dob, "journey_state": patient.journey_state,
+                "primary_oncologist": patient.primary_oncologist,
+                "id_proof_type": patient.id_proof_type, "id_proof_number": patient.id_proof_number,
+                "id_proof_verification_status": patient.id_proof_verification_status,
+            },
+            "overview": {
+                "document_count": len(docs),
+                "encounter_count": len(encounters),
+                "last_visit": encounters[0].started_at.isoformat() if encounters and encounters[0].started_at else None,
+                "is_returning_patient": len(encounters) > 1 or len(docs) > 0,
+            },
+            "disclaimer": "Front Desk view: operational and scheduling metadata only."
+        }
+
     return {
         "generated_at": datetime.utcnow().isoformat(),
         "patient": {
