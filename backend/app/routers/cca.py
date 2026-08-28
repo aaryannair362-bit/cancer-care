@@ -182,13 +182,14 @@ def list_patients(
     org_id = _org_id(current_user)
     query = db.query(CCAPatient).filter(CCAPatient.organization_id == org_id)
     if q:
-        # "mobile" is in this search box's own placeholder text (frontdesk.html) but was never
-        # actually matched here -- searching by phone number silently always returned nothing.
+        term = q.strip()
         query = query.filter(
-            (CCAPatient.name.ilike(f"%{q}%")) |
-            (CCAPatient.mrn.ilike(f"%{q}%")) |
-            (CCAPatient.phone.ilike(f"%{q}%")) |
-            (CCAPatient.journey_state.ilike(f"%{q}%"))
+            (CCAPatient.name.ilike(f"%{term}%")) |
+            (CCAPatient.mrn.ilike(f"%{term}%")) |
+            (CCAPatient.phone.ilike(f"%{term}%")) |
+            (CCAPatient.id_proof_number.ilike(f"%{term}%")) |
+            (CCAPatient.attender_name.ilike(f"%{term}%")) |
+            (CCAPatient.journey_state.ilike(f"%{term}%"))
         )
     patients = query.order_by(CCAPatient.id.asc()).all()
 
@@ -290,6 +291,75 @@ async def register_cca_patient(
             "id": patient.id, "mrn": patient.mrn, "name": patient.name,
             "age": patient.age, "sex": patient.sex, "journey_state": patient.journey_state,
         },
+    }
+
+
+@router.patch("/patients/{patient_id}/visit")
+async def update_patient_data_per_visit(
+    patient_id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Registers a return visit and updates patient demographic, contact, and ID verification data per visit."""
+    if not (is_cca_front_desk(current_user) or is_admin(current_user) or is_cca_patient_liaison(current_user)):
+        raise HTTPException(403, "Only Front Desk, Patient Liaison, or Admin can register return visits and update patient details")
+    org_id = _org_id(current_user)
+    patient = _get_org_patient(db, patient_id, org_id)
+    body = await request.json()
+
+    if "name" in body and body["name"]:
+        patient.name = str(body["name"]).strip()
+    if "phone" in body and body["phone"]:
+        patient.phone = str(body["phone"]).strip()
+    if "address" in body:
+        patient.address = body["address"]
+    if "age" in body and body["age"]:
+        try:
+            patient.age = int(body["age"])
+        except (TypeError, ValueError):
+            pass
+    if "dob" in body:
+        patient.dob = body["dob"]
+    if "sex" in body:
+        patient.sex = body["sex"]
+    if "primary_oncologist" in body:
+        patient.primary_oncologist = body["primary_oncologist"]
+    if "attender_name" in body:
+        patient.attender_name = body["attender_name"]
+    if "attender_phone" in body:
+        patient.attender_phone = body["attender_phone"]
+    if "attender_relationship" in body:
+        patient.attender_relationship = body["attender_relationship"]
+    if "id_proof_type" in body:
+        patient.id_proof_type = body["id_proof_type"]
+    if "id_proof_number" in body:
+        patient.id_proof_number = body["id_proof_number"]
+    if "id_proof_name" in body:
+        patient.id_proof_name = body["id_proof_name"]
+    if "id_proof_dob" in body:
+        patient.id_proof_dob = body["id_proof_dob"]
+    if "id_proof_verification_status" in body:
+        patient.id_proof_verification_status = body["id_proof_verification_status"]
+
+    actor = _actor(current_user)
+    j_ev = CCAJourneyEvent(
+        patient_id=patient.id,
+        event_type="RETURN_VISIT",
+        event_title="Return Visit Registered",
+        event_category="REGISTRATION",
+        description=f"{actor} registered return visit and updated patient details per visit.",
+        actor_name=actor,
+        actor_role=current_user.get("role"),
+    )
+    db.add(j_ev)
+    db.commit()
+    db.refresh(patient)
+    return {
+        "status": "success",
+        "patient": {
+            "id": patient.id, "mrn": patient.mrn, "name": patient.name,
+            "phone": patient.phone, "age": patient.age, "sex": patient.sex,
+            "journey_state": patient.journey_state,
+        }
     }
 
 
@@ -658,23 +728,7 @@ def get_case_summary(
         }
 
     if is_cca_front_desk(current_user):
-        return {
-            "generated_at": datetime.utcnow().isoformat(),
-            "patient": {
-                "id": patient.id, "mrn": patient.mrn, "name": patient.name, "age": patient.age,
-                "sex": patient.sex, "dob": patient.dob, "journey_state": patient.journey_state,
-                "primary_oncologist": patient.primary_oncologist,
-                "id_proof_type": patient.id_proof_type, "id_proof_number": patient.id_proof_number,
-                "id_proof_verification_status": patient.id_proof_verification_status,
-            },
-            "overview": {
-                "document_count": len(docs),
-                "encounter_count": len(encounters),
-                "last_visit": encounters[0].started_at.isoformat() if encounters and encounters[0].started_at else None,
-                "is_returning_patient": len(encounters) > 1 or len(docs) > 0,
-            },
-            "disclaimer": "Front Desk view: operational and scheduling metadata only."
-        }
+        raise HTTPException(403, "Front Desk does not have access to patient clinical summary. Use patient list or registration search to view registration and visit status.")
 
     return {
         "generated_at": datetime.utcnow().isoformat(),
