@@ -52,6 +52,18 @@ ADDITIVE_COLUMNS = [
     ("cca_patients", "id_proof_name", "VARCHAR(200)"),
     ("cca_patients", "id_proof_dob", "VARCHAR(20)"),
     ("cca_patients", "id_proof_verification_status", "VARCHAR(30)"),
+    # CCAPatient.hms_patient_id (models_cca.py:12) -- the FK linking a CCA patient identity to
+    # its general-HMS Patient row -- was present on the model but never registered here, so any
+    # pre-existing database (including a local dev aivana.db predating this field) was missing
+    # the column entirely: every query touching CCAPatient (patient list, registration, and
+    # effectively every CCA endpoint) failed with "no such column: cca_patients.hms_patient_id".
+    ("cca_patients", "hms_patient_id", "INTEGER"),
+    # ClinicalFact addendum/versioning fields (models_cca.py) -- same gap, different table:
+    # present on the model, never registered here, so any pre-existing database was missing
+    # both, breaking every fact-listing/verification query with "no such column:
+    # cca_clinical_facts.parent_fact_id".
+    ("cca_clinical_facts", "parent_fact_id", "INTEGER"),
+    ("cca_clinical_facts", "version_no", "INTEGER DEFAULT 1"),
     # Care Plan / Treatment Plan separation (see the Care Plan & Treatment Plan architecture
     # doc): CarePlan now references its authorizing TreatmentPlan(s) explicitly instead of
     # embedding modality content as its own source of truth, and TreatmentPlan gains a real
