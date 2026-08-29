@@ -132,6 +132,23 @@ async function renderCaseSummaryPanel(containerId, patientId, options = {}) {
             ${p.id_proof_number ? `<div class="cca-sum-row-sub">Identity on file: ${escapeHtml(p.id_proof_type || 'ID')} ${escapeHtml(p.id_proof_number)} · ${escapeHtml(p.id_proof_verification_status || 'Pending')}</div>` : ''}
         </div>`;
 
+    const v = summary.vitals;
+    const vitalsSection = `
+        <div class="section-card">
+            <div class="section-title" style="margin-bottom:12px;">Vitals &amp; Performance Status</div>
+            ${v ? `
+                <div class="cca-sum-grid">
+                    <div class="cca-sum-tile"><div class="cca-sum-tile-label">BP</div><div class="cca-sum-tile-value" style="font-size:15px;">${v.bp_systolic ?? '—'}/${v.bp_diastolic ?? '—'}</div></div>
+                    <div class="cca-sum-tile"><div class="cca-sum-tile-label">Heart Rate</div><div class="cca-sum-tile-value" style="font-size:15px;">${v.heart_rate ?? '—'}</div></div>
+                    <div class="cca-sum-tile"><div class="cca-sum-tile-label">SpO2</div><div class="cca-sum-tile-value" style="font-size:15px;">${v.oxygen_sat != null ? v.oxygen_sat + '%' : '—'}</div></div>
+                    <div class="cca-sum-tile"><div class="cca-sum-tile-label">Temp</div><div class="cca-sum-tile-value" style="font-size:15px;">${v.temperature_c != null ? v.temperature_c + '°C' : '—'}</div></div>
+                    <div class="cca-sum-tile"><div class="cca-sum-tile-label">ECOG</div><div class="cca-sum-tile-value" style="font-size:15px;">${v.ecog ?? '—'}</div></div>
+                    <div class="cca-sum-tile"><div class="cca-sum-tile-label">Pain Score</div><div class="cca-sum-tile-value" style="font-size:15px;">${v.pain_score ?? '—'}/10</div></div>
+                </div>
+                <div class="cca-sum-row-sub" style="margin-top:4px;">BSA ${v.bsa ?? '—'} m² · Karnofsky ${v.karnofsky ?? '—'}% · Fall risk ${escapeHtml(v.fall_risk || '—')} · recorded by ${escapeHtml(v.recorded_by || 'Unknown')}${v.recorded_at ? ' · ' + fmtDateTime(v.recorded_at) : ''}</div>
+            ` : '<p class="cca-sum-empty">No vitals/intake assessment on record yet.</p>'}
+        </div>`;
+
     const documentsSection = `
         <div class="section-card">
             <div class="section-title" style="margin-bottom:12px;">Ingested Documents</div>
@@ -207,6 +224,7 @@ async function renderCaseSummaryPanel(containerId, patientId, options = {}) {
                 <div class="cca-sum-timeline-item">
                     <div class="cca-sum-timeline-when">${e.started_at ? fmtDateTime(e.started_at) : '—'} · ${escapeHtml(e.specialty || '')}${e.clinician ? ' · ' + escapeHtml(e.clinician) : ''}</div>
                     <div class="cca-sum-timeline-title">${escapeHtml(e.diagnosis || e.chief_complaint || 'No diagnosis recorded')}</div>
+                    ${e.chief_complaint && e.diagnosis ? `<div class="cca-sum-timeline-desc">Presented with: ${escapeHtml(e.chief_complaint)}</div>` : ''}
                     ${e.advice ? `<div class="cca-sum-timeline-desc">Plan: ${escapeHtml(e.advice)}</div>` : ''}
                     ${!hideMedications && e.medications && e.medications.length ? `<div class="cca-sum-timeline-desc">Medications noted: ${e.medications.map(m => {
                         if (!m || typeof m !== 'object') return escapeHtml(String(m));
@@ -230,7 +248,7 @@ async function renderCaseSummaryPanel(containerId, patientId, options = {}) {
             `).join('') : '<p class="cca-sum-empty">No journey events recorded yet.</p>'}
         </div>`;
 
-    container.innerHTML = header + documentsSection + factsSection + ordersSection + resultsSection + encountersSection + journeySection +
+    container.innerHTML = header + vitalsSection + documentsSection + factsSection + ordersSection + resultsSection + encountersSection + journeySection +
         `<p style="font-size:11.5px; color:var(--ink-500); margin-top:-8px;">${escapeHtml(summary.disclaimer)}</p>`;
 }
 

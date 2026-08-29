@@ -304,7 +304,7 @@
                 listEl.innerHTML = data.results.map(p => `
                     <div class="worklist-row">
                         <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(p.name)}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(p.mrn)}</div></div>
-                        <div><div class="wl-label">Age/Sex</div><div class="wl-value" style="font-size:13px;">${escapeHtml(String(p.age))}y / ${escapeHtml(p.sex)}</div></div>
+                        <div><div class="wl-label">Age/Sex</div><div class="wl-value" style="font-size:13px;">${p.age != null ? escapeHtml(String(p.age)) + 'y' : '—'} / ${escapeHtml(p.sex)}</div></div>
                         <div><div class="wl-label">Journey</div><div class="wl-value" style="font-size:13px;">${escapeHtml(p.journey_state)}</div></div>
                         <div><span class="badge ${p.staging_state === 'CLINICIAN_CONFIRMED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(p.staging_state)}</span></div>
                         <div><button class="btn-navy" onclick="openPatient(${Number(p.id)})">Open →</button></div>

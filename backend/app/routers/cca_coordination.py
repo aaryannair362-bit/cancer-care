@@ -106,6 +106,27 @@ def get_mdt_case_readiness(case_id: int, db: Session = Depends(get_cca_db), curr
     return _case_readiness(db, case.patient_id)
 
 
+@router.get("/mdt/cases/{case_id}/decision")
+def get_mdt_case_decision(case_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Read-only recommendation/sign-off status for the Coordinator's case view (spec Screen 7:
+    'Recommendations & Sign-off ... coordinator cannot sign clinically'). Authorship and
+    disposition themselves stay on routers/cca.py's /mdt/cases/{id}/recommendation and
+    .../approve, both gated to the treating clinician -- this only lets the Coordinator see
+    what those produced, same read-access line as list_opinions below (any org member with
+    case access, no extra role gate)."""
+    case = _get_org_case(db, case_id, _org_id(current_user))
+    decision = db.query(MDTDecision).filter(MDTDecision.case_id == case.id).order_by(MDTDecision.id.desc()).first()
+    if not decision:
+        return {"decision": None}
+    return {"decision": {
+        "id": decision.id, "recommendation": decision.recommendation,
+        "modality_direction": decision.modality_direction, "rationale": decision.rationale,
+        "status": decision.status, "disposition_reason": decision.disposition_reason,
+        "recorded_by": decision.recorded_by,
+        "recorded_at": decision.recorded_at.isoformat() if decision.recorded_at else None,
+    }}
+
+
 @router.patch("/mdt/cases/{case_id}/schedule")
 async def schedule_mdt_case(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     _require_mdt_coordinator(current_user)

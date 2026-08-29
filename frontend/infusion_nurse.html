@@ -155,7 +155,6 @@
         const ccaUser = Auth.requirePage(['CCAInfusionNurse', 'HeadNurse', 'Nurse', 'Admin']);
         const CCA_API = '/cca';
         let currentPatientId = null;
-        let currentClearanceExits = [];
 
         function showTab(tab) {
             document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
@@ -217,7 +216,7 @@
                 listEl.innerHTML = data.results.map(p => `
                     <div class="worklist-row">
                         <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(p.name)}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(p.mrn)}</div></div>
-                        <div><div class="wl-label">Age/Sex</div><div class="wl-value" style="font-size:13px;">${escapeHtml(String(p.age))}y / ${escapeHtml(p.sex)}</div></div>
+                        <div><div class="wl-label">Age/Sex</div><div class="wl-value" style="font-size:13px;">${p.age != null ? escapeHtml(String(p.age)) + 'y' : '—'} / ${escapeHtml(p.sex)}</div></div>
                         <div><div class="wl-label">Journey</div><div class="wl-value" style="font-size:13px;">${escapeHtml(p.journey_state)}</div></div>
                         <div><span class="badge ${p.staging_state === 'CLINICIAN_CONFIRMED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(p.staging_state)}</span></div>
                         <div><button class="btn-navy" onclick="openPatient(${Number(p.id)})">Open →</button></div>
@@ -233,7 +232,6 @@
             if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
             try {
                 const data = await Api.get(`${CCA_API}/treatment/day-assessment?patient_id=${currentPatientId}`);
-                currentClearanceExits = data.clearance_exits || [];
                 container.innerHTML = `
                     <div class="section-card">
                         <div class="section-title">${escapeHtml(data.patient.name)} · ${escapeHtml(data.patient.mrn)}</div>
@@ -260,13 +258,11 @@
                         <button class="btn-outline" onclick="submitToxicity()">+ Record Toxicity</button>
                     </div>
                     <div class="section-card">
-                        <div class="section-title">Decide Treatment Clearance</div>
-                        <div class="form-group"><label class="form-label">Decision</label>
-                            <select id="clearance-decision" class="form-select">${currentClearanceExits.map(c => `<option value="${escapeHtml(c.code)}">${escapeHtml(c.label)}</option>`).join('')}</select>
-                        </div>
-                        <div class="form-group"><label class="form-label">Reason / clinical basis (required)</label><textarea id="clearance-reason" class="form-textarea" rows="2" placeholder="Reference the lab tolerability check and toxicity history above."></textarea></div>
-                        <button class="btn-navy" onclick="submitClearance()">🎯 Confirm Decision</button>
-                        <div id="clearance-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                        <div class="section-title">Treatment Order &amp; Clearance</div>
+                        <div class="section-sub" style="margin-bottom:8px;">Verify identity, the signed order, labs and allergies against this before administering. The clearance decision itself is made by the treating oncologist on their own Treatment Plan tab — this is a read-only view, not an action for this role.</div>
+                        ${data.order ? `
+                            <div class="participant-row"><span>Order status</span><span class="badge ${data.order.status === 'SIGNED' ? 'badge-blue' : data.order.status === 'EXECUTED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(data.order.status)}</span></div>
+                        ` : `<p style="font-size:12.5px; color:var(--ink-500);">${escapeHtml(data.order_note || 'No Treatment Order on record yet.')}</p>`}
                     </div>
                 `;
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
@@ -280,17 +276,6 @@
                 await Api.post(`${CCA_API}/treatment/toxicity`, { patient_id: currentPatientId, term, grade: parseInt(document.getElementById('tox-grade').value, 10), baseline_value: baseline });
                 toast('Toxicity recorded', 'success');
                 loadTreatmentDayAssessment();
-            } catch (err) { toast(apiErrorMessage(err), 'error'); }
-        }
-
-        async function submitClearance() {
-            const reason = document.getElementById('clearance-reason').value;
-            if (!reason) { toast('Reason is required', 'error'); return; }
-            const statusEl = document.getElementById('clearance-status');
-            try {
-                await Api.post(`${CCA_API}/treatment/clearance`, { patient_id: currentPatientId, decision: document.getElementById('clearance-decision').value, reason });
-                statusEl.textContent = '✅ Clearance recorded.';
-                toast('Treatment clearance recorded', 'success');
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

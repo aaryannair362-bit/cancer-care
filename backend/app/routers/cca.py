@@ -17,7 +17,8 @@ from ..auth import (
     get_current_user, is_admin, is_doctor, is_cca_oncologist, is_cca_front_desk,
     is_cca_nurse_navigator, is_cca_medical_oncologist, is_cca_surgical_oncologist,
     is_cca_radiation_oncologist, is_cca_patient_liaison, is_cca_infusion_nurse,
-    is_cca_radiologist, is_cca_financial_counsellor, can_sign_treatment_plan, log_audit,
+    is_cca_radiologist, is_cca_financial_counsellor, is_cca_external_mdt_specialist,
+    can_sign_treatment_plan, can_approve_mdt_recommendation, log_audit,
 )
 from ..config import settings
 from ..ocr_service import extract_document
@@ -184,6 +185,14 @@ def list_patients(
     q: Optional[str] = None, scope: Optional[str] = "all",
     db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
 ):
+    # Every other role legitimately needs some patient list (Front Desk registration search,
+    # every clinical role's own worklist). External MDT Specialist is the one role this
+    # codebase's spec (12_External_MDT_Specialist.pdf) gives an explicit hard boundary against:
+    # "Case-scoped reviewer; no broad patient search or operational access" / acceptance
+    # criterion "External user cannot browse unrelated patients" -- they have their own
+    # case-scoped view (GET /mdt/assigned-cases) for exactly this purpose instead.
+    if is_cca_external_mdt_specialist(current_user):
+        raise HTTPException(403, "External MDT Specialist does not have general patient search access -- use your assigned MDT cases instead.")
     org_id = _org_id(current_user)
     query = db.query(CCAPatient).filter(CCAPatient.organization_id == org_id)
     if q:
@@ -698,6 +707,14 @@ def get_case_summary(
     orders = db.query(CCAOrder).filter(CCAOrder.patient_id == patient_id).order_by(CCAOrder.ordered_at.desc()).all()
     results = db.query(CCAResult).filter(CCAResult.patient_id == patient_id).order_by(CCAResult.resulted_at.desc()).all()
     events = db.query(CCAJourneyEvent).filter(CCAJourneyEvent.patient_id == patient_id).order_by(CCAJourneyEvent.timestamp.desc()).limit(30).all()
+    # Nurse-recorded vitals/performance status were computed elsewhere (get_patient_summary's
+    # tier-2 "performance_status" block, synthesize_nexus_brief) but never actually rendered by
+    # any frontend page -- a later clinician (e.g. Surgical Oncology, seeing the patient after
+    # an interleaved Medical Oncology visit and a nurse re-check) had no way to see the current
+    # vitals here even though this endpoint is exactly "everything on record for this patient".
+    latest_intake = db.query(CCAIntakeAssessment).filter(
+        CCAIntakeAssessment.patient_id == patient_id
+    ).order_by(CCAIntakeAssessment.created_at.desc()).first()
 
     facts_by_type: Dict[str, List[dict]] = {}
     facts_per_document: Dict[int, int] = {}
@@ -744,6 +761,16 @@ def get_case_summary(
             "id_proof_type": patient.id_proof_type, "id_proof_number": patient.id_proof_number,
             "id_proof_verification_status": patient.id_proof_verification_status,
         },
+        "vitals": {
+            "bp_systolic": latest_intake.bp_systolic, "bp_diastolic": latest_intake.bp_diastolic,
+            "heart_rate": latest_intake.heart_rate, "temperature_c": latest_intake.temperature_c,
+            "oxygen_sat": latest_intake.oxygen_sat, "respiratory_rate": latest_intake.respiratory_rate,
+            "ecog": latest_intake.ecog, "karnofsky": latest_intake.karnofsky,
+            "pain_score": latest_intake.pain_score, "fall_risk": latest_intake.fall_risk,
+            "bsa": latest_intake.bsa, "bmi": latest_intake.bmi,
+            "recorded_by": latest_intake.recorded_by,
+            "recorded_at": latest_intake.created_at.isoformat() if latest_intake.created_at else None,
+        } if latest_intake else None,
         "overview": {
             "document_count": len(docs),
             "verified_fact_count": sum(f.status == "VERIFIED" for f in facts),
@@ -1321,17 +1348,29 @@ async def open_encounter(
     patient_id: int, request: Request, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Idempotent: returns the patient's existing OPEN encounter if one exists, else opens a new
-    one. Nurse Intake and Doctor OPD Consultation both write against an encounter id (see
-    /encounters/{id}/intake and /encounters/{id}/note/finalise below) but previously had no way
-    to obtain one outside cca_seed.py's demo seeder."""
+    """Idempotent per (patient, specialty): returns this specialty's existing OPEN encounter if
+    one exists, else opens a new one. Nurse Intake and Doctor OPD Consultation both write
+    against an encounter id (see /encounters/{id}/intake and /encounters/{id}/note/finalise
+    below) but previously had no way to obtain one outside cca_seed.py's demo seeder.
+
+    Scoped by specialty (not just patient_id) since the earlier patient-only scoping meant a
+    patient seeing a second specialty (e.g. Surgical Oncology) while their Medical Oncology
+    encounter was still OPEN -- undrafted, unfinalized -- would be handed back that SAME
+    encounter and silently overwrite the first clinician's note on finalise
+    (finalise_encounter_note replaces note_content wholesale). Nurse Intake's own caller omits
+    `specialty` and so shares whichever default ("Medical Oncology") an oncologist page also
+    defaults to when it likewise omits `specialty` -- preserving the intended nurse-intake ->
+    doctor-consultation handoff as one shared encounter -- while a *different* specialty
+    explicitly named in the request correctly gets its own encounter instead of colliding."""
     org_id = _org_id(current_user)
     _get_org_patient(db, patient_id, org_id)
     body = await request.json()
+    specialty = body.get("specialty", "Medical Oncology")
 
     existing = db.query(CCAEncounter).filter(
         CCAEncounter.patient_id == patient_id,
-        CCAEncounter.status == "OPEN"
+        CCAEncounter.status == "OPEN",
+        CCAEncounter.specialty == specialty,
     ).order_by(CCAEncounter.id.desc()).first()
     if existing:
         return {"encounter": {"id": existing.id, "status": existing.status, "note_status": existing.note_status}}
@@ -1340,7 +1379,7 @@ async def open_encounter(
     encounter = CCAEncounter(
         patient_id=patient_id,
         encounter_type=body.get("encounter_type", "OPD_CONSULTATION"),
-        specialty=body.get("specialty", "Medical Oncology"),
+        specialty=specialty,
         clinician=actor,
         status="OPEN",
         note_status="TRANSCRIPT"
@@ -2063,13 +2102,17 @@ async def approve_mdt_recommendation(
     id: int, request: Request, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Enforces Non-Negotiable Constraint: MDT recommendations require an authorized treating
-    clinician's explicit disposition before altering active clinical treatment plans. Per the
-    architecture doc (Sec 18), that disposition is a genuine three-way choice -- ACCEPT (the
-    recommendation stands as written), PARTIAL (accepted with modification), or REJECT (not
-    adopted) -- not a bare approve/deny; PARTIAL and REJECT require the clinician's reason."""
-    if not can_sign_treatment_plan(current_user):
-        raise HTTPException(403, "Only treating oncologists or authorized clinicians may approve MDT recommendations into binding treatment directives")
+    """MDT recommendations require an explicit disposition before altering active clinical
+    treatment plans. Per the architecture doc (Sec 18), that disposition is a genuine
+    three-way choice -- ACCEPT (the recommendation stands as written), PARTIAL (accepted with
+    modification), or REJECT (not adopted) -- not a bare approve/deny; PARTIAL and REJECT
+    require a reason. Who may record it: the treating oncologist/Doctor always, and -- per
+    cca_product_decisions.MDT_COORDINATOR_CAN_APPROVE_RECOMMENDATIONS -- the MDT Coordinator
+    too; see can_approve_mdt_recommendation's docstring for that decision's scope. Either way
+    this only records disposition on the recommendation; Care Plan/Treatment Plan authorship
+    stays with the treating clinician, unaffected."""
+    if not can_approve_mdt_recommendation(current_user):
+        raise HTTPException(403, "Only the treating oncologist, an authorized clinician, or the MDT Coordinator may approve MDT recommendations into binding treatment directives")
 
     case = db.query(MDTCase).filter(MDTCase.id == id).first()
     if not case:
@@ -2095,8 +2138,8 @@ async def approve_mdt_recommendation(
 
     publish(
         db, "MDT_RECOMMENDATION_APPROVED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
-        title=f"MDT Recommendation {disposition.title()} by Clinician", category="MDT",
-        description=f"Treating clinician {actor} recorded disposition {disposition} on MDT recommendation for case #{case.id}"
+        title=f"MDT Recommendation {disposition.title()}", category="MDT",
+        description=f"{actor} ({current_user.get('role')}) recorded disposition {disposition} on MDT recommendation for case #{case.id}"
                     + (f": {reason}" if reason else ""),
         mdt_case_id=case.id, mdt_decision_id=decision.id, disposition=disposition,
     )

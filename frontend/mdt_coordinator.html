@@ -210,7 +210,7 @@
                 listEl.innerHTML = data.results.map(p => `
                     <div class="worklist-row">
                         <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(p.name)}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(p.mrn)}</div></div>
-                        <div><div class="wl-label">Age/Sex</div><div class="wl-value" style="font-size:13px;">${escapeHtml(String(p.age))}y / ${escapeHtml(p.sex)}</div></div>
+                        <div><div class="wl-label">Age/Sex</div><div class="wl-value" style="font-size:13px;">${p.age != null ? escapeHtml(String(p.age)) + 'y' : '—'} / ${escapeHtml(p.sex)}</div></div>
                         <div><div class="wl-label">Journey</div><div class="wl-value" style="font-size:13px;">${escapeHtml(p.journey_state)}</div></div>
                         <div><span class="badge ${p.staging_state === 'CLINICIAN_CONFIRMED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(p.staging_state)}</span></div>
                         <div><button class="btn-navy" onclick="currentPatientId=${Number(p.id)}; showTab('mdt')">Open →</button></div>
@@ -218,6 +218,8 @@
                 `).join('') || '<p style="color:var(--ink-500); font-size:13px;">No patients.</p>';
             } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
         }
+
+        const MDT_CASE_STATUS_BADGE = { RECOMMENDED: 'badge-blue', APPROVED: 'badge-green', PARTIALLY_APPROVED: 'badge-amber', RETURNED_TO_RECORD: 'badge-rose', ACTIONED_BY_CLINICIAN: 'badge-green', WITHDRAWN: 'badge-rose' };
 
         async function loadMdtReferralQueue() {
             const container = document.getElementById('mdt-content');
@@ -229,11 +231,14 @@
                             <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(c.patient_name)}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(c.patient_mrn)}</div></div>
                             <div><div class="wl-label">Question</div><div class="wl-value" style="font-size:12.5px; font-weight:600;">${escapeHtml((c.question || '').slice(0, 50))}</div></div>
                             <div><div class="wl-label">Board Date</div><div class="wl-value" style="font-size:13px;">${escapeHtml(c.board_date || 'Unscheduled')}</div></div>
-                            <div><span class="badge ${c.readiness.overall === 'ReadyForMDT' ? 'badge-green' : 'badge-amber'}">${escapeHtml(c.readiness.overall)}</span></div>
+                            <div style="display:flex; flex-direction:column; gap:4px; align-items:flex-start;">
+                                <span class="badge ${c.readiness.overall === 'ReadyForMDT' ? 'badge-green' : 'badge-amber'}">${escapeHtml(c.readiness.overall)}</span>
+                                <span class="badge ${MDT_CASE_STATUS_BADGE[c.status] || 'badge-amber'}" style="font-size:10.5px;">${escapeHtml((c.status || '').replace(/_/g, ' '))}</span>
+                            </div>
                             <div><button class="btn-navy" onclick="openMdtCase(${Number(c.id)}, ${Number(c.patient_id)})">Manage</button></div>
                         </div>
                         <div id="mdt-case-detail-${c.id}"></div>
-                    `).join('') : '<p style="color:var(--ink-500); font-size:13px;">No MDT referrals.</p>') + `</div>`;
+                    `).join('') : '<p style="color:var(--ink-500); font-size:13px;">No MDT referrals yet. A treating oncologist submits a case from their own MDT / Tumour Board tab (🚀 Submit to Tumour Board) — once submitted, it appears here for readiness review, scheduling and external specialist coordination.</p>') + `</div>`;
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
         }
 
@@ -241,8 +246,14 @@
             if (patientId) currentPatientId = patientId;
             const detail = document.getElementById(`mdt-case-detail-${caseId}`);
             try {
-                const readiness = await Api.get(`${CCA_API}/mdt/cases/${caseId}/readiness`);
-                const participants = await Api.get(`${CCA_API}/mdt/cases/${caseId}/participants`);
+                const [readiness, participants, decisionData, opinionsData] = await Promise.all([
+                    Api.get(`${CCA_API}/mdt/cases/${caseId}/readiness`),
+                    Api.get(`${CCA_API}/mdt/cases/${caseId}/participants`),
+                    Api.get(`${CCA_API}/mdt/cases/${caseId}/decision`),
+                    Api.get(`${CCA_API}/mdt/cases/${caseId}/opinions`),
+                ]);
+                const decision = decisionData.decision;
+                const opinions = opinionsData.opinions || [];
                 detail.innerHTML = `
                     <div class="section-card" style="margin-top:8px;">
                         <div class="section-title" style="font-size:14px; margin-bottom:8px;">Case Readiness</div>
@@ -265,14 +276,46 @@
                         </div>
                         <button class="btn-outline" onclick="submitAddParticipant(${caseId})">+ Add Participant</button>
                         <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
-                        <div class="section-title" style="font-size:14px; margin-bottom:8px;">Grant External Specialist Access</div>
-                        <div class="section-sub" style="margin-bottom:10px;">Shares only this case with an outside specialist's email, time-limited. Never exposes the full patient population.</div>
+                        <div class="section-title" style="font-size:14px; margin-bottom:8px;">Assign External Specialist (Secondary Opinion)</div>
+                        <div class="section-sub" style="margin-bottom:10px;">Shares only this case with an outside specialist's email, time-limited, for a second opinion. Never exposes the full patient population — the hospital MDT team retains authorship of the recommendation.</div>
                         <div class="form-grid-2">
                             <div class="form-group" style="margin-bottom:8px;"><input type="text" id="mdtc-extname-${caseId}" class="form-input" placeholder="Specialist name" /></div>
                             <div class="form-group" style="margin-bottom:8px;"><input type="email" id="mdtc-extemail-${caseId}" class="form-input" placeholder="specialist@example.com" /></div>
                         </div>
                         <button class="btn-outline" onclick="submitGrantExternalAccess(${caseId})">🔗 Grant Access</button>
                         <div id="mdtc-ext-status-${caseId}" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                        <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
+                        <div class="section-title" style="font-size:14px; margin-bottom:8px;">Recommendation &amp; Sign-off</div>
+                        ${decision ? `
+                            <div class="participant-row" style="flex-direction:column; align-items:flex-start; gap:4px;">
+                                <div><span class="badge ${MDT_CASE_STATUS_BADGE[decision.status] || 'badge-blue'}">${escapeHtml((decision.status || '').replace(/_/g, ' '))}</span></div>
+                                <div style="font-size:13px; margin-top:4px;">${escapeHtml(decision.recommendation)}</div>
+                                ${decision.modality_direction ? `<div style="font-size:12px; color:var(--ink-500);">Modality direction: ${escapeHtml(decision.modality_direction)}</div>` : ''}
+                                ${decision.rationale ? `<div style="font-size:12px; color:var(--ink-500);">Rationale: ${escapeHtml(decision.rationale)}</div>` : ''}
+                                ${decision.disposition_reason ? `<div style="font-size:12px; color:var(--ink-500);">Disposition reason: ${escapeHtml(decision.disposition_reason)}</div>` : ''}
+                                <div style="font-size:11px; color:var(--ink-500);">Recorded by ${escapeHtml(decision.recorded_by || 'Unknown')}${decision.recorded_at ? ' · ' + escapeHtml(new Date(decision.recorded_at).toLocaleString()) : ''}</div>
+                            </div>
+                            ${decision.status === 'FINAL' ? `
+                                <div id="mdtc-disp-form-${caseId}" style="margin-top:10px;">
+                                    <div style="display:flex; gap:8px;">
+                                        <button class="btn-navy" onclick="submitMdtCoordinatorDisposition(${caseId}, 'ACCEPT')">✓ Accept</button>
+                                        <button class="btn-outline" onclick="promptMdtCoordinatorDisposition(${caseId}, 'PARTIAL', 'What is being modified, and why?')">± Partially Accept</button>
+                                        <button class="btn-outline" onclick="promptMdtCoordinatorDisposition(${caseId}, 'REJECT', 'Why is this recommendation not being adopted?')">✕ Reject</button>
+                                    </div>
+                                </div>
+                            ` : ''}
+                        ` : '<p style="font-size:12.5px; color:var(--ink-500);">Not yet drafted.</p>'}
+                        <div class="section-sub" style="margin-top:8px;">The recommendation is authored by the treating clinician on their own MDT / Tumour Board tab. Disposition (Accept / Partial / Reject) may be recorded here by the MDT Coordinator, or by the treating clinician on their tab — either updates the same case.</div>
+                        <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
+                        <div class="section-title" style="font-size:14px; margin-bottom:8px;">External Specialist Opinions</div>
+                        ${opinions.length ? opinions.map(o => `
+                            <div class="participant-row" style="flex-direction:column; align-items:flex-start; gap:4px;">
+                                <div style="font-weight:600;">${escapeHtml(o.specialist_name)}${o.certainty ? ` · Certainty: ${escapeHtml(o.certainty)}` : ''}</div>
+                                <div style="font-size:13px;">${escapeHtml(o.recommendation)}</div>
+                                ${o.rationale ? `<div style="font-size:12px; color:var(--ink-500);">Rationale: ${escapeHtml(o.rationale)}</div>` : ''}
+                                <div style="font-size:11px; color:var(--ink-500);">${o.submitted_at ? new Date(o.submitted_at).toLocaleString() : ''}</div>
+                            </div>
+                        `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No external opinions yet.</p>'}
                     </div>
                 `;
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
@@ -310,6 +353,25 @@
                 await Api.post(`${CCA_API}/mdt/cases/${caseId}/external-access`, { specialist_name: name, specialist_email: email });
                 statusEl.textContent = `✅ Access granted to ${email} (14 days).`;
                 toast('External access granted', 'success');
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // Coordinator disposition on a drafted MDT recommendation -- alongside, not instead
+        // of, the treating clinician's own Accept/Partial/Reject on their MDT tab (both call
+        // the same POST /mdt/cases/{id}/approve; see auth.can_approve_mdt_recommendation and
+        // cca_product_decisions.MDT_COORDINATOR_CAN_APPROVE_RECOMMENDATIONS for the decision).
+        function promptMdtCoordinatorDisposition(caseId, disposition, promptText) {
+            const reason = prompt(promptText);
+            if (!reason) { toast('A reason is required for this disposition', 'error'); return; }
+            submitMdtCoordinatorDisposition(caseId, disposition, reason);
+        }
+
+        async function submitMdtCoordinatorDisposition(caseId, disposition, reason) {
+            try {
+                await Api.post(`${CCA_API}/mdt/cases/${caseId}/approve`, { disposition, reason });
+                toast(`Recommendation ${disposition.toLowerCase()}ed`, 'success');
+                await loadMdtReferralQueue();
+                openMdtCase(caseId, currentPatientId);
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

@@ -88,3 +88,34 @@ CARE_PLAN_IN_PROGRESS_STATUSES = ("ACTIVE", "BLOCKED", "ON_HOLD")
 # see architecture doc section 29's separate, still-open item on that, and this repo's
 # standing instruction never to build it).
 TREATMENT_ORDERS_SYSTEM_OF_RECORD = "in_os"  # the only other documented value would be "external_reference", unimplemented
+
+
+# ---------------------------------------------------------------------------
+# 4. Can the MDT Coordinator record the Accept/Partial/Reject disposition on a finalized MDT
+#    recommendation, in addition to the treating oncologist -- or is that solely the treating
+#    clinician's authority?
+#
+# Decision: BOTH. The MDT Coordinator may also record disposition on a finalized MDT
+# recommendation (routers/cca.py's approve_mdt_recommendation, gated by
+# auth.can_approve_mdt_recommendation), alongside -- not instead of -- the treating
+# oncologist/Doctor. This does NOT extend to signing an actual Treatment Plan document (that
+# stays _require_modality_signer-gated, oncologist/Doctor only, entirely unaffected) or to
+# authoring/editing Care Plan or Treatment Plan content -- only to the upstream MDT
+# recommendation's disposition, which still just creates a review task for the treating
+# clinician exactly as it already did (event_subscribers.py's
+# _on_mdt_recommendation_finalized), and the Care Plan/Treatment Plan itself is still
+# authored and edited by the treating clinician afterwards, unchanged.
+#
+# Reasoning: explicit product-owner instruction (the user, direct request in session,
+# 2026-08-29), overriding this module's original hard boundary
+# (CCA_15_Module_Final_Specifications/11_MDT_Coordinator.pdf: "Orchestrates the tumour
+# board; does not author or sign the clinical recommendation" / acceptance criterion
+# "Coordinator cannot author/sign treatment recommendation"). The user was shown this
+# tradeoff -- the spec's hard boundary and the liability implications of a non-clinical
+# operational role signing a clinical recommendation -- and confirmed they want the
+# Coordinator to have this ability specifically (not the External MDT Specialist, which
+# stays opinion-only per decision #1 above). Recorded here, rather than silently broadening
+# can_sign_treatment_plan (which would also touch unrelated callers), so the decision and
+# its exact scope are named, singly-sourced and reversible rather than an unstated
+# assumption.
+MDT_COORDINATOR_CAN_APPROVE_RECOMMENDATIONS = True

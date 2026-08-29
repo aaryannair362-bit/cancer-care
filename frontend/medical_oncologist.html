@@ -641,7 +641,7 @@
                         <div class="onc-card-top">
                             <div>
                                 <div class="onc-patient-name">${escapeHtml(p.name)}</div>
-                                <div class="onc-patient-meta">${escapeHtml(p.mrn)} · ${escapeHtml(String(p.age))}y / ${escapeHtml(p.sex)}</div>
+                                <div class="onc-patient-meta">${escapeHtml(p.mrn)} · ${p.age != null ? escapeHtml(String(p.age)) + 'y' : '—'} / ${escapeHtml(p.sex)}</div>
                             </div>
                             <span class="badge ${p.staging_state === 'CLINICIAN_CONFIRMED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(p.staging_state)}</span>
                         </div>
@@ -704,7 +704,7 @@
         }
 
         async function ensureEncounterId() {
-            const data = await Api.post(`${CCA_API}/patients/${currentPatientId}/encounters`, {});
+            const data = await Api.post(`${CCA_API}/patients/${currentPatientId}/encounters`, { specialty: 'Medical Oncology' });
             return data.encounter.id;
         }
 
@@ -955,6 +955,116 @@
         const CARE_PLAN_STATUS_BADGE = { DRAFT: 'badge-amber', PROPOSED: 'badge-amber', ACTIVE: 'badge-green', BLOCKED: 'badge-rose', ON_HOLD: 'badge-amber', COMPLETED: 'badge-blue', CANCELLED: 'badge-rose' };
         const CARE_PLAN_NEXT_TRANSITIONS = { DRAFT: ['PROPOSED', 'CANCELLED'], PROPOSED: ['ACTIVE', 'DRAFT', 'CANCELLED'], ACTIVE: ['BLOCKED', 'ON_HOLD', 'COMPLETED', 'CANCELLED'], BLOCKED: ['ACTIVE', 'CANCELLED'], ON_HOLD: ['ACTIVE', 'CANCELLED'] };
 
+        // Care Plan creation: POST /care-plans exists and works but previously had no caller
+        // anywhere in this app -- loadCarePlanView's empty state claimed "a Care Plan is
+        // created once a Treatment Plan is signed" but nothing did that. Reference the MDT
+        // recommendation (already clinician-authored text) for context; deliberately leave the
+        // systemic/surgical/radiation component fields blank for the clinician to fill in
+        // themselves here, same free-text pattern as the existing Amend Care Plan form, rather
+        // than piping through /care-plans/prefill's components (a single hardcoded demo
+        // regimen, not diagnosis-aware -- see cca_engine.generate_care_plan_prefill).
+        async function renderCreateCarePlanCard() {
+            let activePlans = [];
+            let mdtRecommendation = null;
+            try {
+                const tpData = await Api.get(`${CCA_API}/patients/${currentPatientId}/treatment-plans`);
+                activePlans = (tpData.treatment_plans || []).filter(p => p.status === 'ACTIVE');
+            } catch (err) { /* leave empty */ }
+            try {
+                const prefill = await Api.get(`${CCA_API}/care-plans/prefill?patient_id=${currentPatientId}`);
+                mdtRecommendation = prefill.mdt_recommendation || null;
+            } catch (err) { /* optional context only */ }
+
+            if (!activePlans.length) {
+                return `<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">No Care Plan on record yet for this patient. A Care Plan requires at least one signed (ACTIVE) Treatment Plan — sign one on the Treatment Plan tab first.</p></div>`;
+            }
+            return `
+                <div class="section-card">
+                    <div class="section-title">Create Care Plan</div>
+                    <div class="section-sub" style="margin-bottom:12px;">Built from signed Treatment Plan(s) below. ${mdtRecommendation ? 'For reference, the MDT recommendation on record: “' + escapeHtml(mdtRecommendation) + '”' : ''}</div>
+                    <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Source Treatment Plan(s)</label>
+                        ${activePlans.map(p => `<div class="participant-row"><label style="display:flex; gap:8px; align-items:center; cursor:pointer;"><input type="checkbox" class="cp-source-plan" value="${p.id}" checked /> ${escapeHtml(p.modality)} · ${escapeHtml(p.protocol_name || 'Protocol not recorded')}</label></div>`).join('')}
+                    </div>
+                    <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Intent</label><input type="text" id="cp-create-intent" class="form-input" value="Curative" /></div>
+                    <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Systemic Therapy</label><textarea id="cp-create-systemic" class="form-textarea" rows="2"></textarea></div>
+                    <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Surgical Therapy</label><textarea id="cp-create-surgical" class="form-textarea" rows="2"></textarea></div>
+                    <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Radiation Therapy</label><textarea id="cp-create-radiation" class="form-textarea" rows="2"></textarea></div>
+                    <div class="form-group" style="margin-bottom:14px;"><label class="form-label">Next decision point</label><input type="text" id="cp-create-next" class="form-input" placeholder="e.g. Response assessment after planned cycles" /></div>
+                    <button class="btn-navy" onclick="submitCreateCarePlan()">Create Care Plan</button>
+                    <div id="cp-create-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                </div>
+            `;
+        }
+
+        async function submitCreateCarePlan() {
+            const treatmentPlanIds = Array.from(document.querySelectorAll('.cp-source-plan:checked')).map(el => Number(el.value));
+            if (!treatmentPlanIds.length) { toast('Select at least one source Treatment Plan', 'error'); return; }
+            const components = {};
+            const systemic = document.getElementById('cp-create-systemic').value;
+            const surgical = document.getElementById('cp-create-surgical').value;
+            const radiation = document.getElementById('cp-create-radiation').value;
+            if (systemic) components.systemic = systemic;
+            if (surgical) components.surgical = surgical;
+            if (radiation) components.radiation = radiation;
+            try {
+                await Api.post(`${CCA_API}/care-plans`, {
+                    patient_id: currentPatientId,
+                    treatment_plan_ids: treatmentPlanIds,
+                    intent: document.getElementById('cp-create-intent').value,
+                    components,
+                    next_decision_point: document.getElementById('cp-create-next').value || undefined,
+                });
+                toast('Care Plan created', 'success');
+                loadCarePlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // Progress / Recent Activity: the Care Plan card above is a static description of the
+        // intended plan -- it never showed what's actually happened while the patient follows
+        // it (cycles administered, holds, staging, MDT decisions), so anyone opening it had to
+        // separately dig through the Patient History tab to know where things currently stand.
+        // Reuses GET /patients/{id}/journey (every meaningful state change already publishes a
+        // human-readable CCAJourneyEvent -- TREATMENT_ADMINISTERED, TREATMENT_HELD,
+        // STAGING_CONFIRMED, MDT_RECOMMENDATION_APPROVED, etc. -- via events.publish()) rather
+        // than inventing a second, parallel "what happened" feed.
+        async function renderCarePlanProgressCard(cp) {
+            let planProgress = [];
+            let recentEvents = [];
+            try {
+                const tpData = await Api.get(`${CCA_API}/patients/${currentPatientId}/treatment-plans`);
+                const sourceIds = new Set(cp.source_treatment_plan_ids || []);
+                planProgress = (tpData.treatment_plans || []).filter(p => sourceIds.has(p.id));
+            } catch (err) { /* optional */ }
+            try {
+                const jData = await Api.get(`${CCA_API}/patients/${currentPatientId}/journey`);
+                recentEvents = (jData.journey_events || []).slice(-8).reverse();
+            } catch (err) { /* optional */ }
+
+            return `
+                <div class="section-card">
+                    <div class="section-title" style="margin-bottom:12px;">Progress / Recent Activity</div>
+                    ${planProgress.length ? `
+                        <div class="grid-3" style="margin-bottom:14px;">
+                            ${planProgress.map(p => `
+                                <div class="stage-card">
+                                    <div class="stage-card-title">${escapeHtml(p.modality)}</div>
+                                    <div style="font-size:12.5px; color:var(--ink-600);">${escapeHtml(p.protocol_name || 'Protocol not recorded')}</div>
+                                    <div style="font-size:12px; color:var(--ink-500); margin-top:4px;">${p.completed_sessions || 0} / ${p.planned_sessions || '—'} sessions · <span class="badge ${TREATMENT_PLAN_STATUS_BADGE[p.status] || 'badge-blue'}" style="font-size:10px;">${escapeHtml(p.status)}</span></div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : ''}
+                    ${recentEvents.length ? recentEvents.map(e => `
+                        <div class="cca-sum-timeline-item" style="border-left:2px solid var(--line); padding:2px 0 12px 14px; margin-left:4px; position:relative;">
+                            <div style="font-size:11px; color:var(--ink-500);">${e.timestamp ? new Date(e.timestamp).toLocaleString() : '—'}${e.actor_name ? ' · ' + escapeHtml(e.actor_name) : ''}</div>
+                            <div style="font-size:13px; font-weight:600; color:var(--ink-900); margin-top:2px;">${escapeHtml(e.event_title)}</div>
+                            ${e.description ? `<div style="font-size:12.5px; color:var(--ink-600); margin-top:2px;">${escapeHtml(e.description)}</div>` : ''}
+                        </div>
+                    `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No activity recorded yet.</p>'}
+                </div>
+            `;
+        }
+
         async function loadCarePlanView() {
             const container = document.getElementById('careplan-content');
             if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
@@ -964,12 +1074,13 @@
                 currentCarePlanId = data.care_plan ? data.care_plan.id : null;
 
                 if (!currentCarePlanData) {
-                    container.innerHTML = `<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">No Care Plan on record yet for this patient. A Care Plan is created once a Treatment Plan is signed.</p></div>`;
+                    container.innerHTML = await renderCreateCarePlanCard();
                     return;
                 }
                 const cp = currentCarePlanData;
                 const comps = cp.components || {};
                 const nextStates = CARE_PLAN_NEXT_TRANSITIONS[cp.status] || [];
+                const progressSection = await renderCarePlanProgressCard(cp);
                 container.innerHTML = `
                     <div class="section-card">
                         <div class="section-head">
@@ -985,6 +1096,7 @@
                             `).join('')}
                         </div>
                     </div>
+                    ${progressSection}
                     ${nextStates.length ? `
                     <div class="section-card">
                         <div class="section-title">Change Status</div>
@@ -1073,6 +1185,109 @@
 
         const TREATMENT_PLAN_STATUS_BADGE = { DRAFT: 'badge-amber', PROPOSED: 'badge-amber', ACTIVE: 'badge-green', ON_HOLD: 'badge-amber', COMPLETED: 'badge-blue', SUPERSEDED: 'badge-blue', CANCELLED: 'badge-rose' };
 
+        // Treatment Order & Clearance: the executable-order + administration-decision step
+        // between a signed Treatment Plan and Day-Care actually giving a dose. Lives here
+        // (not on the Infusion Nurse's page) because both POST /treatment-orders and
+        // POST /treatment/clearance are backend-gated to a treating clinician
+        // (auth._require_clinician's own docstring lists "treatment clearance" as one of the
+        // clinical decisions deliberately withheld from Day-Care -- the nurse verifies and
+        // administers against what's decided here, matching the architecture doc's Infusion
+        // Nurse packet ("verify... treatment clearance") rather than deciding it themselves.
+        const CLEARANCE_DECISION_LABELS = {
+            CLEARED: 'Proceed with Standard Dose (100%)',
+            CLEARED_DOSE_REDUCTION: 'Cleared with Dose Reduction (e.g. 75% / 80%)',
+            HELD: 'Hold Treatment (Toxicity / Cytopenia)',
+            DEFERRED: 'Defer to Future Date',
+            DISCONTINUED: 'Discontinue Regimen',
+        };
+
+        async function renderTreatmentOrderCard(plan) {
+            let order = null;
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/treatment-orders`);
+                order = (data.treatment_orders || []).find(o => o.treatment_plan_id === plan.id && o.status !== 'CANCELLED' && o.status !== 'EXECUTED') || null;
+            } catch (err) { /* fall through to the create-order state */ }
+
+            if (!order) {
+                return `
+                    <div class="section-card">
+                        <div class="section-title">Treatment Order</div>
+                        <div class="section-sub" style="margin-bottom:12px;">Writes an executable order against the next planned session of this signed Treatment Plan. Must be signed before Day-Care can record a clearance decision.</div>
+                        <button class="btn-navy" onclick="submitCreateTreatmentOrder(${plan.id})">Create Treatment Order</button>
+                        <div id="to-create-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                    </div>
+                `;
+            }
+
+            if (order.status === 'DRAFT') {
+                return `
+                    <div class="section-card">
+                        <div class="section-title">Treatment Order <span class="badge badge-amber">DRAFT</span></div>
+                        <div class="section-sub" style="margin-bottom:12px;">Session #${order.treatment_session_id}. Not yet executable — sign to authorize.</div>
+                        <button class="btn-navy" onclick="submitSignTreatmentOrder(${order.id})">✍️ Sign Treatment Order</button>
+                        <div id="to-sign-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                    </div>
+                `;
+            }
+
+            // SIGNED: executable -- show the day-assessment + clearance decision form.
+            let assessment;
+            try {
+                assessment = await Api.get(`${CCA_API}/treatment/day-assessment?patient_id=${currentPatientId}`);
+            } catch (err) {
+                return `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`;
+            }
+            return `
+                <div class="section-card">
+                    <div class="section-title">Treatment Order <span class="badge badge-blue">SIGNED</span></div>
+                    <div class="section-sub">${escapeHtml(assessment.protocol)} · ${escapeHtml(assessment.cycle_info)}</div>
+                </div>
+                <div class="section-card">
+                    <div class="section-title">Toxicity History (CTCAE v5.0)</div>
+                    ${(assessment.toxicity_history || []).map(t => `<div class="participant-row">${escapeHtml(t.term)} <span class="badge ${Number(t.grade) === 0 ? 'badge-green' : 'badge-amber'}">Grade ${Number(t.grade)}</span></div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No toxicity events recorded.</p>'}
+                </div>
+                <div class="section-card">
+                    <div class="section-title">Decide Treatment Clearance</div>
+                    <div class="section-sub" style="margin-bottom:10px;">${escapeHtml(assessment.lab_parameters_note || '')}</div>
+                    <div class="form-group"><label class="form-label">Decision</label>
+                        <select id="clearance-decision-onc" class="form-select">${(assessment.clearance_exits || []).map(c => `<option value="${escapeHtml(c.code)}">${escapeHtml(c.label)}</option>`).join('')}</select>
+                    </div>
+                    <div class="form-group"><label class="form-label">Reason / clinical basis (required)</label><textarea id="clearance-reason-onc" class="form-textarea" rows="2" placeholder="Reference the lab tolerability check and toxicity history above."></textarea></div>
+                    <button class="btn-navy" onclick="submitClearanceOnc(${order.id})">🎯 Confirm Decision</button>
+                    <div id="clearance-status-onc" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                </div>
+            `;
+        }
+
+        async function submitCreateTreatmentOrder(treatmentPlanId) {
+            try {
+                await Api.post(`${CCA_API}/treatment-orders`, { patient_id: currentPatientId, treatment_plan_id: treatmentPlanId });
+                toast('Treatment Order drafted', 'success');
+                loadTreatmentPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitSignTreatmentOrder(orderId) {
+            try {
+                await Api.post(`${CCA_API}/treatment-orders/${orderId}/sign`, {});
+                toast('Treatment Order signed', 'success');
+                loadTreatmentPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitClearanceOnc(orderId) {
+            const reason = document.getElementById('clearance-reason-onc').value;
+            if (!reason) { toast('Reason is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/treatment/clearance`, {
+                    patient_id: currentPatientId, order_id: orderId,
+                    decision: document.getElementById('clearance-decision-onc').value, reason,
+                });
+                toast('Treatment clearance recorded', 'success');
+                loadTreatmentPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
         async function loadTreatmentPlanView() {
             const container = document.getElementById('treatmentplan-content');
             if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
@@ -1120,6 +1335,7 @@
 
                 const canAmend = !['COMPLETED', 'SUPERSEDED', 'CANCELLED'].includes(plan.status);
                 const canSign = ['DRAFT', 'PROPOSED'].includes(plan.status);
+                const orderSection = plan.status === 'ACTIVE' ? await renderTreatmentOrderCard(plan) : '';
                 container.innerHTML = `
                     <div class="section-card">
                         <div class="section-head">
@@ -1143,6 +1359,7 @@
                         </div>
                         <div id="tp-action-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
                     </div>
+                    ${orderSection}
                     ${canAmend ? `
                     <div class="section-card">
                         <div class="section-title">Amend Treatment Plan</div>

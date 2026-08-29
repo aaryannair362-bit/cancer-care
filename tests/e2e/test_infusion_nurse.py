@@ -1,10 +1,19 @@
 """
 Real-browser regression test for the Infusion Nurse "Treatment Day / Infusion" screen
 (frontend/infusion_nurse.html): toxicity recording (allowed for this role), and the
-"Decide Treatment Clearance" flow -- the exact screen/action from the original bug report
-this session started with. Confirms live, through the real UI, that clearance correctly
-shows the backend's clean 403 ("Only a treating oncologist may perform this action") as an
-error toast rather than crashing -- the role gate is working as designed, not a 500 bug.
+Treatment Order/Clearance status view.
+
+A prior fix made the backend's clean 403 ("Only a treating oncologist may perform this
+action") show as an error toast instead of a raw 500 when this role submitted a clearance
+decision -- masking, not fixing, the actual problem: this role's own page presented an action
+(the "Decide Treatment Clearance" form) it could never successfully use, since
+routers/cca.py's record_clearance_decision is deliberately clinician-only (auth._require_
+clinician's docstring lists "treatment clearance" among clinical decisions withheld from
+Day-Care). The real fix removed that form from this page entirely -- the clearance decision
+now lives on medical_oncologist.html's Treatment Plan tab, where the backend actually allows
+it -- and replaced it here with a read-only order-status view, matching what this role is
+meant to do per the architecture doc's Infusion Nurse packet: verify the order/clearance
+already given, not decide it.
 """
 import pytest
 
@@ -57,10 +66,12 @@ def test_infusion_nurse_records_toxicity(js_page, live_server_url, infusion_pati
         db.close()
 
 
-def test_infusion_nurse_clearance_shows_clean_permission_error_not_a_crash(js_page, live_server_url, infusion_patient):
-    """The original session bug report: clicking Confirm Decision here appeared to fail with
-    'Request failed (500)'. Confirmed earlier via curl that current code returns a clean 403;
-    this pins that down through the actual UI the report was filed against."""
+def test_infusion_nurse_has_no_clearance_decision_action(js_page, live_server_url, infusion_patient):
+    """This role can no longer submit a clearance decision at all -- the form (and the
+    backend-rejected submitClearance() it used to post to) is gone from this page entirely,
+    replaced by a read-only order-status view. Root-cause fix for the prior "clean 403 instead
+    of a crash" workaround: the action shouldn't have been offered to this role in the first
+    place."""
     nurse, patient = infusion_patient
     login_as(js_page, live_server_url, nurse, landing_path="/infusion_nurse.html")
     js_page.wait_for_timeout(400)
@@ -68,18 +79,9 @@ def test_infusion_nurse_clearance_shows_clean_permission_error_not_a_crash(js_pa
     js_page.evaluate(f"openPatient({patient.id})")
     js_page.wait_for_timeout(400)
 
-    js_page.fill("#clearance-reason", "Pre-treatment labs reviewed, no Grade 2+ toxicity, cleared for standard dose.")
-    js_page.click('button[onclick="submitClearance()"]')
-    js_page.wait_for_timeout(600)
+    html = js_page.inner_html("#treatment-content")
+    assert "clearance-reason" not in html
+    assert "submitClearance" not in html
+    assert "Treatment Order" in html  # read-only status card still present
 
     assert js_page.js_errors == [], f"unexpected JS errors: {js_page.js_errors}"
-
-    status_text = js_page.eval_on_selector("#clearance-status", "el => el.textContent")
-    assert "recorded" not in status_text.lower(), "clearance should have been rejected, not recorded"
-
-    toast_text = js_page.eval_on_selector("#hms-toast", "el => el.textContent")
-    assert toast_text == "Only a treating oncologist may perform this action", (
-        f"expected the clean backend permission message, got: {toast_text!r}"
-    )
-    toast_class = js_page.eval_on_selector("#hms-toast", "el => el.className")
-    assert "hms-toast--error" in toast_class

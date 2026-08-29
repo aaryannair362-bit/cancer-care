@@ -205,9 +205,25 @@ def is_cca_financial_counsellor(user: dict) -> bool:
 def can_sign_treatment_plan(user: dict) -> bool:
     """Only treating oncologists or Doctor can sign treatment plans -- deliberately NOT Admin
     (architecture doc: Admin/Operations "cannot edit signed clinical notes, diagnoses,
-    finalized radiology/pathology reports or clinician-approved treatment plans"). Also gates
-    MDT recommendation disposition (approve_mdt_recommendation), for the same reason."""
+    finalized radiology/pathology reports or clinician-approved treatment plans"). Actual
+    Treatment Plan signing is gated separately by routers/cca.py's _require_modality_signer;
+    this predicate's one caller is can_approve_mdt_recommendation below."""
     return is_doctor(user) or is_cca_oncologist(user)
+
+
+def can_approve_mdt_recommendation(user: dict) -> bool:
+    """Who may record the Accept/Partial/Reject disposition on a finalized MDT recommendation
+    (routers/cca.py's approve_mdt_recommendation). Always the treating oncologist/Doctor; also
+    the MDT Coordinator per cca_product_decisions.MDT_COORDINATOR_CAN_APPROVE_RECOMMENDATIONS
+    -- a deliberate, later override of this module's original hard boundary, made by explicit
+    product-owner instruction (see that flag's docstring for who and why). Does not affect
+    actual Treatment Plan signing (can_sign_treatment_plan / _require_modality_signer,
+    unaffected) or Care Plan/Treatment Plan authorship, both of which stay with the treating
+    clinician."""
+    if can_sign_treatment_plan(user):
+        return True
+    from .cca_product_decisions import MDT_COORDINATOR_CAN_APPROVE_RECOMMENDATIONS
+    return MDT_COORDINATOR_CAN_APPROVE_RECOMMENDATIONS and is_cca_mdt_coordinator(user)
 
 
 def can_finalize_diagnostic_report(user: dict) -> bool:
