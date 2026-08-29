@@ -94,6 +94,7 @@
             <div class="sidebar-section-title">COORDINATION</div>
             <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Patients</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-coordination" onclick="showTab('coordination')"><div class="nav-item-left"><span>🧭</span><span>Care Coordination</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-history" onclick="showTab('history')"><div class="nav-item-left"><span>🗂️</span><span>Patient History</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
         </aside>
         <main class="canvas">
@@ -113,6 +114,12 @@
                     <button class="btn-navy" onclick="submitCreateCase()">+ Open Coordination Case</button>
                 </div>
                 <div id="coordination-content"><!-- Populated via JS: loadCoordinationQueue() --></div>
+            </div>
+
+            <div id="view-history" class="view-panel">
+                <h1 class="page-title">Patient History</h1>
+                <p class="page-subtitle">Documents, diagnoses, prior investigations/results, medications, and visit history for the selected patient — including what other clinicians in the pipeline have ordered or prescribed.</p>
+                <div id="history-content"><!-- Populated via JS: renderCaseSummaryPanel() --></div>
             </div>
 
             <div id="view-nexus" class="view-panel">
@@ -139,6 +146,7 @@
     </div>
 
     <script src="/static/js/api.js"></script>
+    <script src="/static/js/cca-summary.js"></script>
     <script>
         const ccaUser = Auth.requirePage(['CCAPatientLiaison', 'Admin']);
         const CCA_API = '/cca';
@@ -151,6 +159,7 @@
             document.getElementById(`nav-${tab}`).classList.add('active');
             if (tab === 'patients') loadPatientQueue();
             if (tab === 'coordination') loadCoordinationQueue();
+            if (tab === 'history') renderCaseSummaryPanel('history-content', currentPatientId);
             if (tab === 'nexus') loadNexusBanner();
         }
 

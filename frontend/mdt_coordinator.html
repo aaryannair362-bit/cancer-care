@@ -97,6 +97,7 @@
             <div class="sidebar-section-title">MDT</div>
             <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Patients</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-mdt" onclick="showTab('mdt')"><div class="nav-item-left"><span>👥</span><span>MDT / Tumour Board</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-history" onclick="showTab('history')"><div class="nav-item-left"><span>🗂️</span><span>Patient History</span></div><span class="nav-chevron">›</span></a>
             <div class="sidebar-section-title">COORDINATION</div>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
         </aside>
@@ -115,6 +116,12 @@
                 <h1 class="page-title">MDT Referral Queue &amp; Scheduling</h1>
                 <p class="page-subtitle">Operational management — case readiness, board scheduling, participants. Does not author clinical recommendations.</p>
                 <div id="mdt-content"><!-- Populated via JS: loadMdtReferralQueue() --></div>
+            </div>
+
+            <div id="view-history" class="view-panel">
+                <h1 class="page-title">Patient History</h1>
+                <p class="page-subtitle">Documents, diagnoses, prior investigations/results, medications, and visit history for the selected patient — including what other clinicians in the pipeline have ordered or prescribed.</p>
+                <div id="history-content"><!-- Populated via JS: renderCaseSummaryPanel() --></div>
             </div>
 
             <div id="view-nexus" class="view-panel">
@@ -157,6 +164,7 @@
             document.getElementById(`nav-${tab}`).classList.add('active');
             if (tab === 'patients') loadPatientQueue();
             if (tab === 'mdt') loadMdtReferralQueue();
+            if (tab === 'history') renderCaseSummaryPanel('history-content', currentPatientId);
             if (tab === 'nexus') loadNexusBanner();
             document.getElementById('ai-search-results').style.display = 'none';
         }

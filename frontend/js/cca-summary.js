@@ -90,10 +90,11 @@ async function _ccaSummaryOpenDocument(patientId, documentId, filename) {
  * Fetch and render the case-summary panel for `patientId` into #`containerId`.
  * Safe to call repeatedly (e.g. every time a tab is opened) -- it always re-fetches fresh data.
  */
-async function renderCaseSummaryPanel(containerId, patientId) {
+async function renderCaseSummaryPanel(containerId, patientId, options = {}) {
     _ccaSummaryEnsureStyles();
     const container = document.getElementById(containerId);
     if (!container) return;
+    const hideMedications = !!options.hideMedications;
 
     if (!patientId) {
         container.innerHTML = `<div class="section-card"><p class="cca-sum-empty">Select a patient first.</p></div>`;
@@ -150,10 +151,10 @@ async function renderCaseSummaryPanel(containerId, patientId) {
             `).join('') : '<p class="cca-sum-empty">No documents uploaded yet for this patient.</p>'}
         </div>`;
 
-    const factEntries = Object.entries(summary.clinical_facts || {});
+    const factEntries = Object.entries(summary.clinical_facts || {}).filter(([type]) => !hideMedications || type !== 'MEDICATION');
     const factsSection = `
         <div class="section-card">
-            <div class="section-title" style="margin-bottom:12px;">Diagnoses, Medications &amp; Extracted Findings</div>
+            <div class="section-title" style="margin-bottom:12px;">${hideMedications ? 'Diagnoses &amp; Extracted Findings' : 'Diagnoses, Medications &amp; Extracted Findings'}</div>
             ${factEntries.length ? factEntries.map(([type, facts]) => `
                 <div class="cca-sum-fact-group">
                     <div class="cca-sum-fact-group-title">${escapeHtml(CCA_SUMMARY_FACT_LABELS[type] || type)}</div>
@@ -161,7 +162,42 @@ async function renderCaseSummaryPanel(containerId, patientId) {
                         ${facts.map(f => `<span class="cca-sum-chip${f.status !== 'VERIFIED' ? ' is-proposed' : ''}" title="${f.status === 'VERIFIED' ? 'Clinician-verified' : 'AI-drafted — not yet verified'}">${escapeHtml(f.value)}</span>`).join('')}
                     </div>
                 </div>
-            `).join('') : '<p class="cca-sum-empty">No diagnoses, medications, or findings extracted yet.</p>'}
+            `).join('') : '<p class="cca-sum-empty">No diagnoses or findings extracted yet.</p>'}
+        </div>`;
+
+    const ORDER_STATUS_BADGE = { RAISED: 'badge-amber', SCHEDULED: 'badge-amber', IN_PROGRESS: 'badge-amber', RESULTED: 'badge-green', ACKNOWLEDGED: 'badge-green', CLOSED: 'badge-blue', CANCELLED: 'badge-rose' };
+    const ordersSection = `
+        <div class="section-card">
+            <div class="section-title" style="margin-bottom:12px;">Investigations Ordered (Lab / Radiology / Pathology)</div>
+            ${(summary.orders || []).length ? summary.orders.map(o => `
+                <div class="cca-sum-row">
+                    <div class="cca-sum-row-main">
+                        <div class="cca-sum-row-title">${escapeHtml(o.item_name)} <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(o.order_type || '')}</span></div>
+                        <div class="cca-sum-row-sub">${o.ordered_at ? fmtDateTime(o.ordered_at) : '—'}${o.requested_by ? ' · ' + escapeHtml(o.requested_by) : ''}${o.priority && o.priority !== 'ROUTINE' ? ' · ' + escapeHtml(o.priority) : ''}</div>
+                        ${o.clinical_indication ? `<div class="cca-sum-row-sub" style="margin-top:4px;">Indication: ${escapeHtml(o.clinical_indication)}</div>` : ''}
+                    </div>
+                    <span class="badge ${ORDER_STATUS_BADGE[o.status] || 'badge-amber'}">${escapeHtml(o.status || 'Unknown')}</span>
+                </div>
+            `).join('') : '<p class="cca-sum-empty">No investigations ordered yet.</p>'}
+        </div>`;
+
+    const RESULT_STATUS_BADGE = { NEW: 'badge-amber', PENDING_REVIEW: 'badge-amber', ACKNOWLEDGED: 'badge-green', ACTIONED: 'badge-green' };
+    const resultsSection = `
+        <div class="section-card">
+            <div class="section-title" style="margin-bottom:12px;">Results</div>
+            ${(summary.results || []).length ? summary.results.map(r => `
+                <div class="cca-sum-row">
+                    <div class="cca-sum-row-main">
+                        <div class="cca-sum-row-title">${escapeHtml(r.title)} <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(r.result_type || '')}</span></div>
+                        <div class="cca-sum-row-sub">${r.resulted_at ? fmtDateTime(r.resulted_at) : '—'}</div>
+                        ${r.excerpt ? `<div class="cca-sum-row-sub" style="margin-top:4px;">${escapeHtml(r.excerpt)}</div>` : ''}
+                    </div>
+                    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+                        ${r.is_critical ? '<span class="badge badge-rose">🔴 Critical</span>' : ''}
+                        <span class="badge ${RESULT_STATUS_BADGE[r.status] || 'badge-amber'}">${escapeHtml(r.status || 'Unknown')}</span>
+                    </div>
+                </div>
+            `).join('') : '<p class="cca-sum-empty">No results on record yet.</p>'}
         </div>`;
 
     const encountersSection = `
@@ -172,7 +208,12 @@ async function renderCaseSummaryPanel(containerId, patientId) {
                     <div class="cca-sum-timeline-when">${e.started_at ? fmtDateTime(e.started_at) : '—'} · ${escapeHtml(e.specialty || '')}${e.clinician ? ' · ' + escapeHtml(e.clinician) : ''}</div>
                     <div class="cca-sum-timeline-title">${escapeHtml(e.diagnosis || e.chief_complaint || 'No diagnosis recorded')}</div>
                     ${e.advice ? `<div class="cca-sum-timeline-desc">Plan: ${escapeHtml(e.advice)}</div>` : ''}
-                    ${e.medications && e.medications.length ? `<div class="cca-sum-timeline-desc">Medications noted: ${e.medications.map(m => escapeHtml(m.drugName || m.name || JSON.stringify(m))).join(', ')}</div>` : ''}
+                    ${!hideMedications && e.medications && e.medications.length ? `<div class="cca-sum-timeline-desc">Medications noted: ${e.medications.map(m => {
+                        if (!m || typeof m !== 'object') return escapeHtml(String(m));
+                        const name = m.drugName || m.name || 'Unnamed';
+                        const posology = [m.dose, m.frequency, m.route, m.duration].filter(Boolean).join(', ');
+                        return escapeHtml(posology ? `${name} (${posology})` : name);
+                    }).join('; ')}</div>` : ''}
                 </div>
             `).join('') : '<p class="cca-sum-empty">No prior consultations on record.</p>'}
         </div>`;
@@ -189,8 +230,84 @@ async function renderCaseSummaryPanel(containerId, patientId) {
             `).join('') : '<p class="cca-sum-empty">No journey events recorded yet.</p>'}
         </div>`;
 
-    container.innerHTML = header + documentsSection + factsSection + encountersSection + journeySection +
+    container.innerHTML = header + documentsSection + factsSection + ordersSection + resultsSection + encountersSection + journeySection +
         `<p style="font-size:11.5px; color:var(--ink-500); margin-top:-8px;">${escapeHtml(summary.disclaimer)}</p>`;
+}
+
+/**
+ * Financial Counsellor's restricted view of case-summary: the backend's is_cca_financial_counsellor
+ * branch (GET /cca/patients/{id}/case-summary) deliberately returns a different, narrower shape
+ * than the full clinical one above -- order/plan status only, per spec (DA-13: "Financial
+ * Counsellor -- Status field only") and rbac_projection.py's FINANCE tier (modality/cycle counts,
+ * not full clinical notes). renderCaseSummaryPanel assumes the full shape and renders empty
+ * sections against this one, so this is a dedicated renderer for the shape Finance actually gets.
+ */
+const FIN_ORDER_STATUS_BADGE = { RAISED: 'badge-amber', SCHEDULED: 'badge-amber', IN_PROGRESS: 'badge-amber', RESULTED: 'badge-green', ACKNOWLEDGED: 'badge-green', CLOSED: 'badge-blue', CANCELLED: 'badge-rose' };
+
+async function renderFinancialCaseSummary(containerId, patientId) {
+    _ccaSummaryEnsureStyles();
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    if (!patientId) { container.innerHTML = ''; return; }
+
+    container.innerHTML = `<div class="section-card"><p class="cca-sum-empty">Loading patient summary…</p></div>`;
+
+    let summary;
+    try {
+        summary = await Api.get(`/cca/patients/${patientId}/case-summary`);
+    } catch (err) {
+        container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`;
+        return;
+    }
+
+    const p = summary.patient;
+    const ov = summary.overview;
+    const orders = (summary.financial_projection && summary.financial_projection.orders) || [];
+    const plans = (summary.financial_projection && summary.financial_projection.active_plans) || [];
+
+    const header = `
+        <div class="section-card">
+            <div class="section-head">
+                <div>
+                    <div class="section-title">${escapeHtml(p.name)} <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(p.mrn)}</span></div>
+                    <div class="section-sub">${escapeHtml(String(p.age ?? '—'))}y · ${escapeHtml(p.sex || '—')} · ${escapeHtml(p.journey_state || '—')}</div>
+                </div>
+                ${ov.is_returning_patient ? '<span class="badge badge-blue">Returning patient</span>' : '<span class="badge badge-amber">No prior visits on record</span>'}
+            </div>
+            <div class="cca-sum-grid">
+                <div class="cca-sum-tile"><div class="cca-sum-tile-label">Orders on record</div><div class="cca-sum-tile-value">${ov.order_count ?? '—'}</div></div>
+            </div>
+        </div>`;
+
+    const ordersSection = `
+        <div class="section-card">
+            <div class="section-title" style="margin-bottom:12px;">Investigation Orders (status only)</div>
+            ${orders.length ? orders.map(o => `
+                <div class="cca-sum-row">
+                    <div class="cca-sum-row-main">
+                        <div class="cca-sum-row-title">${escapeHtml(o.item_name)} <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(o.order_type || '')}</span></div>
+                    </div>
+                    <span class="badge ${FIN_ORDER_STATUS_BADGE[o.status] || 'badge-amber'}">${escapeHtml(o.status || 'Unknown')}</span>
+                </div>
+            `).join('') : '<p class="cca-sum-empty">No investigation orders on record.</p>'}
+        </div>`;
+
+    const plansSection = `
+        <div class="section-card">
+            <div class="section-title" style="margin-bottom:12px;">Treatment Plans (modality/cycle status only)</div>
+            ${plans.length ? plans.map(tp => `
+                <div class="cca-sum-row">
+                    <div class="cca-sum-row-main">
+                        <div class="cca-sum-row-title">${escapeHtml(tp.modality || 'Treatment plan')}${tp.protocol_name ? ' · ' + escapeHtml(tp.protocol_name) : ''}</div>
+                        <div class="cca-sum-row-sub">${tp.planned_sessions ? `Planned sessions: ${escapeHtml(String(tp.planned_sessions))}` : ''}${tp.start_date ? ' · Start ' + fmtDateTime(tp.start_date) : ''}</div>
+                    </div>
+                    <span class="badge ${TP_SUMMARY_BADGE[tp.status] || 'badge-blue'}">${escapeHtml(tp.status || 'Unknown')}</span>
+                </div>
+            `).join('') : '<p class="cca-sum-empty">No treatment plans on record.</p>'}
+        </div>`;
+
+    container.innerHTML = header + ordersSection + plansSection +
+        `<p style="font-size:11.5px; color:var(--ink-500); margin-top:-8px;">${escapeHtml(summary.disclaimer || 'Financial projection view: includes billing, modality counts, and operational status only.')}</p>`;
 }
 
 /*

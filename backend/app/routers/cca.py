@@ -785,12 +785,15 @@ def get_case_summary(
         ],
         "orders": [
             {"id": o.id, "order_type": o.order_type, "item_name": o.item_name, "status": o.status,
+             "priority": o.priority, "clinical_indication": o.clinical_indication, "requested_by": o.requested_by,
              "ordered_at": o.ordered_at.isoformat() if o.ordered_at else None}
             for o in orders
         ],
         "results": [
             {"id": r.id, "result_type": r.result_type, "title": r.title, "is_critical": r.is_critical,
-             "status": r.status, "resulted_at": r.resulted_at.isoformat() if r.resulted_at else None}
+             "status": r.status, "order_id": r.order_id,
+             "excerpt": ((r.impression or r.findings_text or "")[:300] or None),
+             "resulted_at": r.resulted_at.isoformat() if r.resulted_at else None}
             for r in results
         ],
         "journey": [

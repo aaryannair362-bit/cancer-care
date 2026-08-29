@@ -200,7 +200,7 @@
                         <button class="btn-navy" onclick="submitClearance(${caseId})">✅ Save Clearance</button>
                     </div>
                 `;
-                renderCaseSummaryPanel(`fin-summary-${caseId}`, f.patient_id);
+                renderFinancialCaseSummary(`fin-summary-${caseId}`, f.patient_id);
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

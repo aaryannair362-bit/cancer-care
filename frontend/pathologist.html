@@ -119,6 +119,7 @@
             <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Patients</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-pathology" onclick="showTab('pathology')"><div class="nav-item-left"><span>🔬</span><span>Pathology Worklist</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-molecular" onclick="showTab('molecular')"><div class="nav-item-left"><span>🧬</span><span>Molecular Diagnostics</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-history" onclick="showTab('history')"><div class="nav-item-left"><span>🗂️</span><span>Patient History</span></div><span class="nav-chevron">›</span></a>
             <div class="sidebar-section-title">COORDINATION</div>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-mdt" onclick="showTab('mdt')"><div class="nav-item-left"><span>👥</span><span>MDT / Tumour Board</span></div><span class="nav-chevron">›</span></a>
@@ -161,6 +162,12 @@
                     </div>
                     <div id="molecular-content"></div>
                 </div>
+            </div>
+
+            <div id="view-history" class="view-panel">
+                <h1 class="page-title">Patient History</h1>
+                <p class="page-subtitle">Diagnoses, prior investigations/results, vitals, and visit history for the selected patient. Medications are not shown here — this view is scoped to conditions and lab/imaging history relevant to specimen interpretation.</p>
+                <div id="history-content"><!-- Populated via JS: renderCaseSummaryPanel(..., { hideMedications: true }) --></div>
             </div>
 
             <div id="view-nexus" class="view-panel">
@@ -239,6 +246,7 @@
             if (tab === 'patients') loadPatientQueue();
             if (tab === 'pathology') loadPathologyWorklist();
             if (tab === 'molecular') loadMolecularTests();
+            if (tab === 'history') renderCaseSummaryPanel('history-content', currentPatientId, { hideMedications: true });
             if (tab === 'mdt') loadMdtCases();
             if (tab === 'nexus') loadNexusBanner();
             document.getElementById('ai-search-results').style.display = 'none';

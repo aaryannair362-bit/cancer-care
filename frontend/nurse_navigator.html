@@ -828,6 +828,14 @@
                 <span class="nav-chevron">›</span>
             </a>
 
+            <a class="sidebar-nav-item" id="nav-history" onclick="showNurseTab('history')">
+                <div class="nav-item-left">
+                    <span>🗂️</span>
+                    <span>Patient History</span>
+                </div>
+                <span class="nav-chevron">›</span>
+            </a>
+
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showNurseTab('nexus')">
                 <div class="nav-item-left">
                     <span>⚡</span>
@@ -1559,6 +1567,12 @@
                 </div>
             </div>
 
+            <div id="view-nurse-history" class="view-panel">
+                <h1 class="page-title">Patient History</h1>
+                <p class="page-subtitle">Documents, diagnoses, prior investigations/results, medications, and visit history for the selected patient — including what other clinicians in the pipeline have ordered or prescribed.</p>
+                <div id="history-content"><!-- Populated via JS: renderCaseSummaryPanel() --></div>
+            </div>
+
         </main>
     </div>
 
@@ -1575,6 +1589,7 @@
             if (targetView) targetView.classList.add('active');
             if (targetNav) targetNav.classList.add('active');
             if (tabName === 'patients') loadNursePatientQueue();
+            if (tabName === 'history') renderCaseSummaryPanel('history-content', currentPatientId);
             document.getElementById('ai-search-results').style.display = 'none';
         }
 
