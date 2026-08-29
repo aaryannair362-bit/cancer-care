@@ -123,9 +123,9 @@ async function renderCaseSummaryPanel(containerId, patientId) {
                 ${ov.is_returning_patient ? '<span class="badge badge-blue">Returning patient — prior history below</span>' : '<span class="badge badge-amber">No prior visits on record</span>'}
             </div>
             <div class="cca-sum-grid">
-                <div class="cca-sum-tile"><div class="cca-sum-tile-label">Documents on file</div><div class="cca-sum-tile-value">${ov.document_count}</div></div>
-                <div class="cca-sum-tile"><div class="cca-sum-tile-label">Verified facts</div><div class="cca-sum-tile-value">${ov.verified_fact_count}</div></div>
-                <div class="cca-sum-tile"><div class="cca-sum-tile-label">Encounters</div><div class="cca-sum-tile-value">${ov.encounter_count}</div></div>
+                <div class="cca-sum-tile"><div class="cca-sum-tile-label">Documents on file</div><div class="cca-sum-tile-value">${ov.document_count ?? '—'}</div></div>
+                <div class="cca-sum-tile"><div class="cca-sum-tile-label">Verified facts</div><div class="cca-sum-tile-value">${ov.verified_fact_count ?? '—'}</div></div>
+                <div class="cca-sum-tile"><div class="cca-sum-tile-label">Encounters</div><div class="cca-sum-tile-value">${ov.encounter_count ?? '—'}</div></div>
                 <div class="cca-sum-tile"><div class="cca-sum-tile-label">Last visit</div><div class="cca-sum-tile-value" style="font-size:13px;">${ov.last_visit ? fmtDateTime(ov.last_visit) : '—'}</div></div>
             </div>
             ${p.id_proof_number ? `<div class="cca-sum-row-sub">Identity on file: ${escapeHtml(p.id_proof_type || 'ID')} ${escapeHtml(p.id_proof_number)} · ${escapeHtml(p.id_proof_verification_status || 'Pending')}</div>` : ''}
@@ -134,7 +134,7 @@ async function renderCaseSummaryPanel(containerId, patientId) {
     const documentsSection = `
         <div class="section-card">
             <div class="section-title" style="margin-bottom:12px;">Ingested Documents</div>
-            ${summary.documents.length ? summary.documents.map(d => `
+            ${(summary.documents || []).length ? summary.documents.map(d => `
                 <div class="cca-sum-row">
                     <div class="cca-sum-row-main">
                         <div class="cca-sum-row-title">${escapeHtml(d.filename)}</div>
@@ -167,7 +167,7 @@ async function renderCaseSummaryPanel(containerId, patientId) {
     const encountersSection = `
         <div class="section-card">
             <div class="section-title" style="margin-bottom:12px;">Consultation / Encounter History</div>
-            ${summary.encounters.length ? summary.encounters.map(e => `
+            ${(summary.encounters || []).length ? summary.encounters.map(e => `
                 <div class="cca-sum-timeline-item">
                     <div class="cca-sum-timeline-when">${e.started_at ? fmtDateTime(e.started_at) : '—'} · ${escapeHtml(e.specialty || '')}${e.clinician ? ' · ' + escapeHtml(e.clinician) : ''}</div>
                     <div class="cca-sum-timeline-title">${escapeHtml(e.diagnosis || e.chief_complaint || 'No diagnosis recorded')}</div>
@@ -180,7 +180,7 @@ async function renderCaseSummaryPanel(containerId, patientId) {
     const journeySection = `
         <div class="section-card">
             <div class="section-title" style="margin-bottom:12px;">Journey Timeline</div>
-            ${summary.journey.length ? summary.journey.map(ev => `
+            ${(summary.journey || []).length ? summary.journey.map(ev => `
                 <div class="cca-sum-timeline-item">
                     <div class="cca-sum-timeline-when">${ev.timestamp ? fmtDateTime(ev.timestamp) : '—'}${ev.actor ? ' · ' + escapeHtml(ev.actor) : ''}</div>
                     <div class="cca-sum-timeline-title">${escapeHtml(ev.title)}</div>

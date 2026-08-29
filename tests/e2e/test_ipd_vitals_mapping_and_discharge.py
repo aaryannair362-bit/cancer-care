@@ -1,20 +1,23 @@
 """
 Real-browser regression tests for two frontend/ipd.html fixes (see CHANGELOG.md):
 
-1. The nursing-consult "Save" flow used to send every extracted {parameter, value, unit} vital
+1. The nursing-consult "Save" flow used to send every entered {parameter, value, unit} vital
    as a separate POST with ALL structured columns (bp_systolic, heart_rate, etc.) hardcoded to
-   null and everything crammed into a free-text `notes` field -- so voice-recorded vitals never
+   null and everything crammed into a free-text `notes` field -- so recorded vitals never
    populated the columns the abnormal-vitals dashboard alert and the "BP x/y | HR z" summary
    line actually read, and the patient chart literally showed "BP null/null | HR null". Fixed
    by mapVitalsToStructured() parsing common parameter names into the real numeric columns
-   before Save, in one consolidated POST.
+   before Save, in one consolidated POST. (The full mic/Process -> Save round trip this used
+   to be driven through no longer exists -- IPD's voice input was removed per the 2026-08-25
+   CHANGELOG decision; see tests/e2e/test_ipd_nursing_note_manual_entry.py for the current,
+   manual-entry version of this same structured-columns regression coverage.)
 2. There was no discharge workflow anywhere in the UI at all -- PUT /api/patients/{id} could
    set `status`, but no frontend code ever sent it. Fixed by adding a Discharge action to the
    patient detail modal.
 """
 import pytest
 
-from tests.e2e.conftest import mint_tokens, queue_transcription_result, set_tokens_in_browser
+from tests.e2e.conftest import mint_tokens, set_tokens_in_browser
 
 pytestmark = pytest.mark.e2e
 
@@ -77,64 +80,6 @@ def test_map_vitals_to_structured_handles_alternate_names_and_units(js_page, liv
     assert result["bp_systolic"] == 110
     assert result["bp_diastolic"] == 70
     assert result["oxygen_sat"] == 99
-
-
-def test_save_after_process_persists_structured_vitals_not_null_columns(
-    js_page, live_server_url, ipd_setup, monkeypatch
-):
-    """The actual regression: drive the real mic -> Process -> Save UI flow and confirm the
-    Vital row landing in the database has real numeric columns, not the old null/null/null."""
-    import json
-    import app.main as app_main
-    from app.models import Vital
-
-    head_nurse, patient = ipd_setup
-
-    def _fake_call(prompt, system=None, temperature=0.3):
-        return json.dumps({
-            "vitals": [
-                {"parameter": "BP", "value": "132/84", "unit": "mmHg"},
-                {"parameter": "HR", "value": "91", "unit": "bpm"},
-            ],
-            "labs": [],
-            "nursing_note": {"subjective": "Feels dizzy", "objective": "", "assessment": "", "plan": "Monitor"},
-        })
-
-    monkeypatch.setattr(app_main.scribe, "_call_groq_api", _fake_call)
-    queue_transcription_result(monkeypatch, app_main, "BP 132 over 84, heart rate 91, patient feels dizzy")
-
-    tokens = mint_tokens(head_nurse)
-    set_tokens_in_browser(js_page, live_server_url, tokens["access_token"], tokens["refresh_token"])
-    js_page.goto(f"{live_server_url}/ipd.html")
-    js_page.wait_for_timeout(300)
-    js_page.evaluate(f"openNursingConsult({patient.id})")
-    js_page.wait_for_timeout(200)
-
-    js_page.click("#nursing-voice-btn")
-    js_page.wait_for_timeout(100)
-    js_page.click("#nursing-voice-btn", force=True)  # stop -> upload -> transcribe
-    js_page.wait_for_timeout(300)
-
-    js_page.click("#nursing-process-btn")
-    js_page.wait_for_timeout(400)
-
-    js_page.on("dialog", lambda d: d.accept())
-    js_page.click("#nursing-save-btn")
-    js_page.wait_for_timeout(600)
-
-    assert js_page.js_errors == [], f"unexpected JS errors: {js_page.js_errors}"
-
-    saved = (
-        app_main.SessionLocal()
-        .query(Vital)
-        .filter(Vital.patient_id == patient.id)
-        .order_by(Vital.recorded_at.desc())
-        .first()
-    )
-    assert saved is not None, "no Vital row was persisted by Save"
-    assert saved.bp_systolic == 132, "structured bp_systolic column was not populated -- regressed to the null-columns bug"
-    assert saved.bp_diastolic == 84
-    assert saved.heart_rate == 91
 
 
 def test_discharge_button_visible_for_head_nurse_and_discharges_patient(js_page, live_server_url, ipd_setup):

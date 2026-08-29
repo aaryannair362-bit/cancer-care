@@ -226,4 +226,4 @@ def create_external_specialist_token(case_id: int, specialist_email: str, expire
         "type": "external_specialist",
         "exp": expire
     }
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)

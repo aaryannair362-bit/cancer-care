@@ -308,7 +308,7 @@
         async function initScribeRecorder() {
             if (typeof createVoiceRecorder !== 'function') return;
             try {
-                const provider = await Api.get('/transcribe/provider');
+                const provider = await Api.get('/transcription-provider');
                 scribeTranscriptionProvider = provider.provider === 'sarvam' ? 'sarvam' : 'whisper';
             } catch (err) { scribeTranscriptionProvider = 'whisper'; }
             scribeVoiceRecorder = createVoiceRecorder({ apiBase: '/api', getAuthToken: () => Auth.getAccessToken(), provider: scribeTranscriptionProvider });
@@ -352,7 +352,7 @@
             if (transcript.length < 10) { toast('Transcript is too short to draft from', 'error'); return; }
             if (statusEl) statusEl.textContent = 'Generating AI draft...';
             try {
-                const data = await Api.post('/scribe', { transcript });
+                const data = await Api.post(`${CCA_API}/scribe-extract`, { transcript });
                 if (document.getElementById('img-findings') && (data.hpi || data.chiefComplaint)) {
                     const findingsText = [data.chiefComplaint, data.hpi].filter(Boolean).join('\n');
                     if (findingsText) document.getElementById('img-findings').value = findingsText;

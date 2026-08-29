@@ -186,16 +186,7 @@
         <div style="margin-bottom:12px;">
             <p><strong>Ward:</strong> <span id="nursing-consult-ward"></span> | <strong>Bed:</strong> <span id="nursing-consult-bed"></span></p>
         </div>
-        <div style="margin-bottom:16px;">
-            <label style="font-weight:600;display:block;margin-bottom:4px;">📝 Speak or type the nursing narrative</label>
-            <div style="display:flex; gap:8px; align-items:center; margin-bottom:6px;">
-                <button id="nursing-voice-btn" class="voice-btn">🎤</button>
-                <span id="nursing-voice-status" style="font-size:12px; color:#667169;">Click mic to speak</span>
-            </div>
-            <textarea id="nursing-voice-text" rows="6" placeholder="Type or speak the consultation... e.g. 'BP 120/80, HR 72, Hb 12.5, patient is stable...'" style="width:100%;padding:8px;background:#FBFAF7;border:1px solid #E6E7E2;border-radius:6px;color:#1C2621;resize:vertical;"></textarea>
-            <button id="nursing-process-btn" class="btn-primary" style="margin-top:8px;">⚙️ Process</button>
-        </div>
-        <div id="nursing-extracted" style="display:none; margin-top:16px; border-top:1px solid #E6E7E2; padding-top:16px;">
+        <div id="nursing-extracted" style="margin-top:16px;">
             <div>
                 <h3 style="display:flex; justify-content:space-between; align-items:center;">
                     <span>📊 Vitals</span>
@@ -766,99 +757,13 @@ function openNursingConsult(patientId) {
         document.getElementById('nursing-consult-bed').textContent = p.bed;
         document.getElementById('nursing-consult-patient').textContent = `Nursing Notes – ${p.name}`;
     }).catch(err => alert('Could not load patient: ' + err.message));
-    if (typeof nursingVoiceIsRecording !== 'undefined' && nursingVoiceIsRecording) {
-        // Leftover recording from a previous open of this modal (e.g. it was closed
-        // mid-recording) -- stop it (discarding the result) so a fresh open always starts clean.
-        nursingVoiceIsRecording = false;
-        nursingVoiceRecorder.stop().catch(() => {});
-        document.getElementById('nursing-voice-btn').classList.remove('listening');
-    }
-    document.getElementById('nursing-voice-text').value = '';
     document.getElementById('nursing-note-text').value = '';
-    document.getElementById('nursing-extracted').style.display = 'none';
     extractedVitals = [];
     extractedLabs = [];
     renderVitals();
     renderLabs();
-    document.getElementById('nursing-voice-status').textContent = 'Click mic to speak';
     document.getElementById('nursing-consult-modal').style.display = 'flex';
 }
-
-// ---- Nursing Voice ----
-// Toggle button: click starts a MediaRecorder recording, click again stops it, uploads the
-// clip to POST /api/transcribe-audio (Groq Whisper -- see frontend/js/voice-capture.js), and
-// appends the returned transcript to nursing-voice-text with a newline, same as the old
-// per-click SpeechRecognition accumulation behavior.
-const nursingVoiceRecorder = createVoiceRecorder({ apiBase: API_BASE, getAuthToken: () => accessToken });
-let nursingVoiceIsRecording = false;
-document.getElementById('nursing-voice-btn').addEventListener('click', async () => {
-    const btn = document.getElementById('nursing-voice-btn');
-    const status = document.getElementById('nursing-voice-status');
-    if (!nursingVoiceRecorder.isSupported()) {
-        alert('Audio recording is not supported in this browser. Please type manually.');
-        return;
-    }
-    if (nursingVoiceIsRecording) {
-        nursingVoiceIsRecording = false;
-        btn.classList.remove('listening');
-        status.textContent = 'Transcribing...';
-        try {
-            const transcript = (await nursingVoiceRecorder.stop()).trim();
-            if (transcript) {
-                const textarea = document.getElementById('nursing-voice-text');
-                textarea.value = (textarea.value ? textarea.value + '\n' : '') + transcript;
-                status.textContent = 'Transcribed. Click Process.';
-            } else {
-                status.textContent = 'Click mic to speak';
-            }
-        } catch (err) {
-            status.textContent = 'Transcription failed: ' + err.message;
-        }
-        return;
-    }
-    try {
-        await nursingVoiceRecorder.start();
-        nursingVoiceIsRecording = true;
-        btn.classList.add('listening');
-        status.textContent = 'Recording...';
-    } catch (err) {
-        status.textContent = 'Microphone access denied.';
-    }
-});
-
-// ---- Process Nursing Narrative ----
-document.getElementById('nursing-process-btn').addEventListener('click', async () => {
-    const voiceText = document.getElementById('nursing-voice-text').value.trim();
-    if (!voiceText) {
-        alert('Please speak or type some text first.');
-        return;
-    }
-    const btn = document.getElementById('nursing-process-btn');
-    btn.disabled = true;
-    btn.textContent = 'Processing...';
-    try {
-        const res = await apiRequest('/ipd/nurse-consult', {
-            method: 'POST',
-            body: JSON.stringify({ patient_id: consultPatientId, voice_text: voiceText })
-        });
-        if (!res.ok) throw new Error(await res.text());
-        const data = await res.json();
-        extractedVitals = data.vitals || [];
-        extractedLabs = data.labs || [];
-        const note = data.nursing_note || {};
-        document.getElementById('nursing-note-text').value = 
-            `Subjective: ${note.subjective || ''}\nObjective: ${note.objective || ''}\nAssessment: ${note.assessment || ''}\nPlan: ${note.plan || ''}`;
-        renderVitals();
-        renderLabs();
-        document.getElementById('nursing-extracted').style.display = 'block';
-        document.getElementById('nursing-voice-status').textContent = '✅ Processed. Edit if needed, then Save.';
-    } catch (err) {
-        alert('Processing error: ' + err.message);
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '⚙️ Process';
-    }
-});
 
 function renderVitals() {
     const container = document.getElementById('vital-list');
@@ -1013,18 +918,13 @@ document.getElementById('nursing-save-btn').addEventListener('click', async () =
             });
         }
         // Labs have no dedicated model/endpoint in this system; fold reviewed lab results into
-        // the Objective section so they're preserved on the chart rather than silently dropped
-        // now that the Process step (POST /api/ipd/nurse-consult) no longer persists anything
-        // on its own -- Save is the only place this data gets written.
+        // the Objective section so they're preserved on the chart rather than silently dropped.
         const labsToSave = extractedLabs.filter(l => (l.test || '').trim() !== '');
         if (labsToSave.length > 0) {
             const labLines = 'Labs: ' + labsToSave.map(l => `${l.test} ${l.result || ''}`.trim()).join('; ');
             noteText = noteText ? `${noteText}\n${labLines}` : `Objective: \n${labLines}`;
         }
         if (noteText) {
-            // Deliberately do NOT send voice_text here: the backend re-runs its own LLM
-            // extraction whenever voice_text is present, silently discarding whatever the
-            // nurse just reviewed/edited in this textarea. Send the reviewed text itself.
             const sections = parseNursingNoteSections(noteText);
             await apiRequest('/nursing-notes', {
                 method: 'POST',

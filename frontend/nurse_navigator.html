@@ -1600,6 +1600,7 @@
         let currentNurseStep = 1;
 
         let currentPatientId = null;
+        let currentEncounterId = null;
 
         async function loadNursePatientQueue() {
             const grid = document.getElementById('nurse-queue-grid');
@@ -1643,8 +1644,45 @@
             }
         }
 
+        // Every field this resets has a static HTML default (e.g. vitals-temp="37.2") meant
+        // only as a placeholder for the very first patient of a session -- without this reset,
+        // opening patient B's intake right after typing/submitting for patient A left B's form
+        // silently pre-filled with A's numbers (or A's own submitted values), risking a nurse
+        // recording one patient's vitals against another's chart.
+        function resetNurseIntakeForm() {
+            const defaults = {
+                'nurse-concern': 'New oncology assessment', 'nurse-onset': '', 'nurse-pain': '0',
+                'hist-medical': '', 'hist-comorbid': '', 'hist-admissions': '',
+                'hist-family': '', 'hist-social': '', 'hist-living': '',
+                'vitals-temp': '37.0', 'vitals-pulse': '80', 'vitals-rr': '16', 'vitals-spo2': '98',
+                'vitals-bp-sys': '120', 'vitals-bp-dia': '80', 'vitals-weight': '', 'vitals-height': '',
+                'nurse-observations': '',
+            };
+            Object.entries(defaults).forEach(([id, val]) => {
+                const el = document.getElementById(id);
+                if (el) el.value = val;
+            });
+            ['hist-tobacco', 'hist-alcohol', 'vitals-ecog', 'vitals-fallrisk', 'vitals-nutrition',
+             'vitals-consciousness', 'vitals-mobility', 'vitals-distress', 'vitals-support',
+             'handoff-priority', 'handoff-destination'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.selectedIndex = 0;
+            });
+            document.querySelectorAll('#symptom-checkbox-grid input[type="checkbox"]').forEach(cb => cb.checked = false);
+            document.querySelectorAll('#attention-chip-row .chip-toggle').forEach(c => c.classList.remove('selected'));
+            const noneChip = [...document.querySelectorAll('#attention-chip-row .chip-toggle')].find(c => c.textContent.trim() === 'None');
+            if (noneChip) noneChip.classList.add('selected');
+            document.getElementById('chk-medication-reconciled').checked = false;
+            document.getElementById('chk-allergy-reviewed').checked = false;
+            document.getElementById('vitals-bmi').textContent = '—';
+            document.getElementById('vitals-bsa').textContent = '—';
+            updateHandoffChecklist();
+        }
+
         function openNurseIntakeWizard(patient) {
             currentPatientId = patient.id;
+            currentEncounterId = null;
+            resetNurseIntakeForm();
             const name = patient.name, mrn = patient.mrn, age = patient.age, sex = patient.sex, visit = patient.journey_state;
             document.getElementById('intake-hdr-name').textContent = `${name} · ${mrn}`;
             document.getElementById('intake-hdr-age-sex').textContent = `${age} years · ${sex}`;
@@ -1836,15 +1874,86 @@
             toast ? toast('Draft saved', 'success') : alert('Draft saved.');
         }
 
-        function completeHandoff() {
+async function completeHandoff() {
+            if (!currentPatientId) { toast('Open a patient first', 'error'); return; }
+            const btn = document.getElementById('complete-handoff-btn');
             const dest = document.getElementById('handoff-destination').value;
             const priority = document.getElementById('handoff-priority').value;
-            document.getElementById('complete-handoff-line').textContent = `Handoff sent to ${dest}`;
-            document.getElementById('complete-priority').textContent = priority;
-            document.getElementById('complete-time').textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const attentionItems = [...document.querySelectorAll('#attention-chip-row .chip-toggle.selected')]
+                .map(c => c.textContent.trim()).filter(t => t !== 'None');
+            const symptoms = [...document.querySelectorAll('#symptom-checkbox-grid input[type="checkbox"]:checked')]
+                .map(cb => cb.closest('label').textContent.trim());
 
-            document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
-            document.getElementById('view-nurse-complete').classList.add('active');
+            // Everything this model has a real column for. This is what actually reaches
+            // POST /encounters/{id}/intake -- see backend/app/routers/cca.py.
+            const intakePayload = {
+                patient_id: currentPatientId,
+                height_cm: parseFloat(document.getElementById('vitals-height').value) || undefined,
+                weight_kg: parseFloat(document.getElementById('vitals-weight').value) || undefined,
+                bp_systolic: parseInt(document.getElementById('vitals-bp-sys').value, 10) || undefined,
+                bp_diastolic: parseInt(document.getElementById('vitals-bp-dia').value, 10) || undefined,
+                heart_rate: parseInt(document.getElementById('vitals-pulse').value, 10) || undefined,
+                temperature_c: parseFloat(document.getElementById('vitals-temp').value) || undefined,
+                oxygen_sat: parseInt(document.getElementById('vitals-spo2').value, 10) || undefined,
+                respiratory_rate: parseInt(document.getElementById('vitals-rr').value, 10) || undefined,
+                ecog: parseInt(document.getElementById('vitals-ecog').value, 10),
+                pain_score: parseInt(document.getElementById('nurse-pain').value, 10) || 0,
+                fall_risk: document.getElementById('vitals-fallrisk').value,
+                // Everything else the wizard captures that has no dedicated column -- preserved
+                // structured (CCAIntakeAssessment.vitals_json) rather than dropped.
+                vitals_json: {
+                    chief_concern: document.getElementById('nurse-concern').value,
+                    symptom_onset: document.getElementById('nurse-onset').value,
+                    reported_symptoms: symptoms,
+                    nutrition_concern: document.getElementById('vitals-nutrition').value,
+                    consciousness: document.getElementById('vitals-consciousness').value,
+                    mobility: document.getElementById('vitals-mobility').value,
+                    distress: document.getElementById('vitals-distress').value,
+                    support_person: document.getElementById('vitals-support').value,
+                    medical_history: document.getElementById('hist-medical').value,
+                    comorbidities: document.getElementById('hist-comorbid').value,
+                    previous_admissions: document.getElementById('hist-admissions').value,
+                    family_history: document.getElementById('hist-family').value,
+                    social_history: document.getElementById('hist-social').value,
+                    living_situation: document.getElementById('hist-living').value,
+                    tobacco: document.getElementById('hist-tobacco').value,
+                    alcohol: document.getElementById('hist-alcohol').value,
+                    medication_reconciled: document.getElementById('chk-medication-reconciled').checked,
+                    allergy_reviewed: document.getElementById('chk-allergy-reviewed').checked,
+                    attention_items: attentionItems,
+                    handoff_priority: priority,
+                    handoff_destination: dest,
+                },
+                handoff_note:
+                    `Nurse intake for handoff to ${dest} (${priority}). ` +
+                    `Chief concern: ${document.getElementById('nurse-concern').value}. ` +
+                    (symptoms.length ? `Symptoms: ${symptoms.join(', ')}. ` : '') +
+                    (attentionItems.length ? `Attention required: ${attentionItems.join(', ')}. ` : 'No attention items flagged. ') +
+                    `Observations: ${document.getElementById('nurse-observations').value}`,
+            };
+
+            btn.disabled = true;
+            btn.textContent = 'Sending…';
+            try {
+                if (!currentEncounterId) {
+                    const enc = await Api.post(`/cca/patients/${currentPatientId}/encounters`, {});
+                    currentEncounterId = enc.encounter.id;
+                }
+                await Api.post(`/cca/encounters/${currentEncounterId}/intake`, intakePayload);
+
+                document.getElementById('complete-handoff-line').textContent = `Handoff sent to ${dest}`;
+                document.getElementById('complete-priority').textContent = priority;
+                document.getElementById('complete-time').textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+                document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
+                document.getElementById('view-nurse-complete').classList.add('active');
+                toast('Intake recorded and handed off', 'success');
+            } catch (err) {
+                toast(apiErrorMessage(err), 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = `Complete &amp; Send to <span id="complete-btn-dest">${escapeHtml(dest)}</span>`;
+            }
         }
 
         document.addEventListener('DOMContentLoaded', () => { loadNursePatientQueue(); });

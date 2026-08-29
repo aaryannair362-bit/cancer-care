@@ -17,7 +17,7 @@ from ..auth import (
     get_current_user, is_admin, is_doctor, is_cca_oncologist, is_cca_front_desk,
     is_cca_nurse_navigator, is_cca_medical_oncologist, is_cca_surgical_oncologist,
     is_cca_radiation_oncologist, is_cca_patient_liaison, is_cca_infusion_nurse,
-    is_cca_radiologist, log_audit,
+    is_cca_radiologist, is_cca_financial_counsellor, can_sign_treatment_plan, log_audit,
 )
 from ..config import settings
 from ..ocr_service import extract_document
@@ -1387,9 +1387,15 @@ async def complete_nurse_intake(
         heart_rate=_coerce_int(body, "heart_rate", 74),
         temperature_c=_coerce_float(body, "temperature_c", 36.8),
         oxygen_sat=_coerce_int(body, "oxygen_sat", 99),
+        respiratory_rate=_coerce_int(body, "respiratory_rate", 16),
         ecog=_coerce_int(body, "ecog", 1),
         karnofsky=_coerce_int(body, "karnofsky", 80),
         pain_score=_coerce_int(body, "pain_score", 0),
+        fall_risk=body.get("fall_risk") or "Low",
+        # Free-form structured capture for the assessment fields this model has no dedicated
+        # column for (functional/psychosocial screens, reported symptoms, history) -- present
+        # on the model precisely for this (CCAIntakeAssessment.vitals_json docstring).
+        vitals_json=body.get("vitals_json"),
         handoff_note=body.get("handoff_note", "Intake complete."),
         recorded_by=actor,
         status="COMPLETED"
@@ -1519,6 +1525,30 @@ async def finalise_encounter_note(
             "note_status": encounter.note_status
         }
     }
+
+
+@router.post("/scribe-extract")
+async def scribe_extract(
+    request: Request, current_user: dict = Depends(get_current_user)
+):
+    """Pure dictation -> structured extraction, no persistence: for pages that need scribe.py's
+    extraction shape (chiefComplaint/hpi/primaryDiagnosis/medications/advice/labTests) without
+    writing to any encounter/consultation table, because their own Save/Finalize step handles
+    persistence separately against a different model (e.g. the Radiologist's imaging report
+    AI-draft, which writes a CCAResult, not a Consultation or CCAEncounter). Fixes
+    radiologist.html previously calling the general-HMS, Doctor-only POST /api/scribe -- a real
+    CCARadiologist got a 403 every time, and even a fixed role check there would have persisted
+    a Consultation row against the wrong (general HMS Patient, not CCAPatient) data model."""
+    if not (is_doctor(current_user) or is_cca_oncologist(current_user) or is_cca_radiologist(current_user)):
+        raise HTTPException(403, "Not authorized for AI-assisted dictation extraction")
+    body = await request.json()
+    transcript = body.get("transcript")
+    if not isinstance(transcript, str) or len(transcript.strip()) < 10:
+        raise HTTPException(400, "Transcript too short")
+
+    result = await run_in_threadpool(scribe.scribe_transcript, transcript)
+    result["medications"] = drug_matcher.correct_medication_names(result.get("medications", []) or [])
+    return result
 
 
 # ---------------------------------------------------------

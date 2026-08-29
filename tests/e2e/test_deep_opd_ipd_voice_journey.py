@@ -53,7 +53,16 @@ from tests._voice_helpers import (
     set_tokens_in_browser,
 )
 
-pytestmark = pytest.mark.e2e
+pytestmark = [
+    pytest.mark.e2e,
+    # The IPD leg of this journey (nurse-voice vitals + SOAP note via POST /api/ipd/nurse-consult
+    # -> review -> Save) no longer has a backend to drive: see CHANGELOG.md's 2026-08-25 entry --
+    # IPD's voice endpoints (voice-to-vitals, nurse-consult) were removed and confirmed not
+    # wanted back, leaving IPD as plain-form only. This single continuous test can't be split
+    # into "just the still-valid OPD leg" without rewriting it, so it's skipped rather than left
+    # failing on a leg of the story the product no longer has.
+    pytest.mark.skip(reason="IPD nurse-consult voice flow removed per 2026-08-25 product decision"),
+]
 
 OUTPUT_ROOT = Path(__file__).resolve().parent.parent.parent / "final test output" / "single_deep_case_john_doe"
 
