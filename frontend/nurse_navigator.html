@@ -1221,40 +1221,10 @@
                                 <button class="btn-outline" onclick="document.getElementById('nurse-doc-upload-input').click()">⬆ Upload / Capture</button>
                             </div>
                             <div id="nurse-doc-list-container">
-                                <div class="doc-list-item" onclick="selectDoc(this)">📄 Referral letter</div>
-                                <div class="doc-list-item" onclick="selectDoc(this)">📄 Pathology report</div>
-                                <div class="doc-list-item selected" onclick="selectDoc(this)">📄 Previous CBC</div>
-                                <div class="doc-list-item" onclick="selectDoc(this)">📄 Radiology report</div>
-                                <div class="doc-list-item" onclick="selectDoc(this)">📄 External prescription</div>
-                                <div class="doc-list-item" onclick="selectDoc(this)">📄 Previous treatment summary</div>
+                                <p style="font-size:12.5px; color:var(--ink-500);">Loading documents…</p>
                             </div>
                         </div>
-                        <div id="nurse-doc-detail-panel">
-                            <div class="readonly-card-header">Previous CBC</div>
-                            <div class="readonly-card-source">Extracted information must be confirmed against the source document.</div>
-                            <div class="lab-values-grid">
-                                <div class="lab-value-card">
-                                    <div class="lab-value-label">Hemoglobin</div>
-                                    <div class="lab-value-num">10.2 g/dL</div>
-                                    <span class="needs-review-pill">Needs clinician review</span>
-                                </div>
-                                <div class="lab-value-card">
-                                    <div class="lab-value-label">WBC</div>
-                                    <div class="lab-value-num">3.1 ×10⁹/L</div>
-                                    <span class="needs-review-pill">Needs clinician review</span>
-                                </div>
-                                <div class="lab-value-card" style="margin-top:20px;">
-                                    <div class="lab-value-label">ANC</div>
-                                    <div class="lab-value-num">1.2 ×10⁹/L</div>
-                                    <span class="needs-review-pill">Needs clinician review</span>
-                                </div>
-                                <div class="lab-value-card" style="margin-top:20px;">
-                                    <div class="lab-value-label">Platelets</div>
-                                    <div class="lab-value-num">168 ×10⁹/L</div>
-                                    <span class="needs-review-pill">Needs clinician review</span>
-                                </div>
-                            </div>
-                        </div>
+                        <div id="nurse-doc-detail-panel"></div>
                     </div>
                     <div style="display:flex; justify-content:space-between; gap:10px; margin-top:24px;">
                         <button class="btn-outline" onclick="goToNurseStep(3)">← Previous</button>
@@ -1735,6 +1705,7 @@
                 });
             });
 
+            if (stepNum === 4) loadNurseDocuments();
             if (stepNum === 6) updateReviewSummary();
         }
 
@@ -1805,31 +1776,66 @@
             input.focus();
         }
 
-        function selectDoc(el) {
-            document.querySelectorAll('.doc-list-item').forEach(d => d.classList.remove('selected'));
-            el.classList.add('selected');
-        }
+        // Documents & Available Results (nurse intake step 4): previously a fully static
+        // mockup -- a hardcoded fake document list and hardcoded fake CBC values that never
+        // reflected this patient's real uploaded documents, and "Upload / Capture" only added
+        // a local list item without ever calling the upload API. A nurse could not actually
+        // see what Front Desk had already uploaded, and anything they themselves "uploaded"
+        // here was silently lost the moment they left the page -- never reaching Patient
+        // History for the next clinician. Now backed by the same GET/POST /cca/documents
+        // endpoints frontdesk.html's registration wizard already uses successfully.
+        let nurseDocuments = [];
 
-        function handleNurseDocumentUpload(inputEl) {
-            const file = inputEl.files[0];
-            if (!file) return;
+        async function loadNurseDocuments() {
             const container = document.getElementById('nurse-doc-list-container');
-            const item = document.createElement('div');
-            item.className = 'doc-list-item';
-            item.textContent = `📄 ${file.name}`;
-            item.onclick = () => selectUploadedDoc(item, file);
-            container.appendChild(item);
-            inputEl.value = '';
-            selectUploadedDoc(item, file);
+            const detail = document.getElementById('nurse-doc-detail-panel');
+            if (!currentPatientId) { container.innerHTML = '<p style="font-size:12.5px; color:var(--ink-500);">Select a patient first.</p>'; detail.innerHTML = ''; return; }
+            try {
+                const data = await Api.get(`/cca/documents?patient_id=${currentPatientId}`);
+                nurseDocuments = data.documents || [];
+                container.innerHTML = nurseDocuments.length
+                    ? nurseDocuments.map((d, i) => `<div class="doc-list-item" onclick="selectNurseDoc(${i})">📄 ${escapeHtml(d.filename)}</div>`).join('')
+                    : '<p style="font-size:12.5px; color:var(--ink-500);">No documents uploaded yet for this patient.</p>';
+                if (nurseDocuments.length) selectNurseDoc(0);
+                else detail.innerHTML = '';
+            } catch (err) {
+                container.innerHTML = `<p style="font-size:12.5px; color:var(--rose-badge-text);">${escapeHtml(apiErrorMessage(err))}</p>`;
+            }
         }
 
-        function selectUploadedDoc(el, file) {
-            document.querySelectorAll('.doc-list-item').forEach(d => d.classList.remove('selected'));
-            el.classList.add('selected');
+        function selectNurseDoc(index) {
+            document.querySelectorAll('#nurse-doc-list-container .doc-list-item').forEach(el => el.classList.remove('selected'));
+            const items = document.querySelectorAll('#nurse-doc-list-container .doc-list-item');
+            if (items[index]) items[index].classList.add('selected');
+            const d = nurseDocuments[index];
+            if (!d) return;
+            const statusNote = d.status === 'OCR_FAILED'
+                ? '⚠ OCR could not read this file — re-scan or upload a clearer, text-based copy.'
+                : (d.fact_count ? `${d.fact_count} finding(s) extracted, ${d.verified_count} clinician-verified — confirm against the source document.` : 'No findings extracted from this document yet.');
             document.getElementById('nurse-doc-detail-panel').innerHTML = `
-                <div class="readonly-card-header">${escapeHtml(file.name)}</div>
-                <div class="readonly-card-source">Uploaded just now (${(file.size / 1024).toFixed(0)} KB) — awaiting OCR extraction and clinician review.</div>
+                <div class="readonly-card-header">${escapeHtml(d.filename)}</div>
+                <div class="readonly-card-source">${escapeHtml(d.classification === 'UNCLASSIFIED' || !d.classification ? 'Not automatically classified' : d.classification)} · ${escapeHtml(statusNote)}</div>
             `;
+        }
+
+        async function handleNurseDocumentUpload(inputEl) {
+            const file = inputEl.files[0];
+            inputEl.value = '';
+            if (!file) return;
+            if (!currentPatientId) { toast('Select a patient first', 'error'); return; }
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                const result = await Api.upload(`/cca/documents?patient_id=${currentPatientId}`, formData);
+                if (result?.document?.status === 'OCR_FAILED') {
+                    toast(`${file.name} was saved, but OCR could not read it — try a clearer scan or a text-based PDF`, 'error');
+                } else {
+                    toast(`${file.name} uploaded`, 'success');
+                }
+                loadNurseDocuments();
+            } catch (err) {
+                toast(`Could not upload ${file.name}: ${apiErrorMessage(err)}`, 'error');
+            }
         }
 
         function toggleChip(el) {

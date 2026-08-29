@@ -39,7 +39,7 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
    - Listen carefully to positive reports of symptoms
    - Do NOT hallucinate false-negatives unless the patient explicitly denies that symptom
 5. Handle spoken names, medicines, or measurements gracefully
-6. CLINICAL FINDINGS IN HPI: Any clinical findings (symptoms, examination findings, vitals, duration/progression of illness) mentioned MUST be explicitly included in the "hpi" field.
+6. HPI VS PHYSICAL EXAMINATION -- KEEP THESE SEPARATE: "hpi" is the patient's history as reported -- symptoms, duration/progression of illness, aggravating/relieving factors, vitals the patient reports or that are read out as history. "physicalExam" is EXCLUSIVELY the clinician's own objective examination findings from actually examining the patient right now (e.g. "throat is red and inflamed", "chest clear on auscultation", "no palpable lymphadenopathy", "abdomen soft, non-tender"). If the doctor states an examination finding, it belongs in "physicalExam", NEVER duplicated into or substituted for "hpi". If no examination finding was spoken, "physicalExam" is "".
 7. NEVER include medication names, doses, frequencies, or other treatment/prescription details anywhere in "chiefComplaint" or "hpi" -- those belong EXCLUSIVELY in the "medications" array, even if the doctor mentions them in the same breath as a symptom (e.g. "for the fever I gave paracetamol" -> "fever" goes in hpi, "paracetamol" goes in medications, never both).
 8. "medications" is EXCLUSIVELY for a specific, named, purchasable drug/product (a real medicine name -- "Paracetamol", "Betadine Gargle", "Crocin"), never a generic home-care or lifestyle instruction with no product name attached. "Gargle with warm salt water", "drink plenty of fluids", "rest for 2 days", "apply an ice pack", "steam inhalation" are ADVICE, not medications, even though the doctor phrases them as an instruction to do something ("gargle thrice a day with salt water" -> advice; "gargle thrice a day with Betadine" -> medications, because Betadine is a named product). If it has no product name, it is never a medication."""
 
@@ -223,6 +223,7 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
         result = {
             "chiefComplaint": "",
             "hpi": "",
+            "physicalExam": "",
             "primaryDiagnosis": "",
             "differentialDiagnosis": "",
             "medications": [],
@@ -245,6 +246,9 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
             elif "history of present illness" in lower or "hpi" in lower:
                 current_section = "hpi"
                 continue
+            elif "physical exam" in lower or "physicalexam" in lower:
+                current_section = "physicalExam"
+                continue
             elif "primary diagnosis" in lower or "primarydiagnosis" in lower:
                 current_section = "primaryDiagnosis"
                 continue
@@ -261,7 +265,7 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
                 current_section = "labTests"
                 continue
             # If we have a current section and this line looks like content (not a section header), append
-            if current_section and not any(kw in lower for kw in ["chief complaint", "history", "primary diagnosis", "differential", "medications", "advice", "lab tests"]):
+            if current_section and not any(kw in lower for kw in ["chief complaint", "history", "physical exam", "primary diagnosis", "differential", "medications", "advice", "lab tests"]):
                 buffer.append(line)
         # Join buffer to a single string for each section
         if buffer:
@@ -306,7 +310,8 @@ Transcript of conversation:
 Return a JSON object with the following structure:
 {{
     "chiefComplaint": "Extracted patient complaints -- symptoms only, never medication names/doses",
-    "hpi": "History of present illness -- symptoms and clinical findings only. NEVER mention medication names, doses, or treatments here -- those go exclusively in the medications array below",
+    "hpi": "History of present illness -- the patient's reported symptoms, duration, and progression only. NEVER mention medication names, doses, or treatments here -- those go exclusively in the medications array below. NEVER include the clinician's own examination findings here -- those go exclusively in physicalExam below",
+    "physicalExam": "The clinician's own objective examination findings from examining the patient (e.g. throat appearance, chest auscultation, lymph nodes, abdomen). Blank if none were spoken",
     "primaryDiagnosis": "Primary provisional clinical diagnosis",
     "differentialDiagnosis": "comma separated differential diagnoses",
     "medications": [
@@ -317,14 +322,14 @@ Return a JSON object with the following structure:
 }}"""
         result = self._generate_json(prompt, temperature=0.3)
         default = {
-            "chiefComplaint": "", "hpi": "", "primaryDiagnosis": "",
+            "chiefComplaint": "", "hpi": "", "physicalExam": "", "primaryDiagnosis": "",
             "differentialDiagnosis": "", "medications": [], "advice": "", "labTests": []
         }
         for key in default:
             if key not in result or result[key] is None:
                 result[key] = default[key]
         result = self._coerce_string_fields(
-            result, ("chiefComplaint", "hpi", "primaryDiagnosis", "differentialDiagnosis", "advice")
+            result, ("chiefComplaint", "hpi", "physicalExam", "primaryDiagnosis", "differentialDiagnosis", "advice")
         )
         # Corrects each medication's drugName against the canonical medicines dataset before
         # the draft ever reaches the doctor -- see drug_matcher.py for why (ASR/LLM-introduced
@@ -357,14 +362,14 @@ Prescription:
 Keep drug names in English. Translate descriptions, instructions, and test names. Return pure JSON."""
         result = self._generate_json(prompt, temperature=0.3)
         default = {
-            "chiefComplaint": "", "hpi": "", "primaryDiagnosis": "",
+            "chiefComplaint": "", "hpi": "", "physicalExam": "", "primaryDiagnosis": "",
             "differentialDiagnosis": "", "medications": [], "advice": "", "labTests": []
         }
         for key in default:
             if key not in result:
                 result[key] = default[key]
         return self._coerce_string_fields(
-            result, ("chiefComplaint", "hpi", "primaryDiagnosis", "differentialDiagnosis", "advice")
+            result, ("chiefComplaint", "hpi", "physicalExam", "primaryDiagnosis", "differentialDiagnosis", "advice")
         )
 
     def generate_discharge_summary(self, context: dict) -> dict:

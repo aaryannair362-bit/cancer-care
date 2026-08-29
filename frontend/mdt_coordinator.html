@@ -246,14 +246,16 @@
             if (patientId) currentPatientId = patientId;
             const detail = document.getElementById(`mdt-case-detail-${caseId}`);
             try {
-                const [readiness, participants, decisionData, opinionsData] = await Promise.all([
+                const [readiness, participants, decisionData, opinionsData, specialistsData] = await Promise.all([
                     Api.get(`${CCA_API}/mdt/cases/${caseId}/readiness`),
                     Api.get(`${CCA_API}/mdt/cases/${caseId}/participants`),
                     Api.get(`${CCA_API}/mdt/cases/${caseId}/decision`),
                     Api.get(`${CCA_API}/mdt/cases/${caseId}/opinions`),
+                    Api.get(`${CCA_API}/mdt/external-specialists`),
                 ]);
                 const decision = decisionData.decision;
                 const opinions = opinionsData.opinions || [];
+                const specialists = specialistsData.specialists || [];
                 detail.innerHTML = `
                     <div class="section-card" style="margin-top:8px;">
                         <div class="section-title" style="font-size:14px; margin-bottom:8px;">Case Readiness</div>
@@ -277,12 +279,21 @@
                         <button class="btn-outline" onclick="submitAddParticipant(${caseId})">+ Add Participant</button>
                         <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
                         <div class="section-title" style="font-size:14px; margin-bottom:8px;">Assign External Specialist (Secondary Opinion)</div>
-                        <div class="section-sub" style="margin-bottom:10px;">Shares only this case with an outside specialist's email, time-limited, for a second opinion. Never exposes the full patient population — the hospital MDT team retains authorship of the recommendation.</div>
+                        <div class="section-sub" style="margin-bottom:10px;">Shares only this case with an outside specialist's registered account, time-limited, for a second opinion. Never exposes the full patient population — the hospital MDT team retains authorship of the recommendation.</div>
+                        ${specialists.length ? `
                         <div class="form-grid-2">
-                            <div class="form-group" style="margin-bottom:8px;"><input type="text" id="mdtc-extname-${caseId}" class="form-input" placeholder="Specialist name" /></div>
-                            <div class="form-group" style="margin-bottom:8px;"><input type="email" id="mdtc-extemail-${caseId}" class="form-input" placeholder="specialist@example.com" /></div>
+                            <div class="form-group" style="margin-bottom:8px;"><input type="text" id="mdtc-extname-${caseId}" class="form-input" placeholder="Specialist name (display label)" /></div>
+                            <div class="form-group" style="margin-bottom:8px;">
+                                <select id="mdtc-extemail-${caseId}" class="form-select">
+                                    <option value="">Select a registered External MDT Specialist…</option>
+                                    ${specialists.map(s => `<option value="${escapeHtml(s.email)}">${escapeHtml(s.email)}${s.status !== 'Active' ? ` (${escapeHtml(s.status)})` : ''}</option>`).join('')}
+                                </select>
+                            </div>
                         </div>
                         <button class="btn-outline" onclick="submitGrantExternalAccess(${caseId})">🔗 Grant Access</button>
+                        ` : `
+                        <p style="font-size:12.5px; color:var(--ink-500);">No External MDT Specialist accounts are registered in this organization yet — ask an Admin to create one (Users &amp; Roles) before access can be granted.</p>
+                        `}
                         <div id="mdtc-ext-status-${caseId}" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
                         <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
                         <div class="section-title" style="font-size:14px; margin-bottom:8px;">Recommendation &amp; Sign-off</div>

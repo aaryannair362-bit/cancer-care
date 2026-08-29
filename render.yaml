@@ -19,7 +19,18 @@ services:
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
-    plan: starter
+    # `starter` (~512MB RAM) OOMs the moment a real (image-based/scanned) document hits
+    # actual docTR inference -- OCR_BENCHMARK.md, which is what justified choosing docTR as
+    # this app's OCR engine, measured it at ~2.1GB RSS during inference and explicitly states
+    # its target is an "8GB CPU deployment". `starter` was never big enough for the engine
+    # this app actually ships; confirmed in production as every document upload silently
+    # failing OCR (or the request/process dying) on anything but a synthetic, embedded-text
+    # PDF. `pro plus` is Render's tier matching that 8GB target as of this writing -- verify
+    # the current plan-to-RAM mapping in the Render dashboard/pricing page before deploying,
+    # since Render's tier names/specs can change, and note that changing this file alone does
+    # not move an already-running service to the new plan -- apply it via Sync, or change the
+    # plan directly on the existing service in the Render dashboard.
+    plan: pro plus
     healthCheckPath: /api/health
     envVars:
       - key: DATABASE_URL

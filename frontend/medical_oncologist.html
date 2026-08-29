@@ -760,6 +760,7 @@
                 const note = data.note_content || {};
                 document.getElementById('consult-cc').value = note.chiefComplaint || '';
                 document.getElementById('consult-hpi').value = note.hpi || '';
+                document.getElementById('consult-exam').value = note.physicalExam || '';
                 document.getElementById('consult-diagnosis').value = note.primaryDiagnosis || '';
                 document.getElementById('consult-ddx').value = note.differentialDiagnosis || '';
                 document.getElementById('consult-advice').value = note.advice || '';
@@ -1209,11 +1210,22 @@
             } catch (err) { /* fall through to the create-order state */ }
 
             if (!order) {
+                const nextCycle = (plan.completed_sessions || 0) + 1;
+                // A just-executed order disappears from the query above (status EXECUTED is
+                // filtered out) with nothing else shown -- verified live this reads as the
+                // clearance decision having done nothing, or access having been lost, rather
+                // than the workflow correctly moving on to the next cycle. This confirms the
+                // prior cycle actually completed before prompting for the next order.
+                const progressNote = (plan.completed_sessions || 0) > 0 ? `
+                    <div class="section-sub" style="margin-bottom:10px; color:var(--ink-700); font-weight:600;">
+                        ✓ ${plan.completed_sessions} of ${plan.planned_sessions || '—'} planned sessions completed so far — the last cycle's clearance decision was recorded successfully.
+                    </div>` : '';
                 return `
                     <div class="section-card">
                         <div class="section-title">Treatment Order</div>
-                        <div class="section-sub" style="margin-bottom:12px;">Writes an executable order against the next planned session of this signed Treatment Plan. Must be signed before Day-Care can record a clearance decision.</div>
-                        <button class="btn-navy" onclick="submitCreateTreatmentOrder(${plan.id})">Create Treatment Order</button>
+                        ${progressNote}
+                        <div class="section-sub" style="margin-bottom:12px;">Writes an executable order against session #${nextCycle} of this signed Treatment Plan. Must be signed before Day-Care can record a clearance decision.</div>
+                        <button class="btn-navy" onclick="submitCreateTreatmentOrder(${plan.id})">Create Treatment Order — Cycle ${nextCycle}</button>
                         <div id="to-create-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
                     </div>
                 `;
@@ -1298,6 +1310,22 @@
                 currentTreatmentPlanData = plan;
                 currentTreatmentPlanId = plan ? plan.id : null;
 
+                const cc = data.cancer_context || {};
+                const cancerContextSection = `
+                    <div class="section-card">
+                        <div class="section-title">Cancer Context</div>
+                        <div class="grid-3" style="margin-top:10px;">
+                            <div><div class="onc-col-label">Site</div><div class="onc-col-value" style="font-size:13px;">${escapeHtml(cc.site || '[NOT_RECORDED]')}</div></div>
+                            <div><div class="onc-col-label">Histology</div><div class="onc-col-value" style="font-size:13px;">${escapeHtml(cc.histology || '[NOT_RECORDED]')}</div></div>
+                            <div><div class="onc-col-label">Grade</div><div class="onc-col-value" style="font-size:13px;">${escapeHtml(cc.grade || '[NOT_RECORDED]')}</div></div>
+                        </div>
+                        <div class="section-sub" style="margin-top:10px;">
+                            Confirmed stage: ${cc.confirmed_stage ? escapeHtml(cc.confirmed_stage) + (cc.stage_group ? ' (' + escapeHtml(cc.stage_group) + ')' : '') : 'Not yet confirmed'}
+                            ${(cc.biomarkers || []).length ? ' · Biomarkers: ' + cc.biomarkers.map(escapeHtml).join(', ') : ''}
+                        </div>
+                    </div>
+                `;
+
                 const others = plans.filter(p => !plan || p.id !== plan.id);
                 const historySection = `
                     <div class="section-card">
@@ -1314,6 +1342,7 @@
 
                 if (!plan) {
                     container.innerHTML = `
+                        ${cancerContextSection}
                         <div class="section-card">
                             <div class="section-title">Create Draft Treatment Plan</div>
                             <div class="section-sub" style="margin-bottom:12px;">Starts as DRAFT — has no clinical authority until explicitly signed below.</div>
@@ -1337,6 +1366,7 @@
                 const canSign = ['DRAFT', 'PROPOSED'].includes(plan.status);
                 const orderSection = plan.status === 'ACTIVE' ? await renderTreatmentOrderCard(plan) : '';
                 container.innerHTML = `
+                    ${cancerContextSection}
                     <div class="section-card">
                         <div class="section-head">
                             <div><div class="section-title">${escapeHtml(plan.modality)} (v${plan.version_no})</div><div class="section-sub">${escapeHtml(plan.protocol_name || 'Protocol not yet recorded')} · Intent: ${escapeHtml(plan.intent || '—')}</div></div>

@@ -323,7 +323,7 @@ def test_cervical_cancer_full_pipeline(js_page, live_server_url, cervical_org_us
     js_page.evaluate(f"openMdtCase({case_id}, {patient_id})")
     js_page.wait_for_timeout(500)
     js_page.fill(f"#mdtc-extname-{case_id}", "Dr. Gynae-oncology Second Opinion")
-    js_page.fill(f"#mdtc-extemail-{case_id}", users["external"].email)
+    js_page.select_option(f"#mdtc-extemail-{case_id}", users["external"].email)
     js_page.click(f'button[onclick="submitGrantExternalAccess({case_id})"]')
     js_page.wait_for_timeout(700)
     assert js_page.js_errors == [], f"coordinator MDT errors: {js_page.js_errors}"

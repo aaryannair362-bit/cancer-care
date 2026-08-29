@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..auth import (
@@ -25,6 +26,7 @@ from ..auth import (
     is_cca_external_mdt_specialist, is_cca_financial_counsellor, is_cca_patient_liaison,
     is_cca_front_desk,
 )
+from ..models import User
 from ..models_cca import (
     CCAPatient, MDTCase, MDTDecision, MDTParticipant, CCAExternalAccess, CCAExternalOpinion,
     CCAFinancialCase, CCACoordinationCase, CCAIntakeAssessment, CCAEncounter, CCAOrder,
@@ -272,6 +274,19 @@ def _live_access_status(a: CCAExternalAccess) -> str:
     return a.access_status
 
 
+@router.get("/mdt/external-specialists")
+def list_external_specialists(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Registered External MDT Specialist accounts in this org, for the Coordinator's grant-access
+    picker -- narrowly scoped (email/status only, no other org user data) rather than reusing
+    the general admin-only GET /api/auth/users, which a Coordinator isn't authorized to call."""
+    _require_mdt_coordinator(current_user)
+    users = db.query(User).filter(
+        User.organization_id == _org_id(current_user),
+        User.role == "CCAExternalMDTSpecialist",
+    ).all()
+    return {"specialists": [{"id": u.id, "email": u.email, "status": u.status} for u in users]}
+
+
 @router.post("/mdt/cases/{case_id}/external-access", status_code=201)
 async def grant_external_access(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     _require_mdt_coordinator(current_user)
@@ -280,6 +295,23 @@ async def grant_external_access(case_id: int, request: Request, db: Session = De
     name, email = body.get("specialist_name"), body.get("specialist_email")
     if not name or not email:
         raise HTTPException(422, "specialist_name and specialist_email are required")
+    # Grants used to be created for whatever email the coordinator typed, with no check that
+    # it belonged to anyone -- the call always returned success, so a coordinator believed the
+    # case had been pushed while the specialist's assigned_cases() (which matches on this same
+    # email) saw nothing and nobody was ever told why. Case-insensitive because assigned_cases
+    # matches on the specialist's own logged-in email verbatim, and a typo'd case would fail
+    # that match the same silent way.
+    specialist_user = db.query(User).filter(
+        func.lower(User.email) == email.strip().lower(),
+        User.organization_id == _org_id(current_user),
+        User.role == "CCAExternalMDTSpecialist",
+    ).first()
+    if not specialist_user:
+        raise HTTPException(
+            422,
+            f"No registered External MDT Specialist account found for {email} in this "
+            "organization -- ask an admin to create that account first, then grant access."
+        )
     expires_at = datetime.fromisoformat(body["expires_at"]) if body.get("expires_at") else datetime.utcnow() + timedelta(days=14)
     access = CCAExternalAccess(
         case_id=case.id, specialist_name=name, specialist_email=email, access_status="Active",
@@ -324,7 +356,7 @@ async def update_external_access(access_id: int, request: Request, db: Session =
 
 def _external_access_for(db: Session, case_id: int, email: str) -> Optional[CCAExternalAccess]:
     access = db.query(CCAExternalAccess).filter(
-        CCAExternalAccess.case_id == case_id, CCAExternalAccess.specialist_email == email
+        CCAExternalAccess.case_id == case_id, func.lower(CCAExternalAccess.specialist_email) == email.strip().lower()
     ).order_by(CCAExternalAccess.granted_at.desc()).first()
     if access and _live_access_status(access) == "Active":
         return access
@@ -338,8 +370,8 @@ def assigned_cases(db: Session = Depends(get_cca_db), current_user: dict = Depen
     hospital patient population')."""
     if not is_cca_external_mdt_specialist(current_user):
         raise HTTPException(403, "Only an External MDT Specialist has an assigned-cases view")
-    email = current_user.get("email")
-    grants = db.query(CCAExternalAccess).filter(CCAExternalAccess.specialist_email == email).all()
+    email = current_user.get("email") or ""
+    grants = db.query(CCAExternalAccess).filter(func.lower(CCAExternalAccess.specialist_email) == email.strip().lower()).all()
     live = [g for g in grants if _live_access_status(g) == "Active"]
     case_ids = {g.case_id for g in live}
     cases = db.query(MDTCase).filter(MDTCase.id.in_(case_ids)).all() if case_ids else []

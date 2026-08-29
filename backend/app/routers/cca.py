@@ -26,7 +26,7 @@ from ..scribe import scribe
 from .. import drug_matcher
 from ..models_cca import (
     CCAPatient, CCAConsent, CCAQueueEvent, CCAEncounter, CCAIntakeAssessment,
-    CCADocument, ClinicalFact, CCAContradiction, CCACancerDiagnosis,
+    CCADocument, ClinicalFact, CCAContradiction,
     CCABiomarkerResult, CCAOrder, CCAResult, StagingRecord, StagingEvidence,
     GuidelineRegistry, TreatmentPlanGuidelineLink,
     ClinicalBrief, MDTCase, MDTDecision, CarePlan,
@@ -1753,6 +1753,31 @@ def get_staging_readiness(
     return evaluate_staging_readiness(db, patient_id)
 
 
+def _get_cancer_context(db: Session, patient_id: int) -> dict:
+    """Shared "what is this patient's cancer" context block, derived from verified
+    ClinicalFact -- CCACancerDiagnosis is demo-seed-only (cca_seed.py) and never populated by
+    real clinical workflow, so it can't be the source here. Used by both the Staging
+    workspace and the Treatment Plan view -- the latter previously showed a clinician drafting
+    a plan a completely blank form with no reminder of what they were actually treating."""
+    facts = db.query(ClinicalFact).filter(
+        ClinicalFact.patient_id == patient_id,
+        ClinicalFact.status == "VERIFIED"
+    ).all()
+    fact_dict = {f.fact_type: f for f in facts}
+    confirmed_stage = db.query(StagingRecord).filter(
+        StagingRecord.patient_id == patient_id,
+        StagingRecord.status == "CLINICIAN_CONFIRMED"
+    ).order_by(StagingRecord.version_no.desc()).first()
+    return {
+        "site": fact_dict["PRIMARY_SITE"].value if "PRIMARY_SITE" in fact_dict else "[NOT_RECORDED]",
+        "histology": fact_dict["HISTOLOGY"].value if "HISTOLOGY" in fact_dict else "[NOT_RECORDED]",
+        "grade": fact_dict["GRADE"].value if "GRADE" in fact_dict else "[NOT_RECORDED]",
+        "biomarkers": [f.value for f in facts if f.fact_type == "BIOMARKER_RESULT"],
+        "confirmed_stage": confirmed_stage.stage_value if confirmed_stage else None,
+        "stage_group": confirmed_stage.prognostic_stage_group if confirmed_stage else None,
+    }
+
+
 @router.get("/patients/{patient_id}/staging")
 def get_staging_workspace(
     patient_id: int, db: Session = Depends(get_cca_db),
@@ -1765,20 +1790,12 @@ def get_staging_workspace(
         ClinicalFact.status == "VERIFIED"
     ).all()
 
-    diagnosis = db.query(CCACancerDiagnosis).filter(
-        CCACancerDiagnosis.patient_id == patient_id
-    ).first()
-
     history = db.query(StagingRecord).filter(
         StagingRecord.patient_id == patient_id
     ).order_by(StagingRecord.version_no.asc()).all()
 
     return {
-        "cancer_context": {
-            "site": diagnosis.primary_site if diagnosis else "[NOT_RECORDED]",
-            "histology": diagnosis.histology if diagnosis else "[NOT_RECORDED]",
-            "grade": diagnosis.grade if diagnosis else "[NOT_RECORDED]"
-        },
+        "cancer_context": _get_cancer_context(db, patient_id),
         "readiness": readiness,
         "evidence_cards": {
             "T": [{"id": f.id, "value": f.value, "verbatim": f.verbatim_span} for f in facts if f.fact_type in ["T_EVIDENCE", "IMAGING_FINDING"]],
@@ -2322,7 +2339,10 @@ def list_treatment_plans(
     if not can_view_draft_plans_and_orders(current_user):
         query = query.filter(~TreatmentPlan.status.in_(["DRAFT", "PROPOSED"]))
     plans = query.order_by(TreatmentPlan.id.desc()).all()
-    return {"treatment_plans": [project_treatment_plan(_treatment_plan_dict(p), current_user) for p in plans]}
+    return {
+        "treatment_plans": [project_treatment_plan(_treatment_plan_dict(p), current_user) for p in plans],
+        "cancer_context": _get_cancer_context(db, patient_id),
+    }
 
 
 @router.get("/treatment-plans/{id}/versions")
@@ -3424,7 +3444,12 @@ def get_treatment_day_assessment(
         "protocol": plan.protocol_name if plan else "[NOT_RECORDED] No active treatment plan on record.",
         "cycle_info": f"Cycle {plan.completed_sessions + 1}" if plan else "[NOT_RECORDED]",
         "order": project_treatment_order(_treatment_order_dict(order), current_user) if order else None,
-        "order_note": None if order else "No Treatment Order on record -- a clearance decision cannot be recorded until a signed one exists.",
+        # Reworded from "...cannot be recorded until a signed one exists" -- verified live that
+        # this reads as a permission error to a non-technical tester between cycles (the card
+        # goes from showing an order to showing nothing but this line), when it's actually a
+        # normal workflow-sequencing wait: the treating oncologist hasn't written/signed the
+        # next cycle's order yet. Never a real access denial -- this endpoint has no role gate.
+        "order_note": None if order else "Waiting on the treating oncologist to write and sign the next Treatment Order -- Day-Care cannot proceed until then.",
         "lab_parameters": [],
         "lab_parameters_note": "Live laboratory integration is not yet connected -- treatment-day lab values must be reviewed directly in the lab system before clearance.",
         "toxicity_history": [
