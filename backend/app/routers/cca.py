@@ -875,10 +875,16 @@ async def upload_document(
 
     actor = _actor(current_user)
     ocr_failed_reason = None
+    ocr_failed_pages: list[int] = []
     try:
-        ocr_result = extract_document(content, content_type)
+        # Off the event loop: docTR inference is the heaviest blocking call in this app
+        # (~11s/page) -- run inline inside this async handler, it would freeze the single event
+        # loop for every other concurrent user on every endpoint for the whole document's OCR
+        # duration, not just this upload. Same pattern as scribe.scribe_transcript below.
+        ocr_result = await run_in_threadpool(extract_document, content, content_type)
         ocr_text = ocr_result["text"]
         page_count = ocr_result["page_count"]
+        ocr_failed_pages = ocr_result.get("ocr_failed_pages", [])
         doc_class, confidence = classify_document(ocr_text)
     except Exception as exc:
         # A document that fails OCR (blank page, corrupted scan, unreadable image) is still a
@@ -911,6 +917,15 @@ async def upload_document(
         db.flush()
         detect_contradictions(db, patient_id)
 
+    # Distinct from ocr_failed_reason (the whole document was unreadable): some pages came back
+    # with usable text and still drafted facts, but specific pages need a human to re-check the
+    # original -- previously this was only detected/reported for total failure, so a partially
+    # unreadable multi-page report was silently marked fully successful with no warning anywhere.
+    partial_ocr_warning = None
+    if ocr_failed_pages:
+        pages = ", ".join(str(p) for p in ocr_failed_pages)
+        partial_ocr_warning = f"page(s) {pages} could not be read by OCR -- verify against the original document"
+
     j_ev = CCAJourneyEvent(
         patient_id=patient_id,
         event_type="DOC_INGESTION",
@@ -920,6 +935,7 @@ async def upload_document(
             f"{actor} uploaded {filename}, but text extraction failed ({ocr_failed_reason}). Saved for manual review."
             if ocr_failed_reason else
             f"{actor} uploaded {filename}, classified as {doc_class}. {len(fact_rows)} candidate fact(s) drafted for review."
+            + (f" Note: {partial_ocr_warning}." if partial_ocr_warning else "")
         ),
         actor_name=actor,
         actor_role=current_user.get("role"),
@@ -937,7 +953,7 @@ async def upload_document(
             "status": doc.status,
         },
         "facts_drafted": len(fact_rows),
-        "ocr_warning": ocr_failed_reason,
+        "ocr_warning": ocr_failed_reason or partial_ocr_warning,
     }
 
 

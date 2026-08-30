@@ -6,6 +6,7 @@ from datetime import date, datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
@@ -84,14 +85,23 @@ async def upload_document(
     db.add(doc)
     db.flush()
     try:
-        result = extract_document(content, content_type)
+        # Off the event loop: docTR inference is the heaviest blocking call in this app
+        # (~11s/page) -- run inline inside this async handler, it would freeze the single
+        # event loop for every other concurrent user on every endpoint for the whole document's
+        # OCR duration, not just this upload. Same pattern as scribe.scribe_transcript (main.py).
+        result = await run_in_threadpool(extract_document, content, content_type)
         doc.extracted_text = result["text"]
         doc.page_text = result["pages"]
         doc.page_count = result["page_count"]
         doc.ocr_engine = result["engine"]
         doc.extracted_data = result["signals"]
         doc.processed_at = result["processed_at"]
-        doc.ocr_status = "Completed"
+        if result.get("ocr_failed_pages"):
+            pages = ", ".join(str(p) for p in result["ocr_failed_pages"])
+            doc.ocr_status = "NeedsReview"
+            doc.ocr_error = f"Could not extract text from page(s) {pages} -- verify against the original document."[:2000]
+        else:
+            doc.ocr_status = "Completed"
     except Exception as exc:
         doc.ocr_status = "NeedsReview"
         doc.ocr_error = str(exc)[:2000]

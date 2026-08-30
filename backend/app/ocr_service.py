@@ -98,32 +98,57 @@ def extract_document(content: bytes, content_type: str) -> dict[str, Any]:
         needs_ocr = [i for i, text in enumerate(native) if len(text) < 40]
         ocr_by_page: dict[int, str] = {}
         if needs_ocr:
+            doc = None
             try:
                 import pymupdf
                 from PIL import Image
                 doc = pymupdf.open(stream=content, filetype="pdf")
+            except Exception:
+                doc = None
+            if doc is not None:
                 for index in needs_ocr:
-                    pix = doc[index].get_pixmap(matrix=pymupdf.Matrix(2.2, 2.2), alpha=False)
-                    image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                    ocr_by_page[index] = _run_ocr(image)
+                    # Each page is attempted independently -- a corrupted page or a transient
+                    # failure (e.g. memory pressure) must not abort OCR for every page after it
+                    # in the same document. Previously one bad page silently dropped the rest of
+                    # a multi-page report with no error surfaced anywhere.
+                    try:
+                        pix = doc[index].get_pixmap(matrix=pymupdf.Matrix(2.2, 2.2), alpha=False)
+                        image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                        ocr_by_page[index] = _run_ocr(image)
+                    except Exception:
+                        continue
+            if ocr_by_page:
                 engines.append("doctr")
-            except Exception as exc:
-                # Native pages remain useful; fail only when the complete document has no text.
-                if not any(native):
-                    raise RuntimeError(f"Scanned PDF needs OCR: {exc}") from exc
         engines.insert(0, "pypdf")
         for i, native_text in enumerate(native):
-            chosen = native_text if len(native_text) >= 40 else ocr_by_page.get(i, native_text)
-            page_text.append({"page": i + 1, "text": chosen, "method": "ocr" if i in ocr_by_page else "embedded_text"})
+            if i in ocr_by_page:
+                page_text.append({"page": i + 1, "text": ocr_by_page[i], "method": "ocr"})
+            elif len(native_text) >= 40:
+                page_text.append({"page": i + 1, "text": native_text, "method": "embedded_text"})
+            elif i in needs_ocr:
+                # Needed OCR and didn't get usable text -- tagged explicitly so callers can
+                # surface this instead of it looking like a normal (if short) embedded-text page.
+                page_text.append({"page": i + 1, "text": native_text, "method": "ocr_failed"})
+            else:
+                page_text.append({"page": i + 1, "text": native_text, "method": "embedded_text"})
     else:
         try:
             from PIL import Image
             image = Image.open(io.BytesIO(content))
-            text = _run_ocr(image)
-            page_text = [{"page": 1, "text": text, "method": "ocr"}]
-            engines.append("doctr")
         except Exception as exc:
             raise RuntimeError(f"Image OCR failed: {exc}") from exc
+        # A multi-page TIFF (a common scanner output for multi-page paper records) holds several
+        # frames; Image.open() alone only ever sees frame 0, so every page after the first was
+        # being silently dropped with no error. JPEG/PNG report n_frames=1, so single-page
+        # images are unaffected.
+        for i in range(getattr(image, "n_frames", 1)):
+            try:
+                image.seek(i)
+                page_text.append({"page": i + 1, "text": _run_ocr(image), "method": "ocr"})
+            except Exception:
+                page_text.append({"page": i + 1, "text": "", "method": "ocr_failed"})
+        if any(p["method"] == "ocr" for p in page_text):
+            engines.append("doctr")
 
     full_text = "\n\n".join(p["text"] for p in page_text if p["text"]).strip()
     if not full_text:
@@ -135,4 +160,5 @@ def extract_document(content: bytes, content_type: str) -> dict[str, Any]:
         "engine": "+".join(dict.fromkeys(engines)),
         "signals": _clinical_signals(full_text),
         "processed_at": datetime.utcnow(),
+        "ocr_failed_pages": [p["page"] for p in page_text if p["method"] == "ocr_failed"],
     }

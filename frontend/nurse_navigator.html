@@ -1863,7 +1863,7 @@
                 const formData = new FormData();
                 formData.append('file', file);
                 const result = await Api.upload(`/cca/documents?patient_id=${currentPatientId}`, formData);
-                if (result?.document?.status === 'OCR_FAILED') {
+                if (result?.document?.status === 'OCR_FAILED' || result?.ocr_warning) {
                     toast(`${file.name} was saved, but OCR could not read it — try a clearer scan or a text-based PDF`, 'error');
                 } else {
                     toast(`${file.name} uploaded`, 'success');

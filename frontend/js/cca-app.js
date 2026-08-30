@@ -369,7 +369,11 @@ async function submitDocumentUpload() {
     statusEl.textContent = 'Uploading and extracting...';
     try {
         const data = await Api.upload(`${CCA_API_BASE}/documents?patient_id=${currentPatientId}`, formData);
-        statusEl.textContent = `✅ Classified as ${data.document.classification}. ${data.facts_drafted} candidate fact(s) drafted for verification.`;
+        if (data?.document?.status === 'OCR_FAILED' || data?.ocr_warning) {
+            statusEl.textContent = `⚠️ Saved, but OCR could not fully read this file${data.ocr_warning ? ` (${data.ocr_warning})` : ''} — try a clearer scan or a text-based PDF.`;
+        } else {
+            statusEl.textContent = `✅ Classified as ${data.document.classification}. ${data.facts_drafted} candidate fact(s) drafted for verification.`;
+        }
         input.value = '';
         await loadDocumentsList();
     } catch (err) {
