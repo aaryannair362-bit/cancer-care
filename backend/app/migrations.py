@@ -111,6 +111,13 @@ ADDITIVE_COLUMNS = [
     # MDT recommendation disposition: treating-clinician accept/partially-accept/reject with
     # reason (architecture doc Sec 18), not a bare binary approve.
     ("cca_mdt_decisions", "disposition_reason", "TEXT"),
+    # Day Care / Infusion Nurse treatment-day queue (Gap Analysis PDF, 30 Aug 2026): pure
+    # nurse-owned logistics, deliberately separate from TreatmentSession.status (owned by the
+    # oncologist-gated clearance-decision flow) so arrival/chair check-in never collides with it.
+    ("cca_treatment_sessions", "arrival_status", "VARCHAR(30) DEFAULT 'Scheduled'"),
+    ("cca_treatment_sessions", "arrived_at", "TIMESTAMP"),
+    ("cca_treatment_sessions", "chair_bed", "VARCHAR(50)"),
+    ("cca_treatment_sessions", "expected_duration_minutes", "INTEGER"),
 ]
 
 

@@ -58,14 +58,19 @@
         .btn-navy:disabled { background: #94A3B8; cursor: not-allowed; }
         .btn-outline { background: #FFFFFF; border: 1px solid var(--line); color: var(--ink-700); font-size: 12.5px; font-weight: 600; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
         .btn-outline:hover { border-color: var(--ink-400); background: #F8FAFC; }
-        .worklist-row { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; margin-bottom: 10px; display: grid; grid-template-columns: 1.3fr 1fr 1fr 0.8fr auto; gap: 14px; align-items: center; }
+        .btn-danger { background: #FFFFFF; border: 1px solid var(--rose-badge-text); color: var(--rose-badge-text); font-size: 12.5px; font-weight: 700; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-danger:hover { background: var(--rose-badge-bg); }
+        .btn-sm { padding: 6px 10px; font-size: 11.5px; }
+        .worklist-row { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; margin-bottom: 10px; display: grid; grid-template-columns: 1.3fr 1fr 1fr 1fr 0.8fr auto; gap: 14px; align-items: center; }
         .wl-label { font-size: 11px; color: var(--ink-500); text-transform: uppercase; margin-bottom: 2px; }
         .wl-value { font-size: 13.5px; font-weight: 700; color: var(--ink-900); }
         .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+        .form-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 16px; }
         .form-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
         .form-label { font-size: 12px; font-weight: 600; color: var(--ink-700); }
         .form-input, .form-select, .form-textarea { width: 100%; height: 38px; padding: 0 12px; background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; color: var(--ink-900); outline: none; }
-        .form-textarea { height: auto; padding: 10px 12px; }
+        .form-textarea { height: auto; padding: 10px 12px; min-height: 64px; }
+        .form-checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-800); margin-bottom: 10px; }
         .patient-banner { background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 16px 20px; display: grid; grid-template-columns: 1.2fr 1.3fr 1.3fr 1fr; gap: 16px; margin-bottom: 20px; }
         .banner-label { font-size: 11px; color: var(--ink-400); font-weight: 600; text-transform: uppercase; margin-bottom: 4px; }
         .banner-value { font-size: 13.5px; font-weight: 600; color: var(--ink-900); }
@@ -79,6 +84,27 @@
         .hms-toast--success { background: var(--green-badge-text); }
         .hms-toast--error { background: var(--rose-badge-text); }
         .hms-toast--info { background: var(--blue-badge-text); }
+
+        /* --- Treatment-day workspace: persistent actions + sub-tabs (Gap Analysis PDF SS6) --- */
+        .action-bar { display: flex; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
+        .subtab-bar { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 20px; overflow-x: auto; }
+        .subtab-btn { background: none; border: none; padding: 10px 16px; font-size: 13px; font-weight: 600; color: var(--ink-500); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
+        .subtab-btn:hover { color: var(--ink-800); }
+        .subtab-btn.active { color: var(--navy-action); border-bottom-color: var(--navy-action); }
+        .inline-panel { background: #FFF7ED; border: 1px solid #FDBA74; border-radius: var(--radius-lg); padding: 18px; margin-bottom: 20px; }
+        .inline-panel.reaction { background: var(--rose-badge-bg); border-color: #FDA4AF; }
+        .inline-panel-title { font-size: 14px; font-weight: 700; color: var(--ink-900); margin-bottom: 12px; }
+        .med-card { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; margin-bottom: 12px; }
+        .med-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 10px; }
+        .med-card-title { font-size: 14px; font-weight: 700; color: var(--ink-900); }
+        .med-card-meta { font-size: 12px; color: var(--ink-500); margin-top: 2px; }
+        .med-card-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+        .timeline-item { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line-subtle); font-size: 12.5px; }
+        .timeline-time { color: var(--ink-400); min-width: 130px; flex-shrink: 0; }
+        .empty-hint { font-size: 12.5px; color: var(--ink-500); padding: 8px 0; }
+        .queue-toggle { display: flex; gap: 8px; margin-bottom: 16px; }
+        .queue-toggle button { background: #FFFFFF; border: 1px solid var(--line); color: var(--ink-700); font-size: 12.5px; font-weight: 600; padding: 8px 14px; border-radius: var(--radius-full); cursor: pointer; }
+        .queue-toggle button.active { background: var(--navy-action); color: #fff; border-color: var(--navy-action); }
     </style>
 </head>
 <body>
@@ -94,7 +120,7 @@
     <div class="app-body">
         <aside class="sidebar">
             <div class="sidebar-section-title">TREATMENT DELIVERY</div>
-            <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Patients</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Today's Patients</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-treatment_day" onclick="showTab('treatment_day')"><div class="nav-item-left"><span>💉</span><span>Treatment Day / Infusion</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-history" onclick="showTab('history')"><div class="nav-item-left"><span>🗂️</span><span>Patient History</span></div><span class="nav-chevron">›</span></a>
             <div class="sidebar-section-title">CLINICAL SUPPORT</div>
@@ -103,17 +129,21 @@
         <main class="canvas">
 
             <div id="view-patients" class="view-panel active">
-                <h1 class="page-title">Patients</h1>
-                <p class="page-subtitle">Today's day-care / infusion patient queue</p>
+                <h1 class="page-title">Today's Patients</h1>
+                <p class="page-subtitle">Today's day-care / infusion queue — arrival, chair/bed and treatment status</p>
+                <div class="queue-toggle">
+                    <button id="queue-toggle-today" class="active" onclick="setPatientListMode('queue')">Today's Queue</button>
+                    <button id="queue-toggle-all" onclick="setPatientListMode('all')">All Patients</button>
+                </div>
                 <div class="section-card">
-                    <div class="section-head"><div class="section-title">Treatment Day Patient Queue</div><span class="badge badge-blue" id="patient-count">0 patients</span></div>
+                    <div class="section-head"><div class="section-title" id="patient-list-title">Treatment Day Queue</div><span class="badge badge-blue" id="patient-count">0 patients</span></div>
                     <div id="patient-list"></div>
                 </div>
             </div>
 
             <div id="view-treatment_day" class="view-panel">
                 <h1 class="page-title">Treatment Day / Infusion</h1>
-                <p class="page-subtitle">Pre-cycle organ toxicity evaluation and structured clearance exits.</p>
+                <p class="page-subtitle">Treatment-day nursing workspace — verify, administer, monitor, escalate and complete.</p>
                 <div id="treatment-content"><!-- Populated via JS: loadTreatmentDayAssessment() --></div>
             </div>
 
@@ -155,13 +185,16 @@
         const ccaUser = Auth.requirePage(['CCAInfusionNurse', 'HeadNurse', 'Nurse', 'Admin']);
         const CCA_API = '/cca';
         let currentPatientId = null;
+        let currentOrderId = null;
+        let currentSubTab = 'overview';
+        let patientListMode = 'queue';
 
         function showTab(tab) {
             document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
             document.querySelectorAll('.sidebar-nav-item').forEach(el => el.classList.remove('active'));
             document.getElementById(`view-${tab}`).classList.add('active');
             document.getElementById(`nav-${tab}`).classList.add('active');
-            if (tab === 'patients') loadPatientQueue();
+            if (tab === 'patients') loadPatientList();
             if (tab === 'treatment_day') loadTreatmentDayAssessment();
             if (tab === 'history') renderCaseSummaryPanel('history-content', currentPatientId);
             if (tab === 'nexus') loadNexusBanner();
@@ -208,64 +241,348 @@
             }
         }
 
-        async function loadPatientQueue() {
+        // ---------------------------------------------------------------
+        // Today's Patients / Infusion Queue (Gap Analysis PDF SS5.1)
+        // ---------------------------------------------------------------
+
+        function setPatientListMode(mode) {
+            patientListMode = mode;
+            document.getElementById('queue-toggle-today').classList.toggle('active', mode === 'queue');
+            document.getElementById('queue-toggle-all').classList.toggle('active', mode === 'all');
+            document.getElementById('patient-list-title').textContent = mode === 'queue' ? 'Treatment Day Queue' : 'All Patients';
+            loadPatientList();
+        }
+
+        function loadPatientList() {
+            if (patientListMode === 'queue') return loadInfusionQueue();
+            return loadAllPatients();
+        }
+
+        async function loadInfusionQueue() {
+            const listEl = document.getElementById('patient-list');
+            try {
+                const today = new Date().toISOString().slice(0, 10);
+                const data = await Api.get(`${CCA_API}/treatment/queue?date=${today}`);
+                document.getElementById('patient-count').textContent = `${data.results.length} scheduled`;
+                listEl.innerHTML = data.results.map(r => `
+                    <div class="worklist-row">
+                        <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(r.name)}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(r.mrn)}</div></div>
+                        <div><div class="wl-label">Protocol</div><div class="wl-value" style="font-size:12.5px;">${escapeHtml(r.protocol || '—')}</div><div style="font-size:11.5px;color:var(--ink-500);">${escapeHtml(r.cycle_day)}</div></div>
+                        <div><div class="wl-label">Arrival</div><span class="badge ${r.arrival_status === 'Arrived' ? 'badge-green' : 'badge-amber'}">${escapeHtml(r.arrival_status)}</span></div>
+                        <div><div class="wl-label">Chair / Bed</div><div class="wl-value" style="font-size:13px;">${escapeHtml(r.chair_bed || '—')}</div></div>
+                        <div><div class="wl-label">Order</div><span class="badge ${r.order_status === 'SIGNED' || r.order_status === 'EXECUTED' ? 'badge-blue' : 'badge-amber'}">${escapeHtml(r.order_status || 'None')}</span>
+                          ${r.flags.length ? `<div style="margin-top:4px;">${r.flags.map(f => `<span class="badge badge-rose" style="margin-right:4px;">${escapeHtml(f)}</span>`).join('')}</div>` : ''}
+                        </div>
+                        <div style="display:flex; flex-direction:column; gap:6px;">
+                          <button class="btn-navy btn-sm" onclick="openPatient(${Number(r.patient_id)})">Open →</button>
+                          ${r.arrival_status !== 'Arrived' ? `<button class="btn-outline btn-sm" onclick="markArrived(${Number(r.session_id)})">Mark Arrived</button>` : ''}
+                        </div>
+                    </div>
+                `).join('') || '<p class="empty-hint">No patients scheduled for today\'s infusion queue.</p>';
+            } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function markArrived(sessionId) {
+            try {
+                await Api.patch(`${CCA_API}/treatment/queue/${sessionId}/arrival`, { arrival_status: 'Arrived' });
+                toast('Marked arrived', 'success');
+                loadInfusionQueue();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadAllPatients() {
             const listEl = document.getElementById('patient-list');
             try {
                 const data = await Api.get(`${CCA_API}/patients`);
                 document.getElementById('patient-count').textContent = `${data.results.length} patients`;
                 listEl.innerHTML = data.results.map(p => `
-                    <div class="worklist-row">
+                    <div class="worklist-row" style="grid-template-columns: 1.3fr 1fr 1fr 0.8fr auto;">
                         <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(p.name)}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(p.mrn)}</div></div>
                         <div><div class="wl-label">Age/Sex</div><div class="wl-value" style="font-size:13px;">${p.age != null ? escapeHtml(String(p.age)) + 'y' : '—'} / ${escapeHtml(p.sex)}</div></div>
                         <div><div class="wl-label">Journey</div><div class="wl-value" style="font-size:13px;">${escapeHtml(p.journey_state)}</div></div>
                         <div><span class="badge ${p.staging_state === 'CLINICIAN_CONFIRMED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(p.staging_state)}</span></div>
-                        <div><button class="btn-navy" onclick="openPatient(${Number(p.id)})">Open →</button></div>
+                        <div><button class="btn-navy btn-sm" onclick="openPatient(${Number(p.id)})">Open →</button></div>
                     </div>
-                `).join('') || '<p style="color:var(--ink-500); font-size:13px;">No patients.</p>';
+                `).join('') || '<p class="empty-hint">No patients.</p>';
             } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
         }
 
-        function openPatient(id) { currentPatientId = id; showTab('treatment_day'); }
+        function openPatient(id) { currentPatientId = id; currentOrderId = null; currentSubTab = 'overview'; showTab('treatment_day'); }
+
+        // ---------------------------------------------------------------
+        // Treatment Day / Infusion workspace (Gap Analysis PDF SS4-SS6)
+        // ---------------------------------------------------------------
+
+        const SUBTABS = [
+            ['overview', 'Overview'],
+            ['pretreatment', 'Pre-Treatment'],
+            ['orders', 'Orders & Pharmacy'],
+            ['administration', 'Administration'],
+            ['monitoring', 'Monitoring'],
+            ['completion', 'Completion'],
+        ];
 
         async function loadTreatmentDayAssessment() {
             const container = document.getElementById('treatment-content');
-            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p class="empty-hint">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Today\'s Patients</button></div>'; return; }
             try {
                 const data = await Api.get(`${CCA_API}/treatment/day-assessment?patient_id=${currentPatientId}`);
+                currentOrderId = data.order ? data.order.id : null;
+                window._tdData = data;
+
                 container.innerHTML = `
-                    <div class="section-card">
+                    <div class="action-bar" id="persistent-actions"></div>
+                    <div id="inline-panel-host"></div>
+                    <div class="section-card" style="margin-bottom:16px;">
                         <div class="section-title">${escapeHtml(data.patient.name)} · ${escapeHtml(data.patient.mrn)}</div>
                         <div class="section-sub">Protocol: ${escapeHtml(data.protocol)} · ${escapeHtml(data.cycle_info)}</div>
                     </div>
-                    <div class="section-card">
-                        <div class="section-title">Pre-Chemotherapy Lab Tolerability</div>
-                        <p style="font-size:12.5px; color:var(--ink-500); margin-top:8px;">${escapeHtml(data.lab_parameters_note || 'No lab parameters on file.')}</p>
-                    </div>
-                    <div class="section-card">
-                        <div class="section-head"><div class="section-title">CTCAE v5.0 Toxicity Assessment</div></div>
-                        <div id="tox-list">
-                            ${(data.toxicity_history || []).map(t => `<div class="tox-row"><strong>${escapeHtml(t.term)}</strong><span class="badge ${Number(t.grade) === 0 ? 'badge-green' : 'badge-amber'}">Grade ${Number(t.grade)}</span></div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No toxicity events recorded.</p>'}
-                        </div>
-                        <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
-                        <div class="form-grid-2">
-                            <div class="form-group"><label class="form-label">Term</label><input type="text" id="tox-term" list="tox-term-options" class="form-input" placeholder="e.g. Peripheral Sensory Neuropathy" /></div>
-                            <div class="form-group"><label class="form-label">CTCAE Grade</label>
-                                <select id="tox-grade" class="form-select"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select>
-                            </div>
-                        </div>
-                        <datalist id="tox-term-options"><option value="Peripheral Sensory Neuropathy"></option><option value="Diarrhea"></option><option value="Neutropenia"></option><option value="Fatigue"></option><option value="Nausea"></option></datalist>
-                        <div class="form-group"><label class="form-label">Baseline / description</label><input type="text" id="tox-baseline" class="form-input" placeholder="e.g. Grade 1 — mild numbness in fingertips" /></div>
-                        <button class="btn-outline" onclick="submitToxicity()">+ Record Toxicity</button>
-                    </div>
-                    <div class="section-card">
-                        <div class="section-title">Treatment Order &amp; Clearance</div>
-                        <div class="section-sub" style="margin-bottom:8px;">Verify identity, the signed order, labs and allergies against this before administering. The clearance decision itself is made by the treating oncologist on their own Treatment Plan tab — this is a read-only view, not an action for this role.</div>
-                        ${data.order ? `
-                            <div class="participant-row"><span>Order status</span><span class="badge ${data.order.status === 'SIGNED' ? 'badge-blue' : data.order.status === 'EXECUTED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(data.order.status)}</span></div>
-                        ` : `<p style="font-size:12.5px; color:var(--ink-500);">${escapeHtml(data.order_note || 'No Treatment Order on record yet.')}</p>`}
-                    </div>
+                    <div class="subtab-bar" id="subtab-bar"></div>
+                    <div id="subtab-content"></div>
                 `;
+                renderPersistentActions();
+                renderSubtabBar();
+                renderSubtab(currentSubTab);
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        function renderSubtabBar() {
+            const bar = document.getElementById('subtab-bar');
+            bar.innerHTML = SUBTABS.map(([key, label]) =>
+                `<button class="subtab-btn ${key === currentSubTab ? 'active' : ''}" onclick="switchSubtab('${key}')">${label}</button>`
+            ).join('');
+        }
+
+        function switchSubtab(key) {
+            currentSubTab = key;
+            renderSubtabBar();
+            renderSubtab(key);
+        }
+
+        // Orders/Administration/Monitoring/Completion all key off a signed Treatment Order
+        // (matches the backend contract -- see cca.py's _get_order_for_workspace). Overview and
+        // Pre-Treatment (CTCAE toxicity, lab placeholder) are order-independent -- a nurse can
+        // record a toxicity assessment before any order exists for this cycle.
+        const SUBTABS_REQUIRING_ORDER = new Set(['orders', 'administration', 'monitoring', 'completion']);
+
+        function renderSubtab(key) {
+            const el = document.getElementById('subtab-content');
+            if (!currentOrderId && SUBTABS_REQUIRING_ORDER.has(key)) {
+                el.innerHTML = `<div class="section-card"><p class="empty-hint">${window._tdData.order_note || 'Waiting on a signed Treatment Order before this tab is available.'}</p></div>`;
+                return;
+            }
+            if (key === 'overview') return renderOverviewTab(el);
+            if (key === 'pretreatment') return renderPretreatmentTab(el);
+            if (key === 'orders') return renderOrdersTab(el);
+            if (key === 'administration') return renderAdministrationTab(el);
+            if (key === 'monitoring') return renderMonitoringTab(el);
+            if (key === 'completion') return renderCompletionTab(el);
+        }
+
+        // ---- Persistent actions: Hold/Escalate, Reaction/Emergency, Extravasation ----
+
+        function renderPersistentActions() {
+            // Hold/Reaction/Extravasation all accept a nullable order_id on the backend --
+            // available whenever a patient is open, not only once a signed order exists.
+            const bar = document.getElementById('persistent-actions');
+            bar.innerHTML = `
+                <button class="btn-danger" onclick="toggleInlinePanel('hold')">⏸ Hold / Escalate</button>
+                <button class="btn-danger" onclick="toggleInlinePanel('reaction')">🚨 Reaction / Emergency</button>
+                <button class="btn-outline" onclick="toggleInlinePanel('extravasation')">⚠️ Suspected Extravasation</button>
+            `;
+        }
+
+        function toggleInlinePanel(kind) {
+            const host = document.getElementById('inline-panel-host');
+            if (host.dataset.open === kind) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = kind;
+            if (kind === 'hold') host.innerHTML = holdPanelHtml();
+            if (kind === 'reaction') host.innerHTML = reactionPanelHtml();
+            if (kind === 'extravasation') host.innerHTML = extravasationPanelHtml();
+        }
+
+        function holdPanelHtml() {
+            return `
+                <div class="inline-panel">
+                    <div class="inline-panel-title">Hold / Escalate Treatment</div>
+                    <p class="section-sub" style="margin-bottom:12px;">Stops treatment progression and escalates. This does not change the signed order or clearance.</p>
+                    <div class="form-group"><label class="form-label">Reason</label><textarea id="hold-reason" class="form-textarea" placeholder="e.g. Patient reports dizziness, holding infusion for review."></textarea></div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Hold type</label><select id="hold-type" class="form-select"><option>Safety Hold</option><option>Reaction</option><option>Extravasation</option><option>Other</option></select></div>
+                        <div class="form-group"><label class="form-label">Escalated to</label><input type="text" id="hold-escalated-to" class="form-input" placeholder="e.g. Dr. Menon, on-call oncologist" /></div>
+                    </div>
+                    <button class="btn-danger" onclick="submitHold()">Record Hold</button>
+                    <button class="btn-outline" style="margin-left:8px;" onclick="toggleInlinePanel('hold')">Cancel</button>
+                </div>`;
+        }
+
+        async function submitHold() {
+            const reason = document.getElementById('hold-reason').value;
+            if (!reason) { toast('Reason is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/treatment/hold`, {
+                    patient_id: currentPatientId, order_id: currentOrderId, reason,
+                    hold_type: document.getElementById('hold-type').value,
+                    escalated_to: document.getElementById('hold-escalated-to').value || null,
+                });
+                toast('Treatment hold recorded', 'success');
+                toggleInlinePanel('hold');
+                if (currentSubTab === 'administration') renderSubtab('administration');
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function reactionPanelHtml() {
+            return `
+                <div class="inline-panel reaction">
+                    <div class="inline-panel-title">Infusion Reaction / Emergency</div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Medication running</label><input type="text" id="rx-medication" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Infusion action</label><select id="rx-action" class="form-select"><option>Paused</option><option>Stopped</option></select></div>
+                    </div>
+                    <div class="form-group"><label class="form-label">Symptoms *</label><textarea id="rx-symptoms" class="form-textarea" placeholder="Onset, symptoms, severity"></textarea></div>
+                    <div class="form-group"><label class="form-label">Vitals</label><input type="text" id="rx-vitals" class="form-input" placeholder="e.g. BP 88/54, pulse 118, SpO2 92%" /></div>
+                    <div class="form-group"><label class="form-label">Who was informed</label><input type="text" id="rx-informed" class="form-input" placeholder="e.g. Dr. Menon, on-call oncologist" /></div>
+                    <div class="form-group"><label class="form-label">Interventions given</label><textarea id="rx-interventions" class="form-textarea" placeholder="Authorized rescue/supportive interventions"></textarea></div>
+                    <div class="form-group"><label class="form-label">Patient response</label><input type="text" id="rx-response" class="form-input" /></div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Physician disposition (as directed)</label><select id="rx-disposition" class="form-select"><option value="">— not yet directed —</option><option>Restart</option><option>Modify</option><option>Discontinue</option><option>Transfer-Escalate</option></select></div>
+                        <div class="form-group"><label class="form-label">Directed by</label><input type="text" id="rx-directed-by" class="form-input" placeholder="Physician name" /></div>
+                    </div>
+                    <button class="btn-danger" onclick="submitReaction()">Record Reaction</button>
+                    <button class="btn-outline" style="margin-left:8px;" onclick="toggleInlinePanel('reaction')">Cancel</button>
+                </div>`;
+        }
+
+        async function submitReaction() {
+            const symptoms = document.getElementById('rx-symptoms').value;
+            if (!symptoms) { toast('Symptoms is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/treatment/reaction`, {
+                    patient_id: currentPatientId, order_id: currentOrderId,
+                    medication_running: document.getElementById('rx-medication').value || null,
+                    infusion_action: document.getElementById('rx-action').value,
+                    symptoms, vitals: { free_text: document.getElementById('rx-vitals').value || null },
+                    informed_person: document.getElementById('rx-informed').value || null,
+                    interventions: document.getElementById('rx-interventions').value || null,
+                    patient_response: document.getElementById('rx-response').value || null,
+                    physician_disposition: document.getElementById('rx-disposition').value || null,
+                    directed_by: document.getElementById('rx-directed-by').value || null,
+                });
+                toast('Reaction recorded', 'success');
+                toggleInlinePanel('reaction');
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function extravasationPanelHtml() {
+            return `
+                <div class="inline-panel">
+                    <div class="inline-panel-title">Suspected Extravasation</div>
+                    <p class="section-sub" style="margin-bottom:12px;">Separate from a systemic infusion reaction — for suspected leakage of a vesicant/agent outside the vein.</p>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Agent *</label><input type="text" id="ex-agent" class="form-input" placeholder="e.g. Doxorubicin" /></div>
+                        <div class="form-group"><label class="form-label">Site</label><input type="text" id="ex-site" class="form-input" placeholder="e.g. Right hand" /></div>
+                    </div>
+                    <div class="form-group"><label class="form-label">Symptoms *</label><textarea id="ex-symptoms" class="form-textarea"></textarea></div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Approx. exposure/volume</label><input type="text" id="ex-volume" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Line status</label><input type="text" id="ex-line-status" class="form-input" placeholder="e.g. Stopped, cannula left in situ" /></div>
+                    </div>
+                    <div class="form-group"><label class="form-label">Immediate actions</label><textarea id="ex-actions" class="form-textarea"></textarea></div>
+                    <div class="form-group"><label class="form-label">Escalation / follow-up notes</label><textarea id="ex-escalation" class="form-textarea"></textarea></div>
+                    <button class="btn-danger" onclick="submitExtravasation()">Record Extravasation</button>
+                    <button class="btn-outline" style="margin-left:8px;" onclick="toggleInlinePanel('extravasation')">Cancel</button>
+                </div>`;
+        }
+
+        async function submitExtravasation() {
+            const agent = document.getElementById('ex-agent').value;
+            const symptoms = document.getElementById('ex-symptoms').value;
+            if (!agent || !symptoms) { toast('Agent and symptoms are required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/treatment/extravasation`, {
+                    patient_id: currentPatientId, order_id: currentOrderId, agent,
+                    site: document.getElementById('ex-site').value || null, symptoms,
+                    approx_exposure_volume: document.getElementById('ex-volume').value || null,
+                    line_status: document.getElementById('ex-line-status').value || null,
+                    immediate_actions: document.getElementById('ex-actions').value || null,
+                    escalation_notes: document.getElementById('ex-escalation').value || null,
+                });
+                toast('Extravasation recorded', 'success');
+                toggleInlinePanel('extravasation');
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---- Overview tab ----
+
+        async function renderOverviewTab(el) {
+            const data = window._tdData;
+            el.innerHTML = `<div class="section-card"><p class="empty-hint">Loading arrival/chair details…</p></div>`;
+            let arrival = { arrival_status: '—', chair_bed: '—', expected_duration_minutes: null };
+            try {
+                const today = new Date().toISOString().slice(0, 10);
+                const q = await Api.get(`${CCA_API}/treatment/queue?date=${today}`);
+                const row = (q.results || []).find(r => r.patient_id === currentPatientId);
+                if (row) arrival = row;
+            } catch (e) { /* queue may not have today's session yet */ }
+
+            el.innerHTML = `
+                <div class="patient-banner" style="grid-template-columns: repeat(5, 1fr);">
+                    <div><div class="banner-label">Patient</div><div class="banner-value">${escapeHtml(data.patient.name)}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(data.patient.mrn)}</div></div>
+                    <div><div class="banner-label">Protocol / Cycle</div><div class="banner-value" style="font-size:12.5px;">${escapeHtml(data.protocol)}</div><div style="font-size:11.5px;color:var(--ink-500);">${escapeHtml(data.cycle_info)}</div></div>
+                    <div><div class="banner-label">Arrival</div><div class="banner-value">${escapeHtml(arrival.arrival_status || '—')}</div></div>
+                    <div><div class="banner-label">Chair / Bed</div><div class="banner-value">${escapeHtml(arrival.chair_bed || '—')}</div></div>
+                    <div><div class="banner-label">Order Status</div><span class="badge ${data.order && (data.order.status === 'SIGNED' || data.order.status === 'EXECUTED') ? 'badge-blue' : 'badge-amber'}">${escapeHtml(data.order ? data.order.status : 'No order')}</span></div>
+                </div>
+                <div class="section-card">
+                    <div class="section-title">Where this patient is today</div>
+                    <p class="section-sub" style="margin-top:6px;">Use the sub-tabs above to move through Pre-Treatment → Orders & Pharmacy → Administration → Monitoring → Completion. Hold/Escalate, Reaction/Emergency and Suspected Extravasation stay available from every tab while this patient is open.</p>
+                </div>
+            `;
+        }
+
+        // ---- Pre-Treatment tab: lab placeholder + CTCAE + Safety Checklist ----
+
+        function renderPretreatmentTab(el) {
+            const data = window._tdData;
+            const byTerm = {};
+            (data.toxicity_history || []).forEach(t => { (byTerm[t.term] = byTerm[t.term] || []).push(t); });
+
+            el.innerHTML = `
+                <div class="section-card">
+                    <div class="section-title">Pre-Chemotherapy Lab Tolerability</div>
+                    <p style="font-size:12.5px; color:var(--ink-500); margin-top:8px;">${escapeHtml(data.lab_parameters_note || 'No lab parameters on file.')}</p>
+                </div>
+                <div class="section-card">
+                    <div class="section-head"><div class="section-title">CTCAE v5.0 Toxicity Assessment</div></div>
+                    <div id="tox-list">
+                        ${Object.keys(byTerm).length ? Object.entries(byTerm).map(([term, events]) => {
+                            const sorted = events.slice().sort((a, b) => b.id - a.id);
+                            const latest = sorted[0], previous = sorted[1];
+                            return `<div class="tox-row"><div><strong>${escapeHtml(term)}</strong>${previous ? `<span style="font-size:11.5px;color:var(--ink-500);margin-left:8px;">previous cycle: Grade ${escapeHtml(String(previous.grade))}</span>` : ''}</div><span class="badge ${Number(latest.grade) === 0 ? 'badge-green' : Number(latest.grade) >= 3 ? 'badge-rose' : 'badge-amber'}">Grade ${escapeHtml(String(latest.grade))}</span></div>`;
+                        }).join('') : '<p class="empty-hint">No toxicity events recorded.</p>'}
+                    </div>
+                    <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Term</label><input type="text" id="tox-term" list="tox-term-options" class="form-input" placeholder="e.g. Peripheral Sensory Neuropathy" /></div>
+                        <div class="form-group"><label class="form-label">CTCAE Grade</label>
+                            <select id="tox-grade" class="form-select"><option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option></select>
+                        </div>
+                    </div>
+                    <datalist id="tox-term-options">
+                        <option value="Peripheral Sensory Neuropathy"></option><option value="Diarrhea"></option><option value="Neutropenia"></option>
+                        <option value="Fatigue"></option><option value="Nausea"></option><option value="Vomiting"></option>
+                        <option value="Mucositis Oral"></option><option value="Anemia"></option><option value="Thrombocytopenia"></option>
+                        <option value="Alopecia"></option><option value="Constipation"></option><option value="Anorexia"></option>
+                        <option value="Febrile Neutropenia"></option><option value="Hand-Foot Syndrome"></option><option value="Infusion Related Reaction"></option>
+                    </datalist>
+                    <div class="form-group"><label class="form-label">Baseline / description</label><input type="text" id="tox-baseline" class="form-input" placeholder="e.g. Grade 1 — mild numbness in fingertips" /></div>
+                    <button class="btn-outline" onclick="submitToxicity()">+ Record Toxicity</button>
+                </div>
+                ${currentOrderId ? `
+                <div class="section-card" id="safety-check-card"><p class="empty-hint">Loading safety checklist…</p></div>
+                ` : ''}
+            `;
+            if (currentOrderId) loadSafetyCheck();
         }
 
         async function submitToxicity() {
@@ -279,7 +596,370 @@
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
-        document.addEventListener('DOMContentLoaded', () => { loadPatientQueue(); });
+        async function loadSafetyCheck() {
+            const card = document.getElementById('safety-check-card');
+            try {
+                const data = await Api.get(`${CCA_API}/treatment/${currentOrderId}/safety-check?patient_id=${currentPatientId}`);
+                const c = data.safety_check || {};
+                card.innerHTML = `
+                    <div class="section-title">Pre-Treatment Safety Checklist</div>
+                    <p class="section-sub" style="margin:4px 0 14px;">Two-identifier verification, order/cycle confirmation, allergy/symptom review and lab-review acknowledgement before proceeding.</p>
+                    <div class="form-checkbox-row"><input type="checkbox" id="sc-identity" ${c.identity_verified ? 'checked' : ''}/> <label for="sc-identity">Identity verified (two identifiers)</label></div>
+                    <div class="form-group"><label class="form-label">Identity method</label><input type="text" id="sc-identity-method" class="form-input" value="${escapeHtml(c.identity_method || '')}" placeholder="e.g. Name + MRN confirmed verbally and against wristband" /></div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="sc-order" ${c.order_cycle_confirmed ? 'checked' : ''}/> <label for="sc-order">Signed order and correct cycle/day confirmed</label></div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="sc-allergy" ${c.allergy_review_done ? 'checked' : ''}/> <label for="sc-allergy">Allergy / previous reaction reviewed with patient</label></div>
+                    <div class="form-group"><label class="form-label">Allergy review notes</label><textarea id="sc-allergy-notes" class="form-textarea">${escapeHtml(c.allergy_review_notes || '')}</textarea></div>
+                    <div class="form-group"><label class="form-label">Current symptoms review</label><textarea id="sc-symptoms" class="form-textarea">${escapeHtml(c.symptom_review_notes || '')}</textarea></div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="sc-labs" ${c.labs_reviewed ? 'checked' : ''}/> <label for="sc-labs">Current labs reviewed</label></div>
+                    <div class="form-group"><label class="form-label">Labs review notes</label><textarea id="sc-labs-notes" class="form-textarea">${escapeHtml(c.labs_review_notes || '')}</textarea></div>
+                    ${c.checked_by ? `<p class="section-sub">Last checked by ${escapeHtml(c.checked_by)} at ${escapeHtml(new Date(c.checked_at).toLocaleString())}</p>` : ''}
+                    <button class="btn-navy" style="margin-top:10px;" onclick="submitSafetyCheck()">Save Safety Checklist</button>
+                `;
+            } catch (err) { card.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function submitSafetyCheck() {
+            try {
+                await Api.post(`${CCA_API}/treatment/safety-check`, {
+                    patient_id: currentPatientId, order_id: currentOrderId,
+                    identity_verified: document.getElementById('sc-identity').checked,
+                    identity_method: document.getElementById('sc-identity-method').value || null,
+                    order_cycle_confirmed: document.getElementById('sc-order').checked,
+                    allergy_review_done: document.getElementById('sc-allergy').checked,
+                    allergy_review_notes: document.getElementById('sc-allergy-notes').value || null,
+                    symptom_review_notes: document.getElementById('sc-symptoms').value || null,
+                    labs_reviewed: document.getElementById('sc-labs').checked,
+                    labs_review_notes: document.getElementById('sc-labs-notes').value || null,
+                });
+                toast('Safety checklist saved', 'success');
+                loadSafetyCheck();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---- Orders & Pharmacy tab ----
+
+        async function renderOrdersTab(el) {
+            const data = window._tdData;
+            const order = data.order;
+            const instructionsText = order && order.instructions ? (order.instructions.text || JSON.stringify(order.instructions)) : '';
+            el.innerHTML = `
+                <div class="section-card">
+                    <div class="section-title">Treatment Order &amp; Clearance</div>
+                    <div class="section-sub" style="margin-bottom:12px;">Verify identity, the signed order, labs and allergies against this before administering. The clearance decision itself is made by the treating oncologist on their own Treatment Plan tab — this is a read-only view, not an action for this role.</div>
+                    ${order ? `
+                        <div class="form-group"><label class="form-label">Signed instructions (read-only)</label><div class="form-textarea" style="background:var(--bg-card-subtle);">${escapeHtml(instructionsText) || '<em>No instructions text on this order.</em>'}</div></div>
+                        <div class="form-grid-3">
+                            <div><div class="wl-label">Order Status</div><span class="badge ${order.status === 'SIGNED' || order.status === 'EXECUTED' ? 'badge-blue' : 'badge-amber'}">${escapeHtml(order.status)}</span></div>
+                            <div><div class="wl-label">Signed By</div><div class="wl-value" style="font-size:12.5px;">${escapeHtml(order.signer_email || '—')}</div></div>
+                            <div><div class="wl-label">Signed At</div><div class="wl-value" style="font-size:12.5px;">${order.signed_at ? escapeHtml(new Date(order.signed_at).toLocaleString()) : '—'}</div></div>
+                        </div>
+                    ` : `<p class="empty-hint">${escapeHtml(data.order_note || 'No Treatment Order on record yet.')}</p>`}
+                </div>
+                ${order ? `<div class="section-card" id="pharmacy-card"><p class="empty-hint">Loading pharmacy readiness…</p></div>` : ''}
+            `;
+            if (order) loadPharmacyReadiness();
+        }
+
+        async function loadPharmacyReadiness() {
+            const card = document.getElementById('pharmacy-card');
+            try {
+                const data = await Api.get(`${CCA_API}/treatment/${currentOrderId}/pharmacy-readiness?patient_id=${currentPatientId}`);
+                const p = data.pharmacy_readiness || {};
+                card.innerHTML = `
+                    <div class="section-title">Pharmacy Readiness</div>
+                    <p class="section-sub" style="margin:4px 0 14px;">Verified → Preparing → Ready → Dispensed → Received, tracked with a full audit trail.</p>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Status</label>
+                            <select id="pharm-status" class="form-select">${data.valid_statuses.map(s => `<option ${p.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+                        </div>
+                        <div class="form-group"><label class="form-label">Notes</label><input type="text" id="pharm-notes" class="form-input" value="${escapeHtml(p.notes || '')}" /></div>
+                    </div>
+                    <div id="pharm-receipt-fields">
+                        <p class="section-sub" style="margin-bottom:8px;">Receipt checks below apply once status is set to Received.</p>
+                        <div class="form-checkbox-row"><input type="checkbox" id="pharm-product-verified" ${p.product_verified ? 'checked' : ''}/> <label for="pharm-product-verified">Product verified against order</label></div>
+                        <div class="form-checkbox-row"><input type="checkbox" id="pharm-expiry-checked" ${p.expiry_checked ? 'checked' : ''}/> <label for="pharm-expiry-checked">Expiry / integrity checked</label></div>
+                        <div class="form-group"><label class="form-label">Second checker (if required by policy)</label><input type="text" id="pharm-second-checker" class="form-input" value="${escapeHtml(p.second_checker_name || '')}" /></div>
+                    </div>
+                    ${p.status ? `<p class="section-sub">Last updated by ${escapeHtml(p.status_updated_by || '—')} at ${p.status_updated_at ? escapeHtml(new Date(p.status_updated_at).toLocaleString()) : '—'}</p>` : ''}
+                    <button class="btn-navy" style="margin-top:10px;" onclick="submitPharmacyReadiness()">Save Pharmacy Status</button>
+                `;
+            } catch (err) { card.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function submitPharmacyReadiness() {
+            try {
+                await Api.post(`${CCA_API}/treatment/pharmacy-readiness`, {
+                    patient_id: currentPatientId, order_id: currentOrderId,
+                    status: document.getElementById('pharm-status').value,
+                    notes: document.getElementById('pharm-notes').value || null,
+                    product_verified: document.getElementById('pharm-product-verified') ? document.getElementById('pharm-product-verified').checked : false,
+                    expiry_checked: document.getElementById('pharm-expiry-checked') ? document.getElementById('pharm-expiry-checked').checked : false,
+                    second_checker_name: document.getElementById('pharm-second-checker') ? document.getElementById('pharm-second-checker').value || null : null,
+                });
+                toast('Pharmacy readiness saved', 'success');
+                loadPharmacyReadiness();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---- Administration tab: vascular access + medication cards ----
+
+        async function renderAdministrationTab(el) {
+            el.innerHTML = `
+                <div class="section-card" id="vascular-access-card"><p class="empty-hint">Loading vascular access…</p></div>
+                <div class="section-card" id="medications-card"><p class="empty-hint">Loading medications…</p></div>
+            `;
+            loadVascularAccess();
+            loadMedications();
+        }
+
+        async function loadVascularAccess() {
+            const card = document.getElementById('vascular-access-card');
+            try {
+                const data = await Api.get(`${CCA_API}/treatment/${currentOrderId}/vascular-access?patient_id=${currentPatientId}`);
+                const latest = data.results[0];
+                card.innerHTML = `
+                    <div class="section-head"><div class="section-title">Vascular Access</div>${latest ? `<span class="badge ${latest.access_ready ? 'badge-green' : 'badge-amber'}">${latest.access_ready ? 'Ready' : 'Not confirmed ready'}</span>` : ''}</div>
+                    ${latest ? `<p class="section-sub" style="margin-bottom:12px;">Current: ${escapeHtml(latest.device_type)}${latest.site ? ' · ' + escapeHtml(latest.site) : ''}${latest.gauge ? ' · ' + escapeHtml(latest.gauge) : ''} — assessed by ${escapeHtml(latest.assessed_by || '—')}</p>` : '<p class="empty-hint">No vascular access assessment recorded yet.</p>'}
+                    <div class="form-grid-3">
+                        <div class="form-group"><label class="form-label">Device type</label><select id="va-device" class="form-select"><option>Peripheral IV</option><option>PICC</option><option>Port</option><option>CVC</option></select></div>
+                        <div class="form-group"><label class="form-label">Site</label><input type="text" id="va-site" class="form-input" placeholder="e.g. Left forearm" /></div>
+                        <div class="form-group"><label class="form-label">Gauge</label><input type="text" id="va-gauge" class="form-input" placeholder="e.g. 20G" /></div>
+                    </div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Dressing status</label><input type="text" id="va-dressing" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Site condition</label><input type="text" id="va-condition" class="form-input" /></div>
+                    </div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="va-patency"/> <label for="va-patency">Patency confirmed</label></div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="va-blood-return"/> <label for="va-blood-return">Blood return confirmed</label></div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="va-ready"/> <label for="va-ready">Access confirmed ready for treatment</label></div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="va-problem"/> <label for="va-problem">Problem with access reported</label></div>
+                    <div class="form-group"><label class="form-label">Problem notes</label><textarea id="va-problem-notes" class="form-textarea"></textarea></div>
+                    <button class="btn-outline" onclick="submitVascularAccess()">+ Record Assessment</button>
+                `;
+            } catch (err) { card.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function submitVascularAccess() {
+            try {
+                await Api.post(`${CCA_API}/treatment/vascular-access`, {
+                    patient_id: currentPatientId, order_id: currentOrderId,
+                    device_type: document.getElementById('va-device').value,
+                    site: document.getElementById('va-site').value || null,
+                    gauge: document.getElementById('va-gauge').value || null,
+                    dressing_status: document.getElementById('va-dressing').value || null,
+                    site_condition: document.getElementById('va-condition').value || null,
+                    patency_confirmed: document.getElementById('va-patency').checked,
+                    blood_return: document.getElementById('va-blood-return').checked,
+                    access_ready: document.getElementById('va-ready').checked,
+                    problem_reported: document.getElementById('va-problem').checked,
+                    problem_notes: document.getElementById('va-problem-notes').value || null,
+                });
+                toast('Vascular access assessment recorded', 'success');
+                loadVascularAccess();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        const MED_STATUS_BADGE = { Pending: 'badge-amber', InProgress: 'badge-blue', Paused: 'badge-amber', Stopped: 'badge-rose', Completed: 'badge-green', Omitted: 'badge-rose' };
+
+        async function loadMedications() {
+            const card = document.getElementById('medications-card');
+            try {
+                const data = await Api.get(`${CCA_API}/treatment/${currentOrderId}/medications?patient_id=${currentPatientId}`);
+                const meds = data.results;
+                card.innerHTML = `
+                    <div class="section-head"><div class="section-title">Medication Administration</div></div>
+                    <p class="section-sub" style="margin-bottom:12px;">Transcribe each medication from the signed order (see Orders &amp; Pharmacy tab) as its own card — premedications and antineoplastics alike.</p>
+                    ${meds.map(m => medicationCardHtml(m)).join('') || '<p class="empty-hint">No medications recorded yet for this treatment order.</p>'}
+                    <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
+                    <div class="form-grid-3">
+                        <div class="form-group"><label class="form-label">Medication name</label><input type="text" id="med-name" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Category</label><select id="med-category" class="form-select"><option>Premedication</option><option>Antineoplastic</option><option>Other</option></select></div>
+                        <div class="form-group"><label class="form-label">Sequence #</label><input type="number" id="med-sequence" class="form-input" value="${meds.length + 1}" min="1" /></div>
+                    </div>
+                    <div class="form-grid-3">
+                        <div class="form-group"><label class="form-label">Dose</label><input type="text" id="med-dose" class="form-input" placeholder="as per signed order" /></div>
+                        <div class="form-group"><label class="form-label">Route</label><input type="text" id="med-route" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Volume / diluent</label><input type="text" id="med-volume" class="form-input" /></div>
+                    </div>
+                    <div class="form-group"><label class="form-label">Rate / duration</label><input type="text" id="med-rate" class="form-input" /></div>
+                    <button class="btn-outline" onclick="submitAddMedication()">+ Add Medication Line</button>
+                `;
+            } catch (err) { card.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        function medicationCardHtml(m) {
+            const actions = [];
+            if (m.status === 'Pending' || m.status === 'Stopped') actions.push(['START', 'Start']);
+            if (m.status === 'InProgress') { actions.push(['PAUSE', 'Pause']); actions.push(['COMPLETE', 'Complete']); actions.push(['STOP', 'Stop']); }
+            if (m.status === 'Paused') { actions.push(['RESUME', 'Resume']); actions.push(['COMPLETE', 'Complete']); actions.push(['STOP', 'Stop']); }
+            if (m.status === 'Pending') actions.push(['OMIT', 'Omit']);
+            return `
+                <div class="med-card">
+                    <div class="med-card-head">
+                        <div><div class="med-card-title">${escapeHtml(m.medication_name)} <span class="badge badge-blue" style="margin-left:6px;">${escapeHtml(m.category)}</span></div>
+                        <div class="med-card-meta">${escapeHtml(m.dose || '—')} · ${escapeHtml(m.route || '—')} · seq ${escapeHtml(String(m.sequence_no))}${m.volume_diluent ? ' · ' + escapeHtml(m.volume_diluent) : ''}${m.rate_duration ? ' · ' + escapeHtml(m.rate_duration) : ''}</div></div>
+                        <span class="badge ${MED_STATUS_BADGE[m.status] || 'badge-amber'}">${escapeHtml(m.status)}</span>
+                    </div>
+                    <div class="med-card-meta">
+                        Verified: ${m.product_label_verified ? '✔ Product/label' : '— Product/label'} · ${m.expiry_integrity_checked ? '✔ Expiry/integrity' : '— Expiry/integrity'}${m.second_verifier_name ? ' · 2nd verifier: ' + escapeHtml(m.second_verifier_name) : ''}
+                    </div>
+                    ${m.omission_reason ? `<div class="med-card-meta" style="color:var(--rose-badge-text);">Reason: ${escapeHtml(m.omission_reason)}</div>` : ''}
+                    <div class="med-card-actions">
+                        ${!m.product_label_verified || !m.expiry_integrity_checked ? `<button class="btn-outline btn-sm" onclick="quickVerify(${m.id})">Verify Product/Expiry</button>` : ''}
+                        ${actions.map(([evt, label]) => `<button class="${evt === 'STOP' || evt === 'OMIT' ? 'btn-danger' : 'btn-navy'} btn-sm" onclick="submitMedicationEvent(${m.id}, '${evt}')">${label}</button>`).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        async function quickVerify(adminId) {
+            try {
+                await Api.post(`${CCA_API}/treatment/medications/${adminId}/verify`, { product_label_verified: true, expiry_integrity_checked: true });
+                toast('Verified', 'success');
+                loadMedications();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitMedicationEvent(adminId, eventType) {
+            let notes = null;
+            if (eventType === 'STOP' || eventType === 'OMIT') {
+                notes = prompt(`Reason for ${eventType === 'STOP' ? 'stopping' : 'omitting'} this medication:`);
+                if (!notes) { toast('A documented reason is required', 'error'); return; }
+            }
+            try {
+                await Api.post(`${CCA_API}/treatment/medications/${adminId}/event`, { event_type: eventType, notes });
+                toast(`Recorded: ${eventType}`, 'success');
+                loadMedications();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitAddMedication() {
+            const name = document.getElementById('med-name').value;
+            if (!name) { toast('Medication name is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/treatment/medications`, {
+                    patient_id: currentPatientId, order_id: currentOrderId, medication_name: name,
+                    category: document.getElementById('med-category').value,
+                    sequence_no: parseInt(document.getElementById('med-sequence').value, 10) || 1,
+                    dose: document.getElementById('med-dose').value || null,
+                    route: document.getElementById('med-route').value || null,
+                    volume_diluent: document.getElementById('med-volume').value || null,
+                    rate_duration: document.getElementById('med-rate').value || null,
+                });
+                toast('Medication line added', 'success');
+                loadMedications();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---- Monitoring tab ----
+
+        async function renderMonitoringTab(el) {
+            el.innerHTML = `<div class="section-card" id="monitoring-card"><p class="empty-hint">Loading monitoring timeline…</p></div>`;
+            loadMonitoring();
+        }
+
+        async function loadMonitoring() {
+            const card = document.getElementById('monitoring-card');
+            try {
+                const data = await Api.get(`${CCA_API}/treatment/${currentOrderId}/monitoring?patient_id=${currentPatientId}`);
+                card.innerHTML = `
+                    <div class="section-title">Monitoring Timeline</div>
+                    <p class="section-sub" style="margin:4px 0 14px;">Baseline, during-treatment and post-treatment observations.</p>
+                    <div style="margin-bottom:16px;">
+                        ${data.results.map(o => `
+                            <div class="timeline-item">
+                                <div class="timeline-time">${escapeHtml(new Date(o.observation_time).toLocaleString())}</div>
+                                <div><span class="badge badge-blue" style="margin-right:6px;">${escapeHtml(o.phase)}</span>${o.vitals ? escapeHtml(JSON.stringify(o.vitals)) + ' · ' : ''}${escapeHtml(o.symptoms || '')} ${o.notes ? '· ' + escapeHtml(o.notes) : ''} <span style="color:var(--ink-400);">— ${escapeHtml(o.recorded_by || '')}</span></div>
+                            </div>
+                        `).join('') || '<p class="empty-hint">No observations recorded yet.</p>'}
+                    </div>
+                    <div class="form-grid-3">
+                        <div class="form-group"><label class="form-label">Phase</label><select id="mon-phase" class="form-select"><option>Baseline</option><option selected>During</option><option>Post</option></select></div>
+                        <div class="form-group"><label class="form-label">Vitals</label><input type="text" id="mon-vitals" class="form-input" placeholder="e.g. BP 120/78, Pulse 84, SpO2 98%" /></div>
+                        <div class="form-group"><label class="form-label">Symptoms</label><input type="text" id="mon-symptoms" class="form-input" /></div>
+                    </div>
+                    <div class="form-group"><label class="form-label">Nursing observation</label><textarea id="mon-notes" class="form-textarea"></textarea></div>
+                    <button class="btn-outline" onclick="submitMonitoring()">+ Record Observation</button>
+                `;
+            } catch (err) { card.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function submitMonitoring() {
+            try {
+                await Api.post(`${CCA_API}/treatment/monitoring`, {
+                    patient_id: currentPatientId, order_id: currentOrderId,
+                    phase: document.getElementById('mon-phase').value,
+                    vitals: { free_text: document.getElementById('mon-vitals').value || null },
+                    symptoms: document.getElementById('mon-symptoms').value || null,
+                    notes: document.getElementById('mon-notes').value || null,
+                });
+                toast('Observation recorded', 'success');
+                loadMonitoring();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---- Completion tab ----
+
+        async function renderCompletionTab(el) {
+            el.innerHTML = `<div class="section-card" id="completion-card"><p class="empty-hint">Loading completion status…</p></div>`;
+            try {
+                const data = await Api.get(`${CCA_API}/treatment/${currentOrderId}/completion?patient_id=${currentPatientId}`);
+                const card = document.getElementById('completion-card');
+                if (data.completion) {
+                    const c = data.completion;
+                    card.innerHTML = `
+                        <div class="section-head"><div class="section-title">Treatment Day Completed</div><span class="badge badge-green">Locked</span></div>
+                        <p class="section-sub">Completed by ${escapeHtml(c.completed_by)} at ${escapeHtml(new Date(c.completed_at).toLocaleString())}</p>
+                        <div class="form-grid-2" style="margin-top:12px;">
+                            <div><div class="wl-label">Disposition</div><div class="wl-value" style="font-size:13px;">${escapeHtml(c.disposition || '—')}</div></div>
+                            <div><div class="wl-label">Access Status</div><div class="wl-value" style="font-size:13px;">${escapeHtml(c.access_status || '—')}</div></div>
+                            <div><div class="wl-label">Next Treatment Date</div><div class="wl-value" style="font-size:13px;">${escapeHtml(c.next_treatment_date || '—')}</div></div>
+                            <div><div class="wl-label">Next Labs Required</div><div class="wl-value" style="font-size:13px;">${escapeHtml(c.next_labs_required || '—')}</div></div>
+                        </div>
+                    `;
+                } else {
+                    card.innerHTML = `
+                        <div class="section-title">Completion &amp; Discharge</div>
+                        <p class="section-sub" style="margin:4px 0 14px;">Closes and locks today's nursing record. Requires every medication to already have a final status (Completed or Omitted) on the Administration tab.</p>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Final vitals</label><input type="text" id="comp-vitals" class="form-input" placeholder="e.g. BP 118/76, Pulse 80" /></div>
+                            <div class="form-group"><label class="form-label">Final symptoms</label><input type="text" id="comp-symptoms" class="form-input" /></div>
+                        </div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Disposition</label><input type="text" id="comp-disposition" class="form-input" placeholder="e.g. Stable, tolerated infusion well" /></div>
+                            <div class="form-group"><label class="form-label">Access status</label><select id="comp-access" class="form-select"><option>Flushed</option><option>Removed</option><option>Locked</option><option>Left in situ</option></select></div>
+                        </div>
+                        <div class="form-group"><label class="form-label">Patient education / red flags given</label><textarea id="comp-education" class="form-textarea" placeholder="e.g. Report fever, breathing difficulty, rash, or worsening symptoms"></textarea></div>
+                        <div class="form-checkbox-row"><input type="checkbox" id="comp-red-flags"/> <label for="comp-red-flags">Red-flag / contact instructions given to patient</label></div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Next treatment date</label><input type="date" id="comp-next-date" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Labs / review before next cycle</label><input type="text" id="comp-next-labs" class="form-input" placeholder="e.g. CBC, renal/liver function" /></div>
+                        </div>
+                        <button class="btn-navy" onclick="submitCompletion()">Complete Treatment Day</button>
+                    `;
+                }
+            } catch (err) { document.getElementById('completion-card').innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function submitCompletion() {
+            try {
+                await Api.post(`${CCA_API}/treatment/completion`, {
+                    patient_id: currentPatientId, order_id: currentOrderId,
+                    final_vitals: { free_text: document.getElementById('comp-vitals').value || null },
+                    final_symptoms: document.getElementById('comp-symptoms').value || null,
+                    disposition: document.getElementById('comp-disposition').value || null,
+                    access_status: document.getElementById('comp-access').value,
+                    patient_education_notes: document.getElementById('comp-education').value || null,
+                    red_flags_given: document.getElementById('comp-red-flags').checked,
+                    next_treatment_date: document.getElementById('comp-next-date').value || null,
+                    next_labs_required: document.getElementById('comp-next-labs').value || null,
+                });
+                toast('Treatment day completed and locked', 'success');
+                renderCompletionTab(document.getElementById('subtab-content'));
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => { loadPatientList(); });
     </script>
 </body>
 </html>
