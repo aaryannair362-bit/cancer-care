@@ -583,9 +583,10 @@
         /* Medication reconciliation row */
         .med-row-grid {
             display: grid;
-            grid-template-columns: repeat(5, 1fr);
+            grid-template-columns: repeat(5, 1fr) auto;
             gap: 12px;
             margin-bottom: 12px;
+            align-items: center;
         }
         .med-field-box {
             height: 42px;
@@ -906,7 +907,7 @@
                     </div>
                     <div>
                         <div class="banner-label">Known Oncology Context · Read only</div>
-                        <div class="banner-value" style="font-size:12.5px;">Referral-provided gastrointestinal lesion</div>
+                        <div class="banner-value" style="font-size:12.5px;" id="intake-hdr-diagnosis">No referral diagnosis on file</div>
                         <div class="banner-sub">Not clinically confirmed</div>
                     </div>
                     <div>
@@ -973,7 +974,7 @@
                     <div class="field-grid-4">
                         <div>
                             <div class="field-label">Diagnosis</div>
-                            <div class="field-value">Referral-provided gastrointestinal lesion</div>
+                            <div class="field-value" id="oncology-summary-diagnosis">No referral diagnosis on file</div>
                         </div>
                         <div>
                             <div class="field-label">Stage</div>
@@ -1059,6 +1060,7 @@
                             <div class="med-field-box">As needed</div>
                             <div class="med-field-box">Active</div>
                             <div class="med-field-box">Clinical record</div>
+                            <button type="button" class="btn-outline" onclick="this.closest('.med-row-grid').remove()" title="Remove this medication">− Remove</button>
                         </div>
                         <div class="med-row-grid">
                             <div class="med-field-box">Pantoprazole</div>
@@ -1066,6 +1068,7 @@
                             <div class="med-field-box">Once daily</div>
                             <div class="med-field-box">Active</div>
                             <div class="med-field-box">Patient reported</div>
+                            <button type="button" class="btn-outline" onclick="this.closest('.med-row-grid').remove()" title="Remove this medication">− Remove</button>
                         </div>
                     </div>
                     <label class="checkbox-required-row">
@@ -1076,10 +1079,15 @@
 
                 <div class="intake-card" id="nurse-step-content-2d" style="display:none; margin-top:20px;">
                     <div class="readonly-card-header">Allergies / ADR</div>
-                    <div class="allergy-alert-box">
-                        <div class="allergy-alert-title">Paclitaxel · Severe</div>
-                        <div class="allergy-alert-detail">Flushing, chest tightness, and wheeze · Known clinical allergy</div>
-                        <div class="allergy-alert-meta">Clinical record · 02 Aug 2026 · existing verified record preserved</div>
+                    <div class="allergy-alert-box" id="existing-allergy-box">
+                        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px;">
+                            <div>
+                                <div class="allergy-alert-title">Paclitaxel · Severe</div>
+                                <div class="allergy-alert-detail">Flushing, chest tightness, and wheeze · Known clinical allergy</div>
+                                <div class="allergy-alert-meta">Clinical record · 02 Aug 2026 · existing verified record preserved</div>
+                            </div>
+                            <button type="button" class="btn-outline" style="flex-shrink:0;" onclick="document.getElementById('existing-allergy-box').style.display='none'" title="Remove this allergy record">− Remove</button>
+                        </div>
                     </div>
                     <div id="new-allergy-rows-container"></div>
                     <button class="btn-outline" style="margin-bottom:14px;" onclick="addAllergyRow()">+ Add newly reported allergy</button>
@@ -1629,12 +1637,39 @@
             }
         }
 
+        // Default seed rows for Current Medications, restored verbatim by resetNurseIntakeForm()
+        // below -- kept in one place so the reset can't drift from what's in the static HTML.
+        const DEFAULT_MEDICATION_ROWS_HTML = `
+            <div class="med-row-grid">
+                <div class="med-field-box">Ondansetron</div>
+                <div class="med-field-box">8 mg</div>
+                <div class="med-field-box">As needed</div>
+                <div class="med-field-box">Active</div>
+                <div class="med-field-box">Clinical record</div>
+                <button type="button" class="btn-outline" onclick="this.closest('.med-row-grid').remove()" title="Remove this medication">− Remove</button>
+            </div>
+            <div class="med-row-grid">
+                <div class="med-field-box">Pantoprazole</div>
+                <div class="med-field-box">40 mg</div>
+                <div class="med-field-box">Once daily</div>
+                <div class="med-field-box">Active</div>
+                <div class="med-field-box">Patient reported</div>
+                <button type="button" class="btn-outline" onclick="this.closest('.med-row-grid').remove()" title="Remove this medication">− Remove</button>
+            </div>
+        `;
+
         // Every field this resets has a static HTML default (e.g. vitals-temp="37.2") meant
         // only as a placeholder for the very first patient of a session -- without this reset,
         // opening patient B's intake right after typing/submitting for patient A left B's form
         // silently pre-filled with A's numbers (or A's own submitted values), risking a nurse
-        // recording one patient's vitals against another's chart.
+        // recording one patient's vitals against another's chart. Medications/allergies rows a
+        // nurse added (or removed) for patient A are reset here too -- they used to persist as-is
+        // into patient B's intake with no way to tell they belonged to someone else.
         function resetNurseIntakeForm() {
+            document.getElementById('medication-rows-container').innerHTML = DEFAULT_MEDICATION_ROWS_HTML;
+            document.getElementById('new-allergy-rows-container').innerHTML = '';
+            const existingAllergyBox = document.getElementById('existing-allergy-box');
+            if (existingAllergyBox) existingAllergyBox.style.display = '';
             const defaults = {
                 'nurse-concern': 'New oncology assessment', 'nurse-onset': '', 'nurse-pain': '0',
                 'hist-medical': '', 'hist-comorbid': '', 'hist-admissions': '',
@@ -1729,6 +1764,7 @@
                 <input type="text" class="med-field-box" placeholder="Frequency" style="border:1px solid var(--line);" />
                 <input type="text" class="med-field-box" placeholder="Status" style="border:1px solid var(--line);" />
                 <input type="text" class="med-field-box" placeholder="Source" style="border:1px solid var(--line);" />
+                <button type="button" class="btn-outline" onclick="this.closest('.med-row-grid').remove()" title="Remove this medication">− Remove</button>
             `;
             container.appendChild(row);
         }
