@@ -44,7 +44,7 @@ def test_scanned_pdf_uses_ocr_fallback_without_crashing():
 
     assert "Breast carcinoma" in result["text"]
     assert result["pages"][0]["method"] == "ocr"
-    assert result["engine"] == "pypdf+doctr"
+    assert result["engine"] == "pypdf+rapidocr"
 
 
 @pytest.fixture

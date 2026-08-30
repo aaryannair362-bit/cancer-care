@@ -19,17 +19,26 @@ services:
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
-    # `starter` (~512MB RAM) OOMs the moment a real (image-based/scanned) document hits
-    # actual docTR inference -- OCR_BENCHMARK.md, which is what justified choosing docTR as
-    # this app's OCR engine, measured it at ~2.1GB RSS during inference and explicitly states
-    # its target is an "8GB CPU deployment". `starter` was never big enough for the engine
-    # this app actually ships; confirmed in production as every document upload silently
-    # failing OCR (or the request/process dying) on anything but a synthetic, embedded-text
-    # PDF. `pro plus` is Render's tier matching that 8GB target as of this writing -- verify
-    # the current plan-to-RAM mapping in the Render dashboard/pricing page before deploying,
-    # since Render's tier names/specs can change, and note that changing this file alone does
-    # not move an already-running service to the new plan -- apply it via Sync, or change the
-    # plan directly on the existing service in the Render dashboard.
+    # History: `starter` (~512MB RAM) OOM'd on real docTR OCR inference, confirmed live in
+    # production twice on 31 Aug 2026 ("ran out of memory (used over 512MB)"). That was traced to
+    # docTR's torch dependency (`import torch` alone costs ~175MB RSS before any model loads;
+    # both docTR architectures tried peaked at 572-597MB total -- see OCR_BENCHMARK.md's
+    # "Architecture comparison" and "Engine reconsidered for memory ceiling" sections), not to the
+    # ~2.1GB figure an earlier version of this comment misattributed to docTR (that number was
+    # actually PaddleOCR's, per OCR_BENCHMARK.md's own "Measured results" section).
+    #
+    # `ocr_service.py` has since moved off docTR entirely to RapidOCR (no torch dependency),
+    # measured at ~154MB peak RSS with the same methodology -- comfortably under `starter`'s
+    # 512MB even with this app's own FastAPI/uvicorn overhead added, at a real, knowingly-accepted
+    # accuracy cost (see that module's docstring). `pro plus` here was sized for docTR's ~600MB
+    # need, which no longer applies -- `starter` is worth re-testing now that OCR itself needs far
+    # less memory, but real (messier/larger) documents and multiple concurrent uploads (each
+    # running OCR off the request thread -- see cca.py/patient_documents.py) both add to the
+    # 154MB single-job baseline measured on clean synthetic PDFs, so confirm with real traffic
+    # before downgrading. Verify the current plan-to-RAM mapping in the Render dashboard/pricing
+    # page before deploying, and note that changing this file alone does not move an
+    # already-running service to a new plan -- apply it via Sync, or change the plan directly on
+    # the existing service in the dashboard.
     plan: pro plus
     healthCheckPath: /api/health
     envVars:

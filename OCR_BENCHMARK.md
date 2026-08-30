@@ -1,9 +1,16 @@
 # OCR engine selection
 
-## Decision
+## Decision (superseded 31 Aug 2026 -- see "Engine reconsidered for memory ceiling" below)
 
 Use embedded PDF text first and docTR 1.1 (`fast_base` + `crnn_vgg16_bn`) as the
 fallback for scanned pages and image uploads.
+
+**Current production engine is RapidOCR, not docTR** -- docTR's torch dependency
+put every real OCR call over the deployed Render plan's memory ceiling. The
+reasoning below (accuracy/latency comparison against Tesseract/EasyOCR/PaddleOCR)
+is preserved as the historical record of why docTR was picked over those engines;
+it wasn't wrong, it just didn't account for the deployed plan's RAM limit. See the
+new section below for what changed and why.
 
 Tesseract remains the single fastest and jointly most accurate engine measured
 below, but it requires a system binary (`apt-get install tesseract-ocr` or
@@ -97,13 +104,99 @@ an unconfigured framework as a meaningful benchmark result.
   supplied role PDFs are text-native, so they normally incur no OCR at all.
 - Sparse/image-only pages render at 220 DPI and use docTR's pretrained
   detector + recognizer (see `ocr_service.py`).
-- Each OCR page has a 30-second timeout, comfortably above docTR's measured
-  ~11.3s/page on the benchmark CPU.
+- No per-page or per-request timeout is actually enforced anywhere in code
+  (checked `ocr_service.py` and both upload routers for
+  `asyncio.wait_for`/`signal.alarm`/equivalent -- none exists). A prior
+  version of this doc claimed a 30-second per-page timeout; that was
+  aspirational, not implemented. A page that hangs currently has nothing to
+  cut it off.
 - OCR failure keeps the upload in `NeedsReview`; it never invents missing
-  clinical facts or silently finalizes extracted information.
+  clinical facts or silently finalizes extracted information. Per-page
+  failures are now tracked independently -- one bad page no longer aborts
+  OCR for every page after it in the same document, and a partial failure
+  is surfaced (`ocr_failed_pages` / `ocr_warning`) instead of being silently
+  reported as a full success.
 - No system package or language pack install is required -- docTR's model
   weights are pulled from Hugging Face on first use and installed entirely
   through `pip` (`python-doctr[torch]` in `requirements.txt`).
+
+## Architecture comparison: default vs. lightweight docTR (31 Aug 2026)
+
+Production previously used docTR's default `fast_base` (detection) +
+`crnn_vgg16_bn` (recognition) combo. Compared against the lightweight
+`db_mobilenet_v3_large` + `crnn_mobilenet_v3_small` combo, same methodology
+as above (five of this repo's own scenario PDFs, embedded PDF text as ground
+truth, 220 DPI rasterization), each config measured in its own fresh process
+so RSS readings aren't polluted by a previous config's memory:
+
+| Config | Mean accuracy | Mean seconds/page | Peak RSS |
+|---|---:|---:|---:|
+| `fast_base` + `crnn_vgg16_bn` (previous default) | 99.67% | 10.463 | 597 MB |
+| `db_mobilenet_v3_large` + `crnn_mobilenet_v3_small` (current) | 99.71% | 3.093 | 572 MB |
+
+No accuracy loss on this corpus, a 3.4x latency improvement, and lower peak
+RSS. Production now pins the lightweight combo in `ocr_service.py`.
+
+This also corrects a standing error: `render.yaml` and `ocr_service.py`'s
+module docstring previously attributed "~2.1GB RSS during inference" to
+docTR, citing this file as the source. Rereading the actual measurement
+above: that figure was PaddleOCR's process RSS (see "Measured results"
+above -- "Its process was observed reaching about 2.1 GB RSS during
+inference" refers to the PaddleOCR run described in the preceding sentence).
+docTR's own inference RSS was never independently measured before this
+comparison; measured here, both docTR configs peaked under 600MB.
+
+Caveat: this comparison, like the one above, used clean, cleanly-rendered
+synthetic PDFs. A smaller-capacity recognizer such as
+`crnn_mobilenet_v3_small` may show more of an accuracy gap on genuinely
+degraded real scans (crumpled paper, low-light phone photos, faxes) than it
+did on this corpus -- that needs its own labelled real-scan corpus to
+confirm, per the Scope limitation below.
+
+## Engine reconsidered for memory ceiling (31 Aug 2026)
+
+The lightweight docTR architecture above still wasn't enough: production hit a
+live Render OOM ("ran out of memory (used over 512MB)") on the `starter` plan
+*after* that swap. Root cause, measured directly on this machine:
+
+```
+>>> import psutil; psutil.Process().memory_info().rss / 1024 / 1024
+17.1   # bare python
+>>> import torch
+>>> psutil.Process().memory_info().rss / 1024 / 1024
+192.0  # +175MB from `import torch` alone, before any model is loaded
+```
+
+Both docTR configurations measured above (597MB and 572MB peak RSS) are
+already over the 512MB ceiling before this app's own FastAPI/uvicorn process
+uses any memory -- no docTR architecture choice can close that gap, since the
+floor is torch's own import cost, not the model weights on top of it.
+
+RapidOCR (`rapidocr-onnxruntime`, no torch dependency) was measured with the
+same methodology -- five of this repo's own scenario PDFs, embedded PDF text
+as ground truth, 220 DPI rasterization:
+
+| Config | Mean accuracy | Mean seconds/page | Peak RSS |
+|---|---:|---:|---:|
+| docTR, lightweight (previous) | 99.71% | 3.093 | 572 MB |
+| **RapidOCR (current)** | **94.09%** | 8.293 | **154 MB** |
+
+RapidOCR comfortably clears the memory ceiling docTR structurally could not.
+The accuracy cost is real and was accepted knowingly, not overlooked: 94.09%
+mean on this clean corpus (two of five documents scored notably worse, 84.29%
+and 87.11%), and on the original real-document corpus in "Measured results"
+above, RapidOCR was already the lowest-accuracy engine tested (76.39%, vs.
+docTR's 81.72% and Tesseract's 82.71%). This trade-off leans on the existing
+human-in-the-loop design: every ClinicalFact drafted from OCR text lands
+`PROPOSED` for clinician verification and is never auto-finalized (see
+`cca.py`'s document upload endpoint), so a lower-accuracy engine increases
+the manual-correction burden rather than the risk of an unreviewed error.
+
+If the deployed plan is ever upgraded past docTR's ~600MB floor, moving back
+to docTR (or to Tesseract via a Docker migration, which was both faster and
+more accurate than everything else tested) is worth reconsidering purely for
+the accuracy gain -- this was a memory-driven choice, not a claim that
+RapidOCR is otherwise the better engine.
 
 ## Scope limitation
 

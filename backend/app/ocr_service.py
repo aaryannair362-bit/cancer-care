@@ -1,18 +1,29 @@
 """PDF/image text extraction with evidence-preserving, deterministic clinical parsing.
 
-OCR engine: docTR (pure pip install -- torch + torchvision, no system package). Switched from
-Tesseract specifically to drop the system-binary dependency that required either a Docker build
-step (`apt-get install tesseract-ocr`) or an unverifiable PATH lookup on Render's native Python
-runtime -- docTR's model weights download from Hugging Face at first use and cache under the
-process's home directory, no OS package manager involved. Chosen over EasyOCR/RapidOCR/PaddleOCR
-per this repo's own measured comparison (see OCR_BENCHMARK.md): docTR is the closest match to
-Tesseract's accuracy (81.72% vs. 82.71%) of any pip-only engine tested, at a latency (~11s/page
-on the benchmark machine) that's still well inside the 30s/page production timeout -- EasyOCR
-was slower and less accurate, PaddleOCR matched accuracy but took 190s/page and had Windows
-install issues, RapidOCR was both slower and less accurate. Trade-off, stated plainly: docTR's
-pretrained recognition model targets Latin-script text; unlike Tesseract or EasyOCR, it does not
-offer a per-language model or language-code setting, so it is not a fit for documents in
-non-Latin scripts (e.g. Devanagari). All the benchmark's source documents were English.
+OCR engine: RapidOCR (pure pip install -- onnxruntime, no system package, no torch). This app
+previously used docTR (also pip-only, chosen over Tesseract specifically to avoid the
+`apt-get install tesseract-ocr` / Docker requirement -- see git history for that reasoning). docTR
+was moved off after a live production OOM on Render's `starter` plan (512MB RAM, confirmed
+31 Aug 2026 -- "ran out of memory (used over 512MB)"): `import torch` alone costs ~175MB RSS
+before any model loads, and both docTR architectures measured in OCR_BENCHMARK.md's "Architecture
+comparison" peaked at 572-597MB -- already over 512MB before this app's own FastAPI/uvicorn
+process needs any memory. No docTR architecture choice closes that gap; the floor is torch itself.
+RapidOCR (onnxruntime, no torch) measured at just 154MB peak RSS on the same methodology and
+corpus -- see OCR_BENCHMARK.md's "Engine reconsidered for memory ceiling" section.
+
+Trade-off, stated plainly and chosen knowingly: RapidOCR is less accurate than docTR. On this
+repo's own clean synthetic test PDFs, RapidOCR scored 94.09% mean vs. docTR's 99.7%, with two of
+five documents scoring notably worse (84-87%). On the original real-document OCR_BENCHMARK.md
+corpus, RapidOCR scored 76.39% vs. docTR's 81.72% and Tesseract's 82.71% -- it was the
+lowest-accuracy engine in that comparison. This was accepted specifically to fit the deployed
+plan's memory ceiling without an infra/cost change; every ClinicalFact drafted from OCR text still
+lands PROPOSED for clinician verification, never auto-finalized, which is the safety net this
+trade-off leans on. If the plan is ever upgraded, moving back to docTR (or Tesseract, which needs
+Docker) for the accuracy gain is worth reconsidering.
+
+Language: RapidOCR's bundled models target Latin-script text; documents in non-Latin scripts
+(e.g. Devanagari) are out of scope, same limitation docTR had. No per-page or per-request timeout
+is actually enforced in code -- see OCR_BENCHMARK.md's Production behavior section.
 """
 from __future__ import annotations
 
@@ -22,39 +33,33 @@ import threading
 from datetime import datetime
 from typing import Any
 
-_predictor = None
-_predictor_lock = threading.Lock()
+_engine = None
+_engine_lock = threading.Lock()
 
 
-def _get_predictor():
-    """Lazy singleton: docTR's ocr_predictor() loads model weights (a few seconds the first
-    time, cached to disk after) -- built once per process on first real OCR call, not at import
+def _get_engine():
+    """Lazy singleton: RapidOCR() loads its bundled ONNX models on first construction (under a
+    second, per OCR_BENCHMARK.md) -- built once per process on first real OCR call, not at import
     time, so a deployment that never actually uses OCR doesn't pay that cost on every startup."""
-    global _predictor
-    if _predictor is None:
-        with _predictor_lock:
-            if _predictor is None:
-                from doctr.models import ocr_predictor
-                _predictor = ocr_predictor(pretrained=True)
-    return _predictor
+    global _engine
+    if _engine is None:
+        with _engine_lock:
+            if _engine is None:
+                from rapidocr_onnxruntime import RapidOCR
+                _engine = RapidOCR()
+    return _engine
 
 
 def _run_ocr(image) -> str:
-    """image: a PIL.Image. Returns extracted text, one line per detected text line, words
-    space-joined within a line -- the same "Label: value" per-line structure
-    _clinical_signals()'s regex parser below depends on (it identifies a field, e.g.
-    "Medications: ...", by it starting its own line). docTR's `.export()` groups words into
-    lines/blocks/pages already in reading order, so no extra sorting is needed."""
+    """image: a PIL.Image. Returns extracted text, one line per detected text region -- the same
+    "Label: value" per-line structure _clinical_signals()'s regex parser below depends on (it
+    identifies a field, e.g. "Medications: ...", by it starting its own line). Verified against
+    this repo's own scenario PDFs: RapidOCR's detector already groups words into line-level
+    regions in reading order, not word-by-word, so no extra grouping/sorting is needed here."""
     import numpy as np
-    predictor = _get_predictor()
-    exported = predictor([np.array(image.convert("RGB"))]).export()
-    lines = [
-        " ".join(word["value"] for word in line["words"])
-        for page in exported["pages"]
-        for block in page["blocks"]
-        for line in block["lines"]
-    ]
-    return "\n".join(lines).strip()
+    engine = _get_engine()
+    result, _ = engine(np.asarray(image.convert("RGB")))
+    return "\n".join(item[1] for item in (result or [])).strip()
 
 
 def _clinical_signals(text: str) -> dict[str, Any]:
@@ -118,7 +123,7 @@ def extract_document(content: bytes, content_type: str) -> dict[str, Any]:
                     except Exception:
                         continue
             if ocr_by_page:
-                engines.append("doctr")
+                engines.append("rapidocr")
         engines.insert(0, "pypdf")
         for i, native_text in enumerate(native):
             if i in ocr_by_page:
@@ -148,7 +153,7 @@ def extract_document(content: bytes, content_type: str) -> dict[str, Any]:
             except Exception:
                 page_text.append({"page": i + 1, "text": "", "method": "ocr_failed"})
         if any(p["method"] == "ocr" for p in page_text):
-            engines.append("doctr")
+            engines.append("rapidocr")
 
     full_text = "\n\n".join(p["text"] for p in page_text if p["text"]).strip()
     if not full_text:

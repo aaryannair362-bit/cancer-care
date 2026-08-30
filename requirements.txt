@@ -16,7 +16,9 @@ metaphone>=0.6
 pypdf>=5.0.0
 PyMuPDF>=1.24.0
 Pillow>=10.0.0
-# Document OCR: pure pip install (torch/torchvision), no system package or Docker build step
-# required -- see ocr_service.py's module docstring and OCR_BENCHMARK.md for why this engine
-# was picked over Tesseract/EasyOCR/RapidOCR/PaddleOCR.
-python-doctr[torch]>=1.1.0
+# Document OCR: pure pip install (onnxruntime, no torch, no system package or Docker build step)
+# -- see ocr_service.py's module docstring and OCR_BENCHMARK.md for why this engine (RapidOCR)
+# replaced docTR: docTR's torch dependency alone cost ~175MB RSS before any model even loaded,
+# which combined with model weights put every real OCR call over Render's 512MB `starter` plan
+# regardless of which docTR architecture was used -- confirmed by a live production OOM.
+rapidocr-onnxruntime==1.2.3
