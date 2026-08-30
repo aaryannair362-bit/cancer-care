@@ -694,6 +694,13 @@ class TreatmentSession(Base):
     administered_by = Column(String(200), nullable=True)
     status = Column(String(50), default="PLANNED")  # PLANNED, ASSESSED, ADMINISTERED, HELD, DEFERRED, CANCELLED
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Day Care / Infusion Nurse queue logistics (Gap Analysis PDF, 30 Aug 2026) -- nurse-owned,
+    # deliberately separate from `status` above (owned by the clearance-decision flow). See
+    # migrations.py's matching ADDITIVE_COLUMNS entries.
+    arrival_status = Column(String(30), default="Scheduled")  # Scheduled, Arrived, Cancelled
+    arrived_at = Column(DateTime, nullable=True)
+    chair_bed = Column(String(50), nullable=True)
+    expected_duration_minutes = Column(Integer, nullable=True)
 
 class TreatmentOrder(Base):
     """The executable instruction for one specific TreatmentSession, distinct from both
@@ -805,3 +812,231 @@ class CCAJourneyEvent(Base):
     provenance_doc_id = Column(Integer, nullable=True)
     event_metadata = Column(JSON, nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Day Care / Infusion Nurse -- treatment-day nursing workspace (Gap Analysis PDF,
+# 30 Aug 2026). Sits entirely on top of the existing TreatmentOrder/TreatmentEvent
+# lifecycle -- none of these tables are ever read by the clearance-decision flow in
+# routers/cca.py, and none of them write to TreatmentOrder.status or
+# TreatmentSession.status (those stay owned by record_clearance_decision). This is
+# the nursing documentation layer the gap analysis found missing: pharmacy
+# readiness, vascular access, per-medication administration, monitoring, hold/
+# reaction/extravasation escalation, and treatment-day completion. Every field
+# here is either a fixed-vocabulary choice the nurse picks or free-text
+# documentation -- nothing computes or validates against a clinical/dosage
+# threshold (see the "no dosage review logic anywhere" project rule).
+# ---------------------------------------------------------------------------
+
+class PreTreatmentSafetyCheck(Base):
+    """One per Treatment Order -- the identity/order/allergy/labs review the gap
+    analysis's Pre-Treatment Safety Checklist (SS5.3) calls for. allergy_review_done/
+    _notes is the nurse's own attestation for this treatment day, not a new shared
+    CCAPatient allergy field -- that would reach into Front Desk/registration, out
+    of scope for this module."""
+    __tablename__ = "cca_pretreatment_safety_checks"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=False)
+    identity_verified = Column(Boolean, default=False)
+    identity_method = Column(String(200), nullable=True)
+    order_cycle_confirmed = Column(Boolean, default=False)
+    allergy_review_done = Column(Boolean, default=False)
+    allergy_review_notes = Column(Text, nullable=True)
+    symptom_review_notes = Column(Text, nullable=True)
+    labs_reviewed = Column(Boolean, default=False)
+    labs_review_notes = Column(Text, nullable=True)
+    checked_by = Column(String(200))
+    checked_at = Column(DateTime, default=datetime.utcnow)
+
+
+class VascularAccessAssessment(Base):
+    __tablename__ = "cca_vascular_access_assessments"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=False)
+    device_type = Column(String(50), nullable=False)  # Peripheral IV, PICC, Port, CVC
+    site = Column(String(200), nullable=True)
+    gauge = Column(String(20), nullable=True)
+    dressing_status = Column(String(100), nullable=True)
+    site_condition = Column(String(200), nullable=True)
+    patency_confirmed = Column(Boolean, default=False)
+    blood_return = Column(Boolean, nullable=True)
+    access_ready = Column(Boolean, default=False)
+    problem_reported = Column(Boolean, default=False)
+    problem_notes = Column(Text, nullable=True)
+    assessed_by = Column(String(200))
+    assessed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PharmacyReadiness(Base):
+    """One row per Treatment Order, status updated in place -- traceability comes
+    from calling publish() on every transition (DomainEvent/CCAJourneyEvent), the
+    same pattern TREATMENT_HELD/TREATMENT_ADMINISTERED already use, rather than a
+    second history table. No CCAPharmacist role exists in auth.CCA_ROLES today, so
+    this is recorded by the nurse coordinating with pharmacy, not a pharmacist
+    login -- deliberately not adding a new role for this pass."""
+    __tablename__ = "cca_pharmacy_readiness"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=False)
+    status = Column(String(30), default="Verified")  # Verified, Preparing, Ready, Dispensed, Received
+    status_updated_by = Column(String(200), nullable=True)
+    status_updated_at = Column(DateTime, default=datetime.utcnow)
+    received_by = Column(String(200), nullable=True)
+    received_at = Column(DateTime, nullable=True)
+    product_verified = Column(Boolean, default=False)
+    expiry_checked = Column(Boolean, default=False)
+    second_checker_name = Column(String(200), nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class InfusionMedicationAdministration(Base):
+    """One row per medication line the nurse transcribes off the signed Treatment
+    Order for this treatment day. dose/route/sequence_no/volume_diluent/
+    rate_duration are what the nurse read off the order and are documenting, not a
+    structured field the order itself provides (TreatmentOrder.instructions is
+    free text authored in cca-app.js, out of scope here) -- never computed or
+    checked against a threshold, purely a transcription of an already-authorized
+    instruction, same epistemic status as a paper MAR entry."""
+    __tablename__ = "cca_infusion_medication_administrations"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=False)
+    medication_name = Column(String(200), nullable=False)
+    category = Column(String(30), default="Antineoplastic")  # Premedication, Antineoplastic, Other
+    dose = Column(String(100), nullable=True)
+    route = Column(String(100), nullable=True)
+    sequence_no = Column(Integer, default=1)
+    volume_diluent = Column(String(100), nullable=True)
+    rate_duration = Column(String(100), nullable=True)
+    status = Column(String(30), default="Pending")  # Pending, InProgress, Paused, Stopped, Completed, Omitted
+    product_label_verified = Column(Boolean, default=False)
+    expiry_integrity_checked = Column(Boolean, default=False)
+    second_verifier_name = Column(String(200), nullable=True)
+    start_time = Column(DateTime, nullable=True)
+    end_time = Column(DateTime, nullable=True)
+    actual_rate = Column(String(100), nullable=True)
+    actual_volume = Column(String(100), nullable=True)
+    omission_reason = Column(Text, nullable=True)
+    administered_by = Column(String(200), nullable=True)
+    administered_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class InfusionAdministrationEvent(Base):
+    """Append-only sub-log giving each administration row's start/pause/resume/
+    stop/complete its own timestamped audit trail, distinct from the row's current
+    `status` (a snapshot) the same way TreatmentEvent is distinct from
+    TreatmentOrder.status."""
+    __tablename__ = "cca_infusion_administration_events"
+    id = Column(Integer, primary_key=True)
+    administration_id = Column(Integer, ForeignKey("cca_infusion_medication_administrations.id"), nullable=False)
+    event_type = Column(String(20), nullable=False)  # START, PAUSE, RESUME, STOP, COMPLETE, OMIT
+    notes = Column(Text, nullable=True)
+    performed_by = Column(String(200))
+    performed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class InfusionMonitoringObservation(Base):
+    """Baseline vitals (gap row "Baseline vitals / nursing assessment") is simply
+    the first row with phase=Baseline, recorded from the Pre-Treatment tab -- no
+    separate vitals table."""
+    __tablename__ = "cca_infusion_monitoring_observations"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=True)
+    phase = Column(String(20), default="During")  # Baseline, During, Post
+    observation_time = Column(DateTime, default=datetime.utcnow)
+    vitals = Column(JSON, nullable=True)  # whatever the nurse enters: temp/bp/pulse/rr/spo2
+    symptoms = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    recorded_by = Column(String(200))
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TreatmentHoldEvent(Base):
+    """The generic "nurse flags an unsafe situation and stops/escalates" action
+    (gap row "Treatment hold / escalation") -- distinct from the richer
+    InfusionReactionEvent/ExtravasationEvent below, which carry their own clinical
+    documentation. Never touches TreatmentOrder.status/TreatmentSession.status:
+    those stay owned by the oncologist-gated clearance-decision flow."""
+    __tablename__ = "cca_treatment_hold_events"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=True)
+    reason = Column(Text, nullable=False)
+    hold_type = Column(String(30), default="Safety Hold")  # Safety Hold, Reaction, Extravasation, Other
+    escalated_to = Column(String(200), nullable=True)
+    resumed = Column(Boolean, default=False)
+    resumed_by = Column(String(200), nullable=True)
+    resumed_at = Column(DateTime, nullable=True)
+    resume_notes = Column(Text, nullable=True)
+    held_by = Column(String(200))
+    held_at = Column(DateTime, default=datetime.utcnow)
+
+
+class InfusionReactionEvent(Base):
+    """physician_disposition/directed_by document a physician's verbal/phone
+    instruction relayed to the nurse -- never a nurse-decided or system-computed
+    outcome (same reasoning as TreatmentClearance staying clinician-gated)."""
+    __tablename__ = "cca_infusion_reaction_events"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=True)
+    onset_at = Column(DateTime, default=datetime.utcnow)
+    medication_running = Column(String(200), nullable=True)
+    symptoms = Column(Text, nullable=False)
+    vitals = Column(JSON, nullable=True)
+    infusion_action = Column(String(20), nullable=True)  # Paused, Stopped
+    informed_person = Column(String(200), nullable=True)
+    interventions = Column(Text, nullable=True)
+    patient_response = Column(Text, nullable=True)
+    physician_disposition = Column(String(30), nullable=True)  # Restart, Modify, Discontinue, Transfer-Escalate
+    directed_by = Column(String(200), nullable=True)
+    reported_by = Column(String(200))
+    reported_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ExtravasationEvent(Base):
+    """Deliberately separate from InfusionReactionEvent -- the gap analysis (SS5.10)
+    calls out suspected extravasation as its own workflow, distinct from a
+    systemic infusion reaction."""
+    __tablename__ = "cca_extravasation_events"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=True)
+    agent = Column(String(200), nullable=False)
+    site = Column(String(200), nullable=True)
+    symptoms = Column(Text, nullable=False)
+    approx_exposure_volume = Column(String(100), nullable=True)
+    line_status = Column(String(100), nullable=True)
+    immediate_actions = Column(Text, nullable=True)
+    escalation_notes = Column(Text, nullable=True)
+    follow_up_notes = Column(Text, nullable=True)
+    reported_by = Column(String(200))
+    reported_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TreatmentDayCompletion(Base):
+    """One per Treatment Order; creating this row *is* the "lock the nursing
+    record" action the gap analysis calls for (SS5.11). Deliberately does not
+    touch TreatmentOrder.status/TreatmentSession.status -- those stay owned by the
+    existing clearance-decision flow; this is the nursing documentation layer
+    sitting on top of it."""
+    __tablename__ = "cca_treatment_day_completions"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=False)
+    final_vitals = Column(JSON, nullable=True)
+    final_symptoms = Column(Text, nullable=True)
+    disposition = Column(String(200), nullable=True)
+    access_status = Column(String(50), nullable=True)  # Flushed, Removed, Locked, Left in situ
+    patient_education_notes = Column(Text, nullable=True)
+    red_flags_given = Column(Boolean, default=False)
+    next_treatment_date = Column(Date, nullable=True)
+    next_labs_required = Column(Text, nullable=True)
+    completed_by = Column(String(200))
+    completed_at = Column(DateTime, default=datetime.utcnow)
