@@ -51,6 +51,18 @@ services:
     plan: pro plus
     healthCheckPath: /api/health
     envVars:
+      # glibc's malloc creates per-thread memory arenas (default up to 8x CPU count on 64-bit
+      # Linux) that generally never shrink back to the OS once grown -- a well-documented cause
+      # of long-running Python services with heavy native-extension memory churn (numpy/opencv/
+      # onnxruntime, exactly what OCR does) showing RSS that ratchets upward over a process's
+      # lifetime with no actual code-level leak. This process is a single persistent worker
+      # (WEB_CONCURRENCY=1, per Render's own build log) handling many requests over its uptime,
+      # not a fresh process per request -- so a peak from one OCR call can raise the floor every
+      # later request inherits, even a small one. Capping arenas to 1 is the standard fix for
+      # this class of symptom; it cannot be verified against this exact container from outside
+      # it, but it's a pure env var with no functional/correctness risk.
+      - key: MALLOC_ARENA_MAX
+        value: "1"
       - key: DATABASE_URL
         sync: false
       - key: SECRET_KEY
