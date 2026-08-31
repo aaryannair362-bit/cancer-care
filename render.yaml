@@ -17,7 +17,16 @@ services:
   - type: web
     name: aivana-os
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    # RapidOCR (see requirements.txt) transitively depends on `opencv-python`, the GUI-enabled
+    # build -- on Linux it links Qt/GTK/X11 shared libraries that get loaded into memory at
+    # import time even though this is a headless server that never calls a GUI function. That's
+    # a well-documented, often 150-300MB+ difference from `opencv-python-headless`, the drop-in
+    # server-oriented replacement (identical `cv2` API for everything RapidOCR actually calls).
+    # pip's resolver can't be told "install opencv-python-headless instead of opencv-python" from
+    # requirements.txt alone (they're different package names, so both would install and fight
+    # over the same site-packages/cv2 files) -- explicitly uninstalling the GUI build and
+    # installing headless after the main install is the standard, deterministic fix.
+    buildCommand: pip install -r requirements.txt && pip uninstall -y opencv-python && pip install opencv-python-headless==5.0.0.93
     startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
     # History: `starter` (~512MB RAM) OOM'd on real docTR OCR inference, confirmed live in
     # production twice on 31 Aug 2026 ("ran out of memory (used over 512MB)"). That was traced to
