@@ -17,6 +17,7 @@ out/
 
 # Build
 .vercel/
+tsconfig.tsbuildinfo
 
 # IDE
 .vscode/

@@ -1,6 +1,6 @@
 'use client'
 
-import { Activity, BadgeIndianRupee, Beaker, BookOpen, ChevronRight, FileSearch, HandHeart, History, LayoutDashboard, Microscope, ScanSearch, Settings, ShieldCheck, Syringe } from 'lucide-react'
+import { Activity, BadgeIndianRupee, Beaker, BookOpen, ChevronRight, ClipboardCheck, FileSearch, HandHeart, History, LayoutDashboard, Microscope, Pill, Radiation, ScanSearch, Scissors, Settings, ShieldCheck, Syringe } from 'lucide-react'
 import Link from 'next/link'
 
 import { cn } from '@/lib/utils'
@@ -63,6 +63,15 @@ export function Sidebar({ activeId, onNavigate, allowedModules, roleId }: Sideba
     navItems.find((item)=>item.id==='patients')!,
     {...navItems.find((item)=>item.id==='doctor-opd')!,label:'Consultation'},
     {...navItems.find((item)=>item.id==='care-plan')!,label:'Treatment Plan'},
+    {id:'treatment-order',label:'Treatment Order',icon:ClipboardCheck,href:'/treatment-order'},
+    {id:'pharmacy',label:'Pharmacy',icon:Pill,href:'/pharmacy'},
+    {id:'treatment-day',label:'Day Care / Infusion',icon:Syringe,href:'/treatment-day'},
+    navItems.find((item)=>item.id==='treatment-readiness')!,
+    navItems.find((item)=>item.id==='active-treatment')!,
+    navItems.find((item)=>item.id==='patient-summary')!,
+    navItems.find((item)=>item.id==='response-assessment')!,
+    navItems.find((item)=>item.id==='consent')!,
+    navItems.find((item)=>item.id==='regimens')!,
     navItems.find((item)=>item.id==='nexus')!,
     {id:'guideline-pathway',label:'Guideline Pathway',icon:BookOpen,href:'/nexus'},
     {id:'staging',label:'Staging',icon:ScanSearch,href:'/doctor-opd#staging'},
@@ -73,7 +82,11 @@ export function Sidebar({ activeId, onNavigate, allowedModules, roleId }: Sideba
   const surgicalItems: NavItem[] = [
     navItems.find((item)=>item.id==='patients')!,
     {...navItems.find((item)=>item.id==='doctor-opd')!,label:'Consultation'},
-    {...navItems.find((item)=>item.id==='care-plan')!,label:'Surgical Plan'},
+    {...navItems.find((item)=>item.id==='care-plan')!,label:'Treatment Plan'},
+    {id:'surgical-oncology',label:'Surgical Plan',icon:Scissors,href:'/surgical-oncology'},
+    navItems.find((item)=>item.id==='active-treatment')!,
+    navItems.find((item)=>item.id==='patient-summary')!,
+    navItems.find((item)=>item.id==='consent')!,
     navItems.find((item)=>item.id==='nexus')!,
     {id:'guideline-pathway',label:'Guideline Pathway',icon:BookOpen,href:'/nexus'},
     {id:'staging',label:'Staging',icon:ScanSearch,href:'/doctor-opd#staging'},
@@ -82,7 +95,11 @@ export function Sidebar({ activeId, onNavigate, allowedModules, roleId }: Sideba
   const radiationItems: NavItem[] = [
     navItems.find((item)=>item.id==='patients')!,
     {...navItems.find((item)=>item.id==='doctor-opd')!,label:'Consultation'},
-    {...navItems.find((item)=>item.id==='care-plan')!,label:'Radiation Plan'},
+    {...navItems.find((item)=>item.id==='care-plan')!,label:'Treatment Plan'},
+    {id:'radiation-oncology',label:'Radiation Prescription',icon:Radiation,href:'/radiation-oncology'},
+    navItems.find((item)=>item.id==='active-treatment')!,
+    navItems.find((item)=>item.id==='patient-summary')!,
+    navItems.find((item)=>item.id==='consent')!,
     navItems.find((item)=>item.id==='nexus')!,
     {id:'guideline-pathway',label:'Guideline Pathway',icon:BookOpen,href:'/nexus'},
     {id:'staging',label:'Staging',icon:ScanSearch,href:'/doctor-opd#staging'},
@@ -92,6 +109,7 @@ export function Sidebar({ activeId, onNavigate, allowedModules, roleId }: Sideba
     navItems.find((item)=>item.id==='patients')!,
     {...navItems.find((item)=>item.id==='radiology')!,label:'Imaging Worklist'},
     {id:'radiology-reports',label:'Reports',icon:BookOpen,href:'/radiology#reports'},
+    navItems.find((item)=>item.id==='response-assessment')!,
     navItems.find((item)=>item.id==='nexus')!,
     navItems.find((item)=>item.id==='mdt')!,
   ]
@@ -111,14 +129,23 @@ export function Sidebar({ activeId, onNavigate, allowedModules, roleId }: Sideba
     navItems.find((item)=>item.id==='patients')!,
     {...navItems.find((item)=>item.id==='lab')!,label:'Lab Worklist'},
   ]
+  const pharmacyItems: NavItem[] = [
+    navItems.find((item)=>item.id==='patients')!,
+    {id:'pharmacy',label:'Pharmacy Verification & Dispensing',icon:Pill,href:'/pharmacy'},
+    navItems.find((item)=>item.id==='regimens')!,
+  ]
   const infusionItems: NavItem[] = [
     navItems.find((item)=>item.id==='patients')!,
     {id:'treatment-day',label:'Treatment Day / Infusion',icon:Syringe,href:'/treatment-day'},
+    navItems.find((item)=>item.id==='treatment-readiness')!,
+    navItems.find((item)=>item.id==='active-treatment')!,
+    navItems.find((item)=>item.id==='consent')!,
     navItems.find((item)=>item.id==='nexus')!,
   ]
   const mdtCoordinatorItems: NavItem[] = [
     navItems.find((item)=>item.id==='patients')!,
     navItems.find((item)=>item.id==='mdt')!,
+    navItems.find((item)=>item.id==='active-treatment')!,
     navItems.find((item)=>item.id==='nexus')!,
   ]
   const externalMdtItems: NavItem[] = [
@@ -130,6 +157,8 @@ export function Sidebar({ activeId, onNavigate, allowedModules, roleId }: Sideba
     navItems.find((item)=>item.id==='patients')!,
     {id:'care-coordination',label:'Care Coordination',icon:HandHeart,href:'/care-coordination'},
     {...navItems.find((item)=>item.id==='finance')!,label:'Financial Counselling'},
+    navItems.find((item)=>item.id==='active-treatment')!,
+    navItems.find((item)=>item.id==='patient-summary')!,
     navItems.find((item)=>item.id==='nexus')!,
   ]
   const financeItems: NavItem[] = [
@@ -143,6 +172,9 @@ export function Sidebar({ activeId, onNavigate, allowedModules, roleId }: Sideba
     {id:'workflow-operations',label:'Workflow Operations',icon:Activity,href:'/workflow-operations'},
     {id:'users-roles',label:'Users & Roles',icon:ShieldCheck,href:'/users-roles'},
     {id:'audit-activity',label:'Audit & Activity',icon:History,href:'/audit-activity'},
+    {id:'standards',label:'Standards & Interoperability',icon:ShieldCheck,href:'/standards'},
+    {id:'oncology-operations',label:'Oncology Operations',icon:Activity,href:'/oncology-operations'},
+    {id:'terminology',label:'Dropdown Source of Truth',icon:ShieldCheck,href:'/terminology'},
     {id:'settings',label:'Settings',icon:Settings,href:'/settings'},
   ]
   const roleGroups = roleId === 'doctor'
@@ -161,6 +193,8 @@ export function Sidebar({ activeId, onNavigate, allowedModules, roleId }: Sideba
                 ? [{id:'pathology',label:'Diagnostics',items:pathologistItems}]
                 : roleId === 'lab'
                   ? [{id:'lab-operations',label:'Laboratory',items:labItems}]
+                  : roleId === 'pharmacy'
+                    ? [{id:'pharmacy-operations',label:'Pharmacy',items:pharmacyItems}]
                   : roleId === 'infusion-nurse'
                     ? [{id:'infusion-operations',label:'Day Care',items:infusionItems}]
                     : roleId === 'mdt-coordinator'

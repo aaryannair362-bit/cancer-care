@@ -25,7 +25,7 @@ assert.match(patients, /<Button[^>]*>Start Consultation/, 'Patients must use the
 for (const role of ['registration','nurse','doctor','surgical-oncology','radiation-oncology','radiologist','radiology','pathologist','lab','infusion-nurse','mdt-coordinator','mdt-clinician','navigator','finance','admin']) {
   assert.ok(access.includes(`id: '${role}'`), `Missing role contract for ${role}`)
 }
-for (const label of ['Guideline Pathway','Staging','Surgical Plan','Radiation Plan','Imaging Worklist','Imaging Coordination','Pathology Worklist','Molecular Diagnostics','Treatment Day / Infusion','Assigned Cases','Care Coordination','Financial Counselling','Estimates & Clearance','Operations Dashboard','Audit & Activity']) {
+for (const label of ['Guideline Pathway','Staging','Surgical Plan','Radiation Prescription','Imaging Worklist','Imaging Coordination','Pathology Worklist','Molecular Diagnostics','Treatment Day / Infusion','Assigned Cases','Care Coordination','Financial Counselling','Estimates & Clearance','Operations Dashboard','Audit & Activity']) {
   assert.ok(sidebar.includes(`label:'${label}'`), `Missing required role navigation label: ${label}`)
 }
 console.log('UI shell regression guard passed')

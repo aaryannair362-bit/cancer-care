@@ -1,6 +1,6 @@
 'use client'
 
-import { AlertTriangle, CheckCircle2, FileText, FlaskConical, Scan, ShieldAlert, Stethoscope, UserRound, Users } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ClipboardCheck, FileText, FlaskConical, Scan, ShieldAlert, Stethoscope, UserRound, Users } from 'lucide-react'
 import { useDemoAccess } from '@/components/demo-access-provider'
 import { MdtCoordinatorWorkspace } from '@/components/mdt-coordinator-workspace'
 import { ExternalMdtSpecialistWorkspace } from '@/components/external-mdt-specialist-workspace'
@@ -10,6 +10,9 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 import { StakeholderWorkflowPanel } from '@/components/stakeholder-workflow-panel'
+import { useOncology } from '@/lib/oncology/store'
+import { hasPermission } from '@/lib/demo-access'
+import type { ActorRef } from '@/lib/oncology/types'
 
 const team = [
   ['Medical Oncology', 'Medical Oncologist', 'Confirmed'], ['Surgical Oncology', 'Surgical Oncologist', 'Confirmed'],
@@ -34,9 +37,21 @@ const actions = [
 ]
 
 export default function MdtTumourBoardPage() {
-  const { role } = useDemoAccess()
+  const { role, selectedPatient } = useDemoAccess()
+  const { state, createPlanFromMdt } = useOncology()
   if (role.roleId === 'mdt-coordinator') return <MdtCoordinatorWorkspace />
   if (role.roleId === 'mdt-clinician') return <ExternalMdtSpecialistWorkspace />
+
+  const mdtCase = state.mdtCases.find((c) => c.patientId === selectedPatient.id)
+  const actor: ActorRef = { userId: role.roleId, name: role.label, roleLabel: role.label }
+  const canCreatePlan = hasPermission(role, 'clinical:approve')
+
+  const planActions: { key: 'medical_oncology' | 'radiation_oncology' | 'surgical' | 'combined'; label: string; linked?: string }[] = mdtCase ? [
+    { key: 'medical_oncology', label: 'Create Medical Oncology Plan', linked: mdtCase.linkedPlanIds.medicalOncology },
+    { key: 'radiation_oncology', label: 'Create Radiation Oncology Plan', linked: mdtCase.linkedPlanIds.radiationOncology },
+    { key: 'surgical', label: 'Create Surgical Plan', linked: mdtCase.linkedPlanIds.surgical },
+    { key: 'combined', label: 'Combined-Modality Plan', linked: mdtCase.linkedPlanIds.combined },
+  ] : []
   return <PageContainer>
     <PageHeader title="MDT / Tumour Board" description="Prepare and coordinate structured multidisciplinary oncology review." actions={<Badge variant="information">Fictional demo data</Badge>} />
     <StakeholderWorkflowPanel module="mdt" />
@@ -56,7 +71,48 @@ export default function MdtTumourBoardPage() {
 
     <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{reviewSections.map((section) => { const Icon = section.icon; return <Card key={section.title}><CardHeader className="border-b border-divider pb-4"><div className="flex items-center justify-between gap-3"><span className="flex items-center gap-2"><Icon className="size-4 text-metadata" /><CardTitle className="text-base">{section.title}</CardTitle></span><Badge variant={section.status.includes('Needs') || section.status.includes('Awaiting') ? 'warning' : 'success'}>{section.status}</Badge></div></CardHeader><CardContent className="pt-5"><p className="text-sm leading-6 text-supporting">{section.text}</p></CardContent></Card> })}</div>
 
-    <Card variant="ai" className="mb-6"><CardHeader className="border-b border-ai-highlight"><div className="flex items-start justify-between gap-3"><div><CardTitle>MDT discussion draft</CardTitle><CardDescription className="mt-1">Prepared prompts for clinician discussion — not an AI or automated recommendation</CardDescription></div><Badge variant="information">Draft only</Badge></div></CardHeader><CardContent className="grid gap-6 pt-6 lg:grid-cols-3"><section><h3 className="text-sm font-semibold text-supporting">Discussion points</h3><ul className="mt-3 space-y-2 text-sm text-supporting"><li>• Pathology risk features and margin status</li><li>• Current systemic-treatment tolerance</li><li>• Timing of radiotherapy planning</li><li>• Need for additional diagnostic review</li></ul></section><section><h3 className="text-sm font-semibold text-supporting">Options for clinician discussion</h3><ul className="mt-3 space-y-2 text-sm text-supporting"><li>• Continue planned sequence after clinical clearance</li><li>• Reassess timing based on recovery and toxicity</li><li>• Request focused pathology or imaging review</li></ul></section><section><h3 className="text-sm font-semibold text-supporting">Decision ownership</h3><dl className="mt-3 space-y-3 text-sm"><div><dt className="text-metadata">Final decision</dt><dd className="font-medium text-supporting">Pending clinician-led MDT</dd></div><div><dt className="text-metadata">Responsible clinician</dt><dd className="font-medium text-supporting">Medical Oncologist</dd></div><div><dt className="text-metadata">Meeting</dt><dd className="font-medium text-supporting">29 Aug 2026 · 08:00</dd></div></dl></section><div className="flex gap-2 rounded-md border border-warning/30 bg-warning-subtle p-3 text-xs text-warning-strong lg:col-span-3"><AlertTriangle className="size-4 shrink-0" /><span>No option shown here is a clinical recommendation. The final decision must be recorded by the responsible clinicians after multidisciplinary review.</span></div></CardContent></Card>
+    {mdtCase ? (
+      <Card variant="ai" className="mb-6">
+        <CardHeader className="border-b border-ai-highlight"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle>MDT recommendation — the record, not a summary</CardTitle><CardDescription className="mt-1">Every field below is discrete and stored; this is the record the whole downstream treatment chain traces back to</CardDescription></div><Badge variant={mdtCase.status === 'plan_created' ? 'success' : mdtCase.status === 'recommendation_recorded' ? 'information' : 'warning'}>{mdtCase.status.replace(/_/g, ' ')}</Badge></div></CardHeader>
+        <CardContent className="space-y-6 pt-6">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {[
+              ['Cancer diagnosis', mdtCase.cancerDiagnosis], ['Stage', mdtCase.stage], ['Performance status', mdtCase.performanceStatus],
+              ['Biomarkers', mdtCase.pathologyBiomarkers.join(', ')], ['Treatment intent', mdtCase.treatmentIntent], ['Specialty responsible', mdtCase.specialtyResponsible.replace(/_/g, ' ')],
+              ['MDT date', mdtCase.mdtDate],
+            ].map(([label, value]) => <div key={label}><p className="text-xs uppercase tracking-wider text-metadata">{label}</p><p className="mt-1 text-sm font-medium text-supporting">{value}</p></div>)}
+          </div>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div><p className="text-xs uppercase tracking-wider text-metadata">MDT recommendation</p><p className="mt-1 text-sm leading-6 text-supporting">{mdtCase.recommendation}</p></div>
+            <div><p className="text-xs uppercase tracking-wider text-metadata">Alternative options discussed</p><p className="mt-1 text-sm leading-6 text-supporting">{mdtCase.alternativeOptionsDiscussed}</p></div>
+            <div><p className="text-xs uppercase tracking-wider text-metadata">Rationale</p><p className="mt-1 text-sm leading-6 text-supporting">{mdtCase.rationale}</p></div>
+            <div><p className="text-xs uppercase tracking-wider text-metadata">Final consensus</p><p className="mt-1 text-sm leading-6 text-supporting">{mdtCase.finalConsensus}</p></div>
+          </div>
+          <div>
+            <p className="text-xs uppercase tracking-wider text-metadata">Participants</p>
+            <div className="mt-2 flex flex-wrap gap-2">{mdtCase.participants.map((p) => <Badge key={p.userId} variant="neutral">{p.name} · {p.specialty} ({p.attendance})</Badge>)}</div>
+          </div>
+          <div className="flex flex-wrap gap-4 border-t border-divider pt-4 text-xs text-metadata">
+            <span>Proposed by {mdtCase.proposedBy.name}</span>
+            {mdtCase.approvedBy ? <span>Approved by {mdtCase.approvedBy.name} · {new Date(mdtCase.approvedAt ?? '').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</span> : <span>Awaiting approval</span>}
+          </div>
+
+          <div className="border-t border-divider pt-4">
+            <p className="text-sm font-semibold text-supporting">Turn this recommendation into an executable plan</p>
+            <p className="mt-1 text-xs leading-5 text-metadata">This never happens automatically — the appropriate oncologist reviews and authorizes each plan below.</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {planActions.map((action) => action.linked ? (
+                <Badge key={action.key} variant="success"><CheckCircle2 />{action.label.replace('Create ', '')} created</Badge>
+              ) : (
+                <Button key={action.key} type="button" size="sm" variant="outline" disabled={!canCreatePlan} onClick={() => createPlanFromMdt(mdtCase.id, action.key, actor)}><ClipboardCheck />{action.label}</Button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex gap-2 rounded-md border border-warning/30 bg-warning-subtle p-3 text-xs text-warning-strong"><AlertTriangle className="size-4 shrink-0" /><span>An MDT recommendation never becomes an active treatment order by itself. Creating a plan above still requires the Medical Oncology / Radiation Oncology / Surgical Oncology order screens to be authorized separately.</span></div>
+        </CardContent>
+      </Card>
+    ) : null}
 
     <Card><CardHeader className="border-b border-divider"><div className="flex items-start justify-between gap-3"><div><CardTitle>Follow-up actions</CardTitle><CardDescription className="mt-1">Fictional actions coordinated back through NEXUS after MDT</CardDescription></div><Badge variant="information">NEXUS linked</Badge></div></CardHeader><CardContent className="grid gap-4 pt-6 sm:grid-cols-2">{actions.map(([task,owner,due,status]) => <div key={task} className="rounded-lg border border-border p-4"><div className="flex items-start justify-between gap-3"><p className="text-sm font-semibold text-supporting">{task}</p><Badge variant={status === 'In progress' ? 'information' : status === 'Awaiting review' ? 'warning' : 'neutral'}>{status}</Badge></div><div className="mt-4 grid grid-cols-2 gap-3 text-xs"><div><p className="text-metadata">Owner</p><p className="mt-1 font-medium text-supporting">{owner}</p></div><div><p className="text-metadata">Due</p><p className="mt-1 font-medium text-supporting">{due}</p></div></div><div className="mt-4 flex justify-end border-t border-divider pt-3"><Button type="button" variant="ghost" size="sm">View in NEXUS</Button></div></div>)}</CardContent></Card>
   </PageContainer>

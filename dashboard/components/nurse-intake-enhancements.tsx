@@ -1,28 +1,72 @@
 'use client'
 
 import * as React from 'react'
-import { CheckCircle2, FileSearch, ShieldAlert, Upload } from 'lucide-react'
+import { CheckCircle2, FileSearch, FileText, ShieldAlert } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { DocumentUploadField } from '@/components/documents/document-upload-field'
+import { useDocuments } from '@/lib/documents/store'
+import { DEMO_PATIENT_ID } from '@/lib/oncology/seed-data'
+import type { ActorRef } from '@/lib/oncology/types'
 
-const documents = [
-  { name:'Pathology report',type:'Pathology',date:'18 Jun 2026',status:'Reviewed' },
-  { name:'Previous CBC',type:'Laboratory',date:'19 Aug 2026',status:'Needs review' },
-  { name:'External prescription',type:'Prescription',date:'20 Aug 2026',status:'Reviewed' },
+const seedDocuments = [
+  { key:'seed-0', name:'Pathology report',type:'Pathology',date:'18 Jun 2026',status:'Reviewed' },
+  { key:'seed-1', name:'Previous CBC',type:'Laboratory',date:'19 Aug 2026',status:'Needs review' },
+  { key:'seed-2', name:'External prescription',type:'Prescription',date:'20 Aug 2026',status:'Reviewed' },
 ]
-const extracted = [
+const seedExtracted = [
   ['Hemoglobin','9.8 g/dL','96%','Needs verification'],['WBC','3.2 ×10⁹/L','94%','Needs verification'],['ER','Positive','99%','Verified'],['PR','Positive','98%','Verified'],['HER2','Negative','97%','Verified'],
 ]
 
-export function PreviousDocumentsSection() {
-  const [selected,setSelected]=React.useState(1)
+/**
+ * "Previous Documents" — the seeded fictional documents below remain as illustrative,
+ * clearly-labeled demo content (see status badges). What changed: the "Upload / Capture
+ * document" action used to only set a fake status string ("Demo capture ready — no file
+ * was stored."). It now runs a real upload + real client-side OCR (see
+ * lib/documents/ocr.ts) and a genuinely-uploaded document appears in the same list with
+ * its own real extracted text/fields, reviewed the same way the seeded examples are.
+ */
+export function PreviousDocumentsSection({ actor }: { actor: ActorRef }) {
+  const { getDocumentsForPatient } = useDocuments()
+  const uploadedDocuments = getDocumentsForPatient(DEMO_PATIENT_ID)
+
+  const [selectedKey, setSelectedKey] = React.useState('seed-0')
   const [verified,setVerified]=React.useState<Record<string,boolean>>({ER:true,PR:true,HER2:true})
   const [editing,setEditing]=React.useState<string | null>(null)
-  const [values,setValues]=React.useState<Record<string,string>>(()=>Object.fromEntries(extracted.map(([field,value])=>[field,value])))
-  const [captureState,setCaptureState]=React.useState('')
-  return <Card><CardHeader className="border-b border-divider"><div className="flex flex-col gap-3 sm:flex-row sm:items-start"><span className="flex size-9 items-center justify-center rounded-md bg-brand-soft"><FileSearch className="size-4"/></span><div className="min-w-0 flex-1"><CardTitle>Previous Documents</CardTitle><CardDescription className="mt-1">3 fictional documents available for nurse review</CardDescription></div><Button type="button" size="sm" variant="outline" onClick={()=>setCaptureState('Demo capture ready — no file was stored.')}><Upload/>Upload / Capture document</Button></div>{captureState?<p role="status" className="mt-3 text-xs text-information-strong">{captureState}</p>:null}</CardHeader><CardContent className="grid gap-5 pt-6 lg:grid-cols-2"><div className="space-y-2">{documents.map((document,index)=><button type="button" key={document.name} onClick={()=>setSelected(index)} className="flex w-full items-center justify-between gap-3 rounded-md border border-border p-3 text-left hover:bg-surface-app"><div><p className="text-sm font-semibold text-supporting">{document.name}</p><p className="mt-1 text-xs text-metadata">{document.type} · {document.date}</p></div><Badge variant={document.status==='Reviewed'?'success':'warning'}>{document.status}</Badge></button>)}</div><div className="rounded-lg border border-ai-highlight bg-ai-panel p-4"><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-wider text-information-strong">AI Document Review</p><p className="mt-1 text-sm font-semibold">{documents[selected].name}</p></div><Badge variant="information">Demo extraction</Badge></div><div className="mt-4 flex h-24 items-center justify-center rounded-md border border-dashed border-border bg-surface text-xs text-metadata">Original fictional document preview placeholder</div><p className="mt-4 text-xs font-semibold uppercase tracking-wider text-metadata">Extracted information</p><div className="mt-2 divide-y divide-divider">{extracted.map(([field,,confidence,status])=><div key={field} className="grid gap-2 py-2 text-xs sm:grid-cols-[80px_1fr_auto] sm:items-center"><span className="font-medium text-supporting">{field}</span>{editing===field?<Input aria-label={`Edit ${field} extracted value`} value={values[field]} onChange={(event)=>setValues((current)=>({...current,[field]:event.target.value}))}/>:<span>{values[field]} · {confidence}</span>}<Badge variant={verified[field]?'success':'warning'}>{verified[field]?'Verified':status}</Badge><div className="flex justify-end gap-2 sm:col-span-3"><Button type="button" size="sm" variant="ghost" onClick={()=>{setVerified((current)=>({...current,[field]:true}));setEditing(null)}}>Accept</Button><Button type="button" size="sm" variant="ghost" onClick={()=>setEditing(field)}>Edit</Button></div></div>)}</div><p className="mt-3 text-xs text-metadata">UI demonstration only. No OCR, upload, storage, or transmission occurs.</p></div></CardContent></Card>
+  const [values,setValues]=React.useState<Record<string,string>>(()=>Object.fromEntries(seedExtracted.map(([field,value])=>[field,value])))
+
+  const selectedSeed = seedDocuments.find((d) => d.key === selectedKey)
+  const selectedUploaded = uploadedDocuments.find((d) => d.id === selectedKey)
+
+  return <Card><CardHeader className="border-b border-divider"><div className="flex flex-col gap-3 sm:flex-row sm:items-start"><span className="flex size-9 items-center justify-center rounded-md bg-brand-soft"><FileSearch className="size-4"/></span><div className="min-w-0 flex-1"><CardTitle>Previous Documents</CardTitle><CardDescription className="mt-1">{seedDocuments.length} fictional document(s) plus any uploaded this session</CardDescription></div></div>
+    <div className="mt-4 max-w-md"><DocumentUploadField patientId={DEMO_PATIENT_ID} actor={actor} documentType="Previous medical record" buttonLabel="Upload / Capture document" onUploaded={(record)=>setSelectedKey(record.id)} /></div>
+  </CardHeader><CardContent className="grid gap-5 pt-6 lg:grid-cols-2">
+    <div className="space-y-2">
+      {seedDocuments.map((document)=><button type="button" key={document.key} onClick={()=>setSelectedKey(document.key)} className="flex w-full items-center justify-between gap-3 rounded-md border border-border p-3 text-left hover:bg-surface-app"><div><p className="text-sm font-semibold text-supporting">{document.name}</p><p className="mt-1 text-xs text-metadata">{document.type} · {document.date} · Fictional</p></div><Badge variant={document.status==='Reviewed'?'success':'warning'}>{document.status}</Badge></button>)}
+      {uploadedDocuments.map((document)=><button type="button" key={document.id} onClick={()=>setSelectedKey(document.id)} className="flex w-full items-center justify-between gap-3 rounded-md border border-border p-3 text-left hover:bg-surface-app"><div className="flex items-center gap-2"><FileText className="size-4 shrink-0 text-metadata"/><div><p className="text-sm font-semibold text-supporting">{document.filename}</p><p className="mt-1 text-xs text-metadata">{document.documentType} · {new Date(document.uploadedAt).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'})}</p></div></div><Badge variant={document.ocrStatus==='completed'?'success':document.ocrStatus==='failed'?'critical':document.ocrStatus==='needs_review'?'warning':'information'}>{document.ocrStatus.replace('_',' ')}</Badge></button>)}
+    </div>
+
+    {selectedUploaded ? (
+      <div className="rounded-lg border border-ai-highlight bg-ai-panel p-4">
+        <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-wider text-information-strong">Document Review</p><p className="mt-1 text-sm font-semibold">{selectedUploaded.filename}</p></div><Badge variant="information">{selectedUploaded.ocrEngine ?? 'Uploaded'}</Badge></div>
+        {selectedUploaded.dataUrl.startsWith('data:image') ? <img src={selectedUploaded.dataUrl} alt={selectedUploaded.filename} className="mt-4 max-h-40 w-full rounded-md border border-border object-contain" /> : <div className="mt-4 flex h-24 items-center justify-center rounded-md border border-dashed border-border bg-surface text-xs text-metadata">{selectedUploaded.contentType}</div>}
+        {selectedUploaded.ocrStatus==='failed' ? <p className="mt-3 flex items-center gap-2 text-xs text-critical-strong"><ShieldAlert className="size-3.5 shrink-0"/>{selectedUploaded.ocrError}</p> : (
+          <>
+            <p className="mt-4 text-xs font-semibold uppercase tracking-wider text-metadata">Extracted information — real OCR, reviewed here</p>
+            {selectedUploaded.extractedFields && Object.keys(selectedUploaded.extractedFields).length>0 ? (
+              <div className="mt-2 divide-y divide-divider">{Object.entries(selectedUploaded.extractedFields).map(([field,value])=><div key={field} className="grid gap-2 py-2 text-xs sm:grid-cols-[110px_1fr] sm:items-center"><span className="font-medium capitalize text-supporting">{field}</span><span>{value}</span></div>)}</div>
+            ) : <p className="mt-2 text-xs text-metadata">Text extracted; no labeled fields (Diagnosis:/Medications:/etc.) were found — review the raw text below.</p>}
+            {selectedUploaded.extractedText ? <details className="mt-3"><summary className="cursor-pointer text-xs font-semibold text-brand-deep">View full extracted text</summary><p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-metadata">{selectedUploaded.extractedText}</p></details> : null}
+          </>
+        )}
+        <p className="mt-3 text-xs text-metadata">Real client-side OCR. Verify every value against the original document before relying on it clinically.</p>
+      </div>
+    ) : selectedSeed ? (
+      <div className="rounded-lg border border-ai-highlight bg-ai-panel p-4"><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-wider text-information-strong">AI Document Review</p><p className="mt-1 text-sm font-semibold">{selectedSeed.name}</p></div><Badge variant="information">Demo extraction</Badge></div><div className="mt-4 flex h-24 items-center justify-center rounded-md border border-dashed border-border bg-surface text-xs text-metadata">Original fictional document preview placeholder</div><p className="mt-4 text-xs font-semibold uppercase tracking-wider text-metadata">Extracted information</p><div className="mt-2 divide-y divide-divider">{seedExtracted.map(([field,,confidence,status])=><div key={field} className="grid gap-2 py-2 text-xs sm:grid-cols-[80px_1fr_auto] sm:items-center"><span className="font-medium text-supporting">{field}</span>{editing===field?<Input aria-label={`Edit ${field} extracted value`} value={values[field]} onChange={(event)=>setValues((current)=>({...current,[field]:event.target.value}))}/>:<span>{values[field]} · {confidence}</span>}<Badge variant={verified[field]?'success':'warning'}>{verified[field]?'Verified':status}</Badge><div className="flex justify-end gap-2 sm:col-span-3"><Button type="button" size="sm" variant="ghost" onClick={()=>{setVerified((current)=>({...current,[field]:true}));setEditing(null)}}>Accept</Button><Button type="button" size="sm" variant="ghost" onClick={()=>setEditing(field)}>Edit</Button></div></div>)}</div><p className="mt-3 text-xs text-metadata">Fictional demo document — illustrative extraction only, not real OCR.</p></div>
+    ) : null}
+  </CardContent></Card>
 }
 
 export function StructuredOncologyHistory() {

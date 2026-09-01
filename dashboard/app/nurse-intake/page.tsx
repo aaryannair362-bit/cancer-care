@@ -208,7 +208,7 @@ export default function NurseIntakePage() {
           </CardContent>
         </Card>
 
-        <PreviousDocumentsSection />
+        <PreviousDocumentsSection actor={{ userId: role.roleId, name: role.label, roleLabel: role.label }} />
 
         <Card>
           <SectionHeading icon={FileHeart} title="Relevant oncology history" description="Summarise diagnosis and active treatment for rapid clinical orientation." />
