@@ -50,7 +50,7 @@ export default function OpdScribePage() {
   const progressIndex = status === 'Signed' ? 3 : status === 'Clinician Accepted' ? 2 : status.startsWith('Edited') ? 1 : 0
 
   return <PageContainer className="max-w-[1440px]">
-    <PageHeader title="AI Scribe" description="Review and complete the clinician-owned documentation for this fictional encounter." actions={<Badge variant={statusVariant}>{status === 'Signed' ? <CheckCircle2 /> : <Sparkles />}{status}</Badge>} />
+    <PageHeader title="Consultation Documentation" description="Review and complete the clinician-owned documentation for this fictional encounter." actions={<Badge variant={statusVariant}>{status === 'Signed' ? <CheckCircle2 /> : <Sparkles />}{status}</Badge>} />
 
     <div className="mb-5 flex flex-wrap items-center gap-2"><Link href="/doctor-opd#patient-summary" className={buttonVariants({ variant: 'ghost', size: 'sm' })}><ArrowLeft />Back to Patient Summary</Link><Link href="/doctor-opd" className={buttonVariants({ variant: 'ghost', size: 'sm' })}><ArrowLeft />Back to Doctor OPD</Link><span className="ml-auto hidden text-xs text-metadata sm:block">Selected patient remains active</span></div>
 

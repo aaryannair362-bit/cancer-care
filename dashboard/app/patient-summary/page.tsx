@@ -32,6 +32,14 @@ export default function PatientSummaryPage() {
   const nextPhase = treatmentPlan?.phases.find((p) => p.status === 'proposed' || p.status === 'draft')
   const currentJourney = state.journeyMilestones.filter((m) => m.patientId === selectedPatient.id).find((m) => m.isCurrent)
 
+  const stageDisplay = treatmentPlan?.stage ?? selectedPatient.stage
+  const stagingVersionDisplay = state.stagingDetail
+    ? `${stageDisplay} (${state.stagingDetail.systemLabel}${state.stagingDetail.confirmedAt ? ` · confirmed ${new Date(state.stagingDetail.confirmedAt).toLocaleDateString()}` : ''})`
+    : stageDisplay
+  const recentImagingDisplay = state.recentImaging.length > 0
+    ? state.recentImaging.map((r) => `${r.title}${r.resultedAt ? ` (${new Date(r.resultedAt).toLocaleDateString()})` : ''}`).join('; ')
+    : undefined
+
   const careTeam = [
     order ? { role: order.orderingClinician.roleLabel, name: order.orderingClinician.name } : null,
     surgicalPlan ? { role: surgicalPlan.recommendedBy.roleLabel, name: surgicalPlan.recommendedBy.name } : null,
@@ -56,7 +64,7 @@ export default function PatientSummaryPage() {
         <Field label="Cancer diagnosis" value={treatmentPlan?.diagnosis ?? selectedPatient.diagnosis} />
         <Field label="Primary site" value={mdtCase?.cancerDiagnosis ?? selectedPatient.diagnosis} />
         <Field label="Histology" value={treatmentPlan?.histology} />
-        <Field label="Stage" value={treatmentPlan?.stage ?? selectedPatient.stage} />
+        <Field label="Stage and staging version/date" value={stagingVersionDisplay} />
         <Field label="Biomarkers / molecular findings" value={treatmentPlan?.biomarkers.join(', ') ?? selectedPatient.biology} />
         <Field label="Performance status (ECOG)" value={mdtCase?.performanceStatus} />
         <Field label="Current disease status" value={treatmentPlan?.currentDiseaseStatus} />
@@ -68,9 +76,9 @@ export default function PatientSummaryPage() {
         <Field label="Next treatment" value={nextPhase?.label} />
         <Field label="Toxicities" value={toxicities.length > 0 ? `${toxicities.length} recorded (${toxicities.filter((t) => t.outcome === 'ongoing').length} ongoing)` : 'None recorded'} />
         <Field label="Allergies" value={selectedPatient.allergy || 'None recorded'} />
-        <Field label="Important comorbidities" value={undefined} />
+        <Field label="Important comorbidities" value={state.comorbiditiesSummary} />
         <Field label="Relevant labs" value={order?.eligibilityParametersChecked.map((c) => c.parameter).join(', ')} />
-        <Field label="Recent imaging" value={undefined} />
+        <Field label="Recent imaging" value={recentImagingDisplay} />
         <Field label="Outstanding actions" value={!treatmentPlan ? 'MDT recommendation → Treatment Plan' : !order ? 'Create Treatment Order' : order.status !== 'completed' ? `Continue systemic therapy (${order.status.replace(/_/g, ' ')})` : 'None outstanding'} />
         <Field label="Current care team" value={uniqueCareTeam.length > 0 ? uniqueCareTeam.map((c) => `${c.name} (${c.role})`).join(', ') : NOT_RECORDED} />
       </div>

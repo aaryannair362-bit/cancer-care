@@ -112,7 +112,7 @@ export default function TreatmentReadinessPage() {
           <RecommendationPanel patientId={selectedPatient.id} context="treatment-readiness" audience="clinician" actor={actor} title="Guideline context for this decision" />
 
           <Card><CardHeader className="border-b border-divider"><div className="flex items-center gap-3"><History className="size-4 text-brand-deep" /><CardTitle>Readiness history</CardTitle></div></CardHeader>
-            <CardContent className="space-y-3 pt-6">
+            <CardContent className="max-h-[420px] space-y-3 overflow-y-auto pt-6">
               {history.length === 0 ? <p className="text-sm text-metadata">No readiness assessments recorded yet.</p> : history.map((h) => {
                 const meta = DECISION_META[h.decision]
                 const Icon = meta.icon
@@ -127,8 +127,8 @@ export default function TreatmentReadinessPage() {
           </Card>
 
           <Card><CardHeader className="border-b border-divider"><CardTitle>Audit trail</CardTitle></CardHeader>
-            <CardContent className="space-y-3 pt-6">
-              {getAuditTrail('TreatmentReadinessAssessment').length === 0 ? <p className="text-sm text-metadata">No recorded changes yet.</p> : getAuditTrail('TreatmentReadinessAssessment').slice(0, 10).map((entry) => (
+            <CardContent className="max-h-[420px] space-y-3 overflow-y-auto pt-6">
+              {getAuditTrail('TreatmentReadinessAssessment').length === 0 ? <p className="text-sm text-metadata">No recorded changes yet.</p> : getAuditTrail('TreatmentReadinessAssessment').map((entry) => (
                 <div key={entry.id} className="border-b border-divider pb-2 text-xs last:border-0 last:pb-0">
                   <p className="font-semibold text-supporting">{entry.action}</p>
                   <p className="text-metadata">{entry.actor.name} · {new Date(entry.timestamp).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</p>

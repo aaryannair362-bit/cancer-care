@@ -134,7 +134,7 @@ CCA_ROLES = (
     "CCAFrontDesk", "CCANurseNavigator", "CCAMedicalOncologist", "CCASurgicalOncologist",
     "CCARadiationOncologist", "CCARadiologist", "CCARadiologyCoordinator", "CCAPathologist",
     "CCALabPhlebotomy", "CCAInfusionNurse", "CCAMDTCoordinator", "CCAExternalMDTSpecialist",
-    "CCAPatientLiaison", "CCAFinancialCounsellor",
+    "CCAPatientLiaison", "CCAFinancialCounsellor", "CCAPharmacist",
 )
 
 
@@ -184,6 +184,16 @@ def is_cca_lab_phlebotomy(user: dict) -> bool:
 
 def is_cca_infusion_nurse(user: dict) -> bool:
     return user.get("role") == "CCAInfusionNurse"
+
+
+def is_cca_pharmacist(user: dict) -> bool:
+    """Distinct from the general HMS 'Pharmacist' role (backend/app/routers/pharmacy.py's
+    formulary/FEFO-dispensing/narcotics-register module) for the same reason CCANurseNavigator
+    and CCAInfusionNurse stay separate from the general 'Nurse' role above: this persona
+    verifies/prepares/dispenses against the CCA oncology treatment-order chain
+    (PharmacyReadiness, InfusionMedicationAdministration), a different screen set and a
+    different data model from general hospital pharmacy inventory."""
+    return user.get("role") == "CCAPharmacist"
 
 
 def is_cca_mdt_coordinator(user: dict) -> bool:

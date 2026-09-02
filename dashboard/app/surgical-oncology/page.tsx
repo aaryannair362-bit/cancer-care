@@ -182,7 +182,7 @@ export default function SurgicalOncologyPage() {
             <RecommendationPanel patientId={selectedPatient.id} context="surgical-plan" audience="clinician" actor={actor} title="Guideline context for this plan" />
 
             <Card><CardHeader className="border-b border-divider"><div className="flex items-center gap-3"><History className="size-4 text-brand-deep" /><CardTitle>Audit trail</CardTitle></div></CardHeader>
-              <CardContent className="space-y-3 pt-6">
+              <CardContent className="max-h-[420px] space-y-3 overflow-y-auto pt-6">
                 {audit.length === 0 ? <p className="text-sm text-metadata">No recorded changes yet.</p> : audit.map((entry) => (
                   <div key={entry.id} className="border-b border-divider pb-2 text-xs last:border-0 last:pb-0">
                     <p className="font-semibold text-supporting">{entry.action}</p>
@@ -194,7 +194,7 @@ export default function SurgicalOncologyPage() {
 
             {history.length > 0 ? (
               <Card><CardHeader className="border-b border-divider"><CardTitle>Other surgical plans</CardTitle></CardHeader>
-                <CardContent className="space-y-3 pt-6">
+                <CardContent className="max-h-[420px] space-y-3 overflow-y-auto pt-6">
                   {history.map((h) => (
                     <div key={h.id} className="rounded-lg border border-divider bg-surface-elevated/70 p-3 text-sm"><p className="font-semibold text-supporting">{h.performedProcedure ?? h.procedure}</p><p className="mt-1 text-xs text-metadata"><SurgicalStatusPill status={h.surgicalSubStatus} /></p></div>
                   ))}

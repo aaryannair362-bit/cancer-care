@@ -32,6 +32,16 @@ export default function ActiveTreatmentPage() {
   const surgicalPlans = state.surgicalPlans.filter((p) => p.patientId === selectedPatient.id).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
   const surgicalPlan = surgicalPlans.find((p) => p.surgicalSubStatus !== 'histopathology_available') ?? surgicalPlans[0]
 
+  const activePhase = treatmentPlan?.phases.find((p) => p.status === 'in_progress')
+  const nextPlannedPhase = treatmentPlan?.phases.find((p) => p.status === 'proposed' || p.status === 'draft')
+  const plannedTreatmentDisplay = activePhase
+    ? `${activePhase.label} (in progress)`
+    : nextPlannedPhase
+      ? `${nextPlannedPhase.label} (planned)`
+      : treatmentPlan
+        ? `${treatmentPlan.intent} · ${treatmentPlan.lineOfTherapy}`
+        : 'No treatment plan yet'
+
   const ongoingToxicities = state.toxicityEvents.filter((t) => t.patientId === selectedPatient.id && t.outcome === 'ongoing')
   const consents = getConsentsForPatient(selectedPatient.id)
   const signedConsents = consents.filter((c) => c.status === 'signed').length
@@ -51,10 +61,11 @@ export default function ActiveTreatmentPage() {
       <PageHeader title="Active Treatment" description="One view: what was decided, what's ordered, what's been given, and what comes next — across every modality" />
 
       <Card variant="elevated" className="mb-6 aivana-accent-line">
-        <CardContent className="grid gap-4 p-5 sm:grid-cols-2 lg:grid-cols-4">
+        <CardContent className="grid gap-4 p-5 sm:grid-cols-2 lg:grid-cols-5">
           <div className="sm:col-span-2 lg:col-span-1"><p className={fieldClassName}>Patient</p><p className="mt-1 font-display text-lg font-semibold">{selectedPatient.name}</p><p className="text-xs text-metadata">MRN {selectedPatient.mrn}</p></div>
           <div><p className={fieldClassName}>Cancer diagnosis</p><p className="mt-1 text-sm font-semibold text-supporting">{treatmentPlan?.diagnosis ?? selectedPatient.diagnosis}</p><p className="text-xs text-metadata">{treatmentPlan?.stage ?? selectedPatient.stage}</p></div>
           <div><p className={fieldClassName}>MDT decision</p><p className="mt-1 text-sm font-semibold text-supporting">{mdtCase?.finalConsensus ?? 'No MDT case yet'}</p></div>
+          <div><p className={fieldClassName}>What's planned</p><p className="mt-1 text-sm font-semibold text-supporting">{plannedTreatmentDisplay}</p></div>
           <div><p className={fieldClassName}>Current disease status</p><p className="mt-1 text-sm font-semibold text-supporting">{treatmentPlan?.currentDiseaseStatus ?? '—'}</p></div>
         </CardContent>
       </Card>
@@ -74,6 +85,7 @@ export default function ActiveTreatmentPage() {
                 <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-sm text-supporting">Cycle {order.cycleNumber} of {order.plannedNumberOfCycles}</span><TreatmentStatusPill status={order.status} /></div>
                 <div className="grid grid-cols-2 gap-2 text-xs text-metadata">
                   <span>Ordered by {order.orderingClinician.name}</span>
+                  <span>{dispenseRecords.filter((d) => d.status === 'prepared' || d.status === 'dispensed').length}/{dispensableLineCount} prepared by pharmacy</span>
                   <span>{dispenseRecords.filter((d) => d.status === 'dispensed').length}/{dispensableLineCount} dispensed</span>
                   <span>{administeredCount}/{dispensableLineCount} administered</span>
                   <span>{order.drugLines.some((l) => l.doseModifications.length > 0) ? 'Dose modified' : 'No dose modifications'}</span>

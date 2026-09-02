@@ -18,7 +18,7 @@ from ..auth import (
     is_cca_nurse_navigator, is_cca_medical_oncologist, is_cca_surgical_oncologist,
     is_cca_radiation_oncologist, is_cca_patient_liaison, is_cca_infusion_nurse,
     is_cca_radiologist, is_cca_financial_counsellor, is_cca_external_mdt_specialist,
-    can_sign_treatment_plan, can_approve_mdt_recommendation, log_audit,
+    is_cca_pharmacist, can_sign_treatment_plan, can_approve_mdt_recommendation, log_audit,
 )
 from ..config import settings
 from ..ocr_service import extract_document
@@ -1834,6 +1834,9 @@ def get_staging_workspace(
                 "group": h.prognostic_stage_group,
                 "status": h.status,
                 "confirmed_by": h.confirmed_by,
+                "confirmed_at": h.confirmed_at.isoformat() if h.confirmed_at else None,
+                "staging_system": h.staging_system,
+                "system_version": h.system_version,
                 "version_no": h.version_no
             }
             for h in history
@@ -3493,12 +3496,17 @@ def get_treatment_day_assessment(
 def _require_clinical_or_nursing_role(current_user: dict):
     """CTCAE toxicity grading is a clinical/nursing assessment, not an administrative one --
     narrower than _require_patient_contact_role (which also admits Front Desk/Patient
-    Liaison, who have no basis to grade a toxicity)."""
+    Liaison, who have no basis to grade a toxicity). CCAPharmacist was added later (PDF item 27:
+    "Pharmacist: verify/prepare/dispense, not prescribe") -- pharmacy readiness and medication
+    verification are exactly the "clinical" half of this gate's name for that role; a pharmacist
+    still cannot sign/author a Treatment Plan or Order (that stays behind
+    _require_modality_signer / _require_clinician, which this role deliberately is not added to)."""
     if not (
         is_doctor(current_user) or is_admin(current_user) or is_cca_oncologist(current_user)
         or is_cca_nurse_navigator(current_user) or is_cca_infusion_nurse(current_user)
+        or is_cca_pharmacist(current_user)
     ):
-        raise HTTPException(403, "Only a treating clinician or nurse may record a toxicity assessment")
+        raise HTTPException(403, "Only a treating clinician, nurse, or pharmacist may perform this action")
 
 
 @router.post("/treatment/toxicity")

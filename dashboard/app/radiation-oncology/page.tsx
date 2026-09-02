@@ -210,7 +210,7 @@ export default function RadiationOncologyPage() {
                   </div>
                 ) : <p className="text-sm text-metadata">Fractions are scheduled once the prescription reaches Treatment Ready.</p>
               ) : (
-                <div className="space-y-2">
+                <div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
                   {fractions.map((f) => (
                     <div key={f.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-divider bg-surface-elevated/70 p-3 text-sm">
                       <div><span className="font-semibold text-supporting">Fraction {f.fractionNumber}</span><span className="ml-2 text-xs text-metadata">{f.scheduledDate}{f.deliveredDoseGy ? ` · ${f.deliveredDoseGy} Gy delivered` : ''}</span></div>
@@ -246,7 +246,7 @@ export default function RadiationOncologyPage() {
           <RecommendationPanel patientId={selectedPatient.id} context="radiation-prescription" audience="clinician" actor={actor} title="Guideline context for this prescription" />
 
           <Card><CardHeader className="border-b border-divider"><div className="flex items-center gap-3"><History className="size-4 text-brand-deep" /><CardTitle>Audit trail</CardTitle></div></CardHeader>
-            <CardContent className="space-y-3 pt-6">
+            <CardContent className="max-h-[420px] space-y-3 overflow-y-auto pt-6">
               {audit.length === 0 ? <p className="text-sm text-metadata">No recorded changes yet.</p> : audit.map((entry) => (
                 <div key={entry.id} className="border-b border-divider pb-2 text-xs last:border-0 last:pb-0">
                   <p className="font-semibold text-supporting">{entry.action}</p>

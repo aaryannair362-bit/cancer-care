@@ -113,7 +113,7 @@ export default function ResponseAssessmentPage() {
           <RecommendationPanel patientId={selectedPatient.id} context="response-assessment" audience="clinician" actor={actor} title="Guideline context for this response" />
 
           <Card><CardHeader className="border-b border-divider"><div className="flex items-center gap-3"><ScanSearch className="size-4 text-brand-deep" /><CardTitle>Assessment history</CardTitle></div></CardHeader>
-            <CardContent className="space-y-3 pt-6">
+            <CardContent className="max-h-[420px] space-y-3 overflow-y-auto pt-6">
               {history.length === 0 ? <p className="text-sm text-metadata">No response assessments recorded yet.</p> : history.map((a) => (
                 <div key={a.id} className="rounded-lg border border-divider bg-surface-elevated/70 p-3 text-xs">
                   <div className="flex items-center justify-between gap-2"><span className="font-semibold text-supporting">{a.assessmentDate}</span><Badge variant={RESPONSE_VARIANT[a.responseCategory]}>{a.responseCategory}</Badge></div>

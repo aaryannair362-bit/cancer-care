@@ -204,7 +204,7 @@ export default function TreatmentOrderPage() {
           </CardContent></Card>
 
           <Card><CardHeader className="border-b border-divider"><div className="flex items-center gap-3"><History className="size-4 text-brand-deep" /><CardTitle>Audit trail</CardTitle></div></CardHeader>
-            <CardContent className="space-y-3 pt-6">
+            <CardContent className="max-h-[420px] space-y-3 overflow-y-auto pt-6">
               {orderAudit.length === 0 ? <p className="text-sm text-metadata">No recorded changes yet.</p> : orderAudit.map((entry) => (
                 <div key={entry.id} className="border-b border-divider pb-2 text-xs last:border-0 last:pb-0">
                   <p className="font-semibold text-supporting">{entry.action}</p>
