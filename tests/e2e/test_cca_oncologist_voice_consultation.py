@@ -6,11 +6,11 @@ this file -- every prior CCA test was API-level (TestClient), which cannot catch
 bug this suite exists for (broken element wiring, wrong endpoint paths, a JS reference error).
 
 Mocks at the same LLM/transcription boundary as every other voice test in this suite
-(tests/_voice_helpers.py's convention): the browser's mocked MediaRecorder produces a fake
-audio blob, `sarvam_transcriber.transcribe_chunks` (the real code path for this repo's
-configured TRANSCRIPTION_PROVIDER=sarvam default -- NOT scribe.transcribe_audio, which only
-backs the "whisper" fallback) returns a canned transcript, and scribe._call_groq_api returns a
-canned structured draft.
+(tests/_voice_helpers.py's convention): the browser's mocked MediaRecorder produces a fake audio
+blob, scribe.transcribe_audio (the whisper path -- tests/conftest.py pins
+TRANSCRIPTION_PROVIDER="whisper" for the whole suite; production's real default is "sarvam", now
+backed by sarvam_batch_transcriber.transcribe_long_audio, see that module's own tests) returns a
+canned transcript, and scribe._call_groq_api returns a canned structured draft.
 """
 import json
 

@@ -55,7 +55,7 @@ TREATMENT_PLAN_TIER_FIELDS: Dict[str, Optional[Set[str]]] = {
     # Nurse Navigator, Radiologist, Pathologist, MDT Coordinator, External MDT Specialist:
     # enough clinical context to do their own job around the treatment, not the full
     # authoring/administrative trail (no signer identity, no supersedes chain).
-    "CLINICAL_CONTEXT": {"id", "patient_id", "modality", "intent", "protocol_name", "status", "version_no", "start_date", "signed_at", "guideline_review_required"},
+    "CLINICAL_CONTEXT": {"id", "patient_id", "modality", "intent", "protocol_name", "status", "version_no", "start_date", "signed_at", "guideline_review_required", "requires_mdt", "mdt_decision_id"},
     # Financial Counsellor: the exact field list the architecture doc's financial-integration
     # section names -- modality, regimen/procedure identifier, anticipated cycles, planned
     # start window, status. Nothing evidentiary or authorizing.

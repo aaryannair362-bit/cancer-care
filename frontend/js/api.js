@@ -45,7 +45,7 @@ const NAV_ITEMS = [
   { key: 'laboratory', label: 'Laboratory', href: '/laboratory.html', roles: ['Admin', 'CCALabPhlebotomy'] },
   { key: 'infusion_nurse', label: 'Infusion Nurse', href: '/infusion_nurse.html', roles: ['Admin', 'CCAInfusionNurse'] },
   { key: 'mdt_coordinator', label: 'MDT Coordinator', href: '/mdt_coordinator.html', roles: ['Admin', 'CCAMDTCoordinator'] },
-  { key: 'nurse_navigator', label: 'Nurse Navigator', href: '/nurse_navigator.html', roles: ['Admin', 'CCANurseNavigator'] },
+  { key: 'nurse_navigator', label: 'Primary Investigation', href: '/nurse_navigator.html', roles: ['Admin', 'CCANurseNavigator'] },
   { key: 'patient_liaison', label: 'Patient Liaison', href: '/patient_liaison.html', roles: ['Admin', 'CCAPatientLiaison'] },
   { key: 'patient_financial_services', label: 'Financial Services', href: '/patient_financial_services.html', roles: ['Admin', 'CCAFinancialCounsellor'] },
   { key: 'external_mdt_specialist', label: 'External MDT Specialist', href: '/external_mdt_specialist.html', roles: ['Admin', 'CCAExternalMDTSpecialist'] },

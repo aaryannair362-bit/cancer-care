@@ -198,3 +198,85 @@ def test_treatment_plan_endpoints_are_org_scoped(client, make_user, auth_headers
     assert client.get(f"/api/cca/treatment-plans/{plan_id}", headers=other_headers).status_code == 404
     assert client.post(f"/api/cca/treatment-plans/{plan_id}/sign", headers=other_headers, json={}).status_code == 404
     assert client.post("/api/cca/treatment-plans", headers=other_headers, json={"patient_id": patient_id}).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# "Pass to MDT" checkbox: requires_mdt flag, the link-mdt-decision endpoint, and
+# sign_treatment_plan's enforcement gate (see models_cca.py's TreatmentPlan.requires_mdt
+# docstring). A non-MDT plan (requires_mdt default False) is exercised by every test above --
+# these cover the requires_mdt=True path specifically.
+# ---------------------------------------------------------------------------
+
+def _approved_mdt_decision_id(client, headers, patient_id, disposition="ACCEPT"):
+    case_id = client.post("/api/cca/mdt/cases", headers=headers, json={
+        "patient_id": patient_id, "question": "Neoadjuvant chemotherapy vs upfront surgery?"
+    }).json()["mdt_case"]["id"]
+    decision_id = client.post(f"/api/cca/mdt/cases/{case_id}/recommendation", headers=headers, json={
+        "recommendation": "Neoadjuvant dose-dense AC-T chemotherapy recommended."
+    }).json()["decision"]["id"]
+    approve = client.post(f"/api/cca/mdt/cases/{case_id}/approve", headers=headers, json={"disposition": disposition, "reason": None if disposition == "ACCEPT" else "n/a"})
+    assert approve.status_code == 200
+    return decision_id
+
+
+def test_requires_mdt_plan_cannot_be_signed_without_a_linked_decision(client, auth_headers, db_session, oncologist):
+    headers = auth_headers(oncologist)
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    plan = client.post("/api/cca/treatment-plans", headers=headers, json={"patient_id": patient_id, "requires_mdt": True}).json()["treatment_plan"]
+    assert plan["requires_mdt"] is True
+    assert plan["mdt_decision_id"] is None
+
+    blocked = client.post(f"/api/cca/treatment-plans/{plan['id']}/sign", headers=headers, json={})
+    assert blocked.status_code == 409
+    assert "MDT" in blocked.json()["detail"]
+
+
+def test_link_mdt_decision_requires_approved_status_then_unblocks_signing(client, auth_headers, db_session, oncologist):
+    headers = auth_headers(oncologist)
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    plan_id = client.post("/api/cca/treatment-plans", headers=headers, json={"patient_id": patient_id, "requires_mdt": True}).json()["treatment_plan"]["id"]
+
+    # A FINAL (not-yet-dispositioned) decision cannot be linked.
+    case_id = client.post("/api/cca/mdt/cases", headers=headers, json={"patient_id": patient_id, "question": "Sequencing?"}).json()["mdt_case"]["id"]
+    pending_decision_id = client.post(f"/api/cca/mdt/cases/{case_id}/recommendation", headers=headers, json={"recommendation": "AC-T recommended."}).json()["decision"]["id"]
+    rejected = client.post(f"/api/cca/treatment-plans/{plan_id}/link-mdt-decision", headers=headers, json={"mdt_decision_id": pending_decision_id})
+    assert rejected.status_code == 409
+
+    # Once approved, it can be linked, and the plan then signs normally.
+    client.post(f"/api/cca/mdt/cases/{case_id}/approve", headers=headers, json={"disposition": "ACCEPT"})
+    linked = client.post(f"/api/cca/treatment-plans/{plan_id}/link-mdt-decision", headers=headers, json={"mdt_decision_id": pending_decision_id})
+    assert linked.status_code == 200
+    assert linked.json()["treatment_plan"]["mdt_decision_id"] == pending_decision_id
+
+    signed = client.post(f"/api/cca/treatment-plans/{plan_id}/sign", headers=headers, json={})
+    assert signed.status_code == 200
+    assert signed.json()["treatment_plan"]["status"] == "ACTIVE"
+
+
+def test_link_mdt_decision_rejects_a_different_patients_decision(client, auth_headers, db_session, oncologist, make_user):
+    headers = auth_headers(oncologist)
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    plan_id = client.post("/api/cca/treatment-plans", headers=headers, json={"patient_id": patient_id, "requires_mdt": True}).json()["treatment_plan"]["id"]
+
+    from app.cca_seed import seed_cca_database
+    other_patient = db_session.query(CCAPatient).filter(
+        CCAPatient.organization_id == oncologist.organization_id, CCAPatient.id != patient_id
+    ).first()
+    assert other_patient is not None
+    other_decision_id = _approved_mdt_decision_id(client, headers, other_patient.id)
+
+    mismatched = client.post(f"/api/cca/treatment-plans/{plan_id}/link-mdt-decision", headers=headers, json={"mdt_decision_id": other_decision_id})
+    assert mismatched.status_code == 422
+
+
+def test_non_mdt_plan_is_unaffected_by_the_requires_mdt_gate(client, auth_headers, db_session, oncologist):
+    """requires_mdt defaults False -- the doctor develops and signs directly, same as every
+    other test in this file, with no MDT case ever created."""
+    headers = auth_headers(oncologist)
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    plan = client.post("/api/cca/treatment-plans", headers=headers, json={"patient_id": patient_id}).json()["treatment_plan"]
+    assert plan["requires_mdt"] is False
+
+    signed = client.post(f"/api/cca/treatment-plans/{plan['id']}/sign", headers=headers, json={})
+    assert signed.status_code == 200
+    assert signed.json()["treatment_plan"]["status"] == "ACTIVE"

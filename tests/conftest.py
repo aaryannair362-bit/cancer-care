@@ -33,6 +33,12 @@ os.environ["GROQ_MODEL"] = "test-model"
 # per-test via monkeypatch (see tests/integration/test_sarvam_transcription_provider.py's
 # sarvam_provider fixture) rather than relying on this global ever changing.
 os.environ["TRANSCRIPTION_PROVIDER"] = "whisper"
+# Same reasoning as TRANSCRIPTION_PROVIDER above: config.py's OCR_PROVIDER defaults to "sarvam"
+# whenever a SARVAM_API_KEY is configured (see backend/.env in a real dev checkout), but the
+# existing OCR test suite (test_patient_document_ocr.py's direct extract_document() calls) was
+# written against the local RapidOCR engine and must stay deterministic/offline. Tests that
+# specifically exercise the Sarvam OCR path override this per-test via monkeypatch.
+os.environ["OCR_PROVIDER"] = "local"
 # Many legitimate tests fire dozens of auth calls from the same test-client "IP" well within
 # a minute (bulk make_user() fixtures, concurrency tests' 20 simultaneous logins, etc.) --
 # the rate limiter is exercised by its own dedicated test instead (see test_rate_limiting.py).

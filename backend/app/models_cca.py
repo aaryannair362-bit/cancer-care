@@ -623,6 +623,13 @@ class TreatmentPlan(Base):
     care_plan_id = Column(Integer, ForeignKey("cca_care_plans.id"), nullable=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     mdt_decision_id = Column(Integer, ForeignKey("cca_mdt_decisions.id"), nullable=True)
+    # Explicit, doctor-set choice at draft time: does this case go through MDT/Tumour Board
+    # review before authorization, or does the treating clinician develop and sign it directly?
+    # When True, sign_treatment_plan additionally requires mdt_decision_id to reference an
+    # APPROVED/PARTIALLY_APPROVED MDTDecision -- see POST /treatment-plans/{id}/link-mdt-decision.
+    # When False (default), signing behaves exactly as it always has: the treating clinician's
+    # own signature is the sole authorization step, no MDT involvement required.
+    requires_mdt = Column(Boolean, default=False)
     intent = Column(String(100), default="Curative")
     modality = Column(String(100), default="Systemic Chemotherapy")
     protocol_name = Column(String(200), default="AC-T (Doxorubicin/Cyclophosphamide followed by Paclitaxel)")
@@ -953,6 +960,11 @@ class InfusionMonitoringObservation(Base):
     vitals = Column(JSON, nullable=True)  # whatever the nurse enters: temp/bp/pulse/rr/spo2
     symptoms = Column(Text, nullable=True)
     notes = Column(Text, nullable=True)
+    # Nurse-observed Pain Scale, 0 (none) - 5 (worst), and VIP (Visual Infusion Phlebitis) Score,
+    # 0 (no symptoms) - 5 (advanced thrombophlebitis) -- both purely the nurse's own documented
+    # observation at this monitoring point, never computed or checked against a threshold.
+    pain_score = Column(Integer, nullable=True)
+    vip_score = Column(Integer, nullable=True)
     recorded_by = Column(String(200))
     recorded_at = Column(DateTime, default=datetime.utcnow)
 

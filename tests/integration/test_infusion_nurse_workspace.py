@@ -262,6 +262,38 @@ def test_monitoring_observation_baseline_and_during(client, nurse_headers, onc_h
     assert phases == ["Baseline", "During"]
 
 
+def test_monitoring_observation_pain_and_vip_score(client, nurse_headers, onc_headers, patient):
+    """Pain Scale and VIP (Visual Infusion Phlebitis) Score, both 0-5, nurse-observed --
+    pure documentation fields on InfusionMonitoringObservation, optional and independent of
+    each other, validated for range only (no clinical decision made from them)."""
+    order_id = _create_signed_order(client, onc_headers, patient.id)
+
+    scored = client.post("/api/cca/treatment/monitoring", headers=nurse_headers, json={
+        "patient_id": patient.id, "order_id": order_id, "phase": "During",
+        "symptoms": "Mild discomfort at site.", "pain_score": 2, "vip_score": 1,
+    })
+    assert scored.status_code == 200, scored.text
+    assert scored.json()["observation"]["pain_score"] == 2
+    assert scored.json()["observation"]["vip_score"] == 1
+
+    unscored = client.post("/api/cca/treatment/monitoring", headers=nurse_headers, json={
+        "patient_id": patient.id, "order_id": order_id, "phase": "Post",
+    })
+    assert unscored.status_code == 200
+    assert unscored.json()["observation"]["pain_score"] is None
+    assert unscored.json()["observation"]["vip_score"] is None
+
+    out_of_range = client.post("/api/cca/treatment/monitoring", headers=nurse_headers, json={
+        "patient_id": patient.id, "order_id": order_id, "phase": "During", "vip_score": 6,
+    })
+    assert out_of_range.status_code == 400
+
+    listing = client.get(f"/api/cca/treatment/{order_id}/monitoring?patient_id={patient.id}", headers=nurse_headers)
+    assert listing.status_code == 200
+    scored_row = next(o for o in listing.json()["results"] if o["pain_score"] == 2)
+    assert scored_row["vip_score"] == 1
+
+
 def test_hold_and_resume(client, nurse_headers, onc_headers, patient):
     order_id = _create_signed_order(client, onc_headers, patient.id)
 
