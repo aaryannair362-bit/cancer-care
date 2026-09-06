@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aivana — Nurse Navigator</title>
+    <title>Aivana — Primary Investigation</title>
     <!-- Google Fonts: Inter -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -809,10 +809,10 @@
         <div class="header-actions">
             <button class="icon-circle-btn" title="Notifications">🔔</button>
             <div class="role-badge-pill" onclick="location.href='/index.html'">
-                <span>Nurse Navigator</span>
+                <span>Primary Investigation</span>
                 <span>▾</span>
             </div>
-            <div class="avatar-pill" title="Logged in">NN ▾</div>
+            <div class="avatar-pill" title="Logged in">PI ▾</div>
         </div>
     </header>
 
@@ -1225,8 +1225,6 @@
                         <div>
                             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
                                 <div class="readonly-card-header" style="margin-bottom:0;">Available Documents</div>
-                                <input type="file" id="nurse-doc-upload-input" accept=".pdf,.jpg,.jpeg,.png,.tiff" style="display:none;" onchange="handleNurseDocumentUpload(this)" />
-                                <button class="btn-outline" onclick="document.getElementById('nurse-doc-upload-input').click()">⬆ Upload / Capture</button>
                             </div>
                             <div id="nurse-doc-list-container">
                                 <p style="font-size:12.5px; color:var(--ink-500);">Loading documents…</p>
@@ -1461,7 +1459,7 @@
                                 <div class="nexus-task-title">Patient symptom follow-up</div>
                                 <span class="owner-badge">Nurse-owned</span>
                             </div>
-                            <div class="nexus-task-owner">Nurse Navigator · Open</div>
+                            <div class="nexus-task-owner">Primary Investigation · Open</div>
                             <div class="nexus-task-desc">Call regarding nausea and oral intake</div>
                             <div class="nexus-task-actions">
                                 <button class="nexus-mini-btn">Start</button>
@@ -1476,7 +1474,7 @@
                                 <div class="nexus-task-title">Confirm appointment attendance</div>
                                 <span class="owner-badge">Nurse-owned</span>
                             </div>
-                            <div class="nexus-task-owner">Nurse Navigator · In progress</div>
+                            <div class="nexus-task-owner">Primary Investigation · In progress</div>
                             <div class="nexus-task-desc">Contact patient before visit</div>
                             <div class="nexus-task-actions">
                                 <button class="nexus-mini-btn">Start</button>
@@ -1491,7 +1489,7 @@
                         <div class="intake-card" style="margin-bottom:20px;">
                             <div class="readonly-card-header" style="font-size:15px;">Assigned Care Team</div>
                             <div class="care-team-list-item">Medical Oncologist</div>
-                            <div class="care-team-list-item">Nurse Navigator</div>
+                            <div class="care-team-list-item">Primary Investigation</div>
                             <div class="care-team-list-item">MDT Coordinator</div>
                             <div class="care-team-list-item" style="border-bottom:none;">Care Coordinator</div>
                         </div>
@@ -1812,14 +1810,10 @@
             input.focus();
         }
 
-        // Documents & Available Results (nurse intake step 4): previously a fully static
-        // mockup -- a hardcoded fake document list and hardcoded fake CBC values that never
-        // reflected this patient's real uploaded documents, and "Upload / Capture" only added
-        // a local list item without ever calling the upload API. A nurse could not actually
-        // see what Front Desk had already uploaded, and anything they themselves "uploaded"
-        // here was silently lost the moment they left the page -- never reaching Patient
-        // History for the next clinician. Now backed by the same GET/POST /cca/documents
-        // endpoints frontdesk.html's registration wizard already uses successfully.
+        // Documents & Available Results (nurse intake step 4): view-only. Document upload lives
+        // exclusively in Front Desk's registration wizard (frontdesk.html) -- this panel only
+        // reads what Front Desk (or another authorized uploader) already put on file via the
+        // same GET /cca/documents endpoint, so the nurse can review it before the handoff.
         let nurseDocuments = [];
 
         async function loadNurseDocuments() {
@@ -1852,26 +1846,6 @@
                 <div class="readonly-card-header">${escapeHtml(d.filename)}</div>
                 <div class="readonly-card-source">${escapeHtml(d.classification === 'UNCLASSIFIED' || !d.classification ? 'Not automatically classified' : d.classification)} · ${escapeHtml(statusNote)}</div>
             `;
-        }
-
-        async function handleNurseDocumentUpload(inputEl) {
-            const file = inputEl.files[0];
-            inputEl.value = '';
-            if (!file) return;
-            if (!currentPatientId) { toast('Select a patient first', 'error'); return; }
-            try {
-                const formData = new FormData();
-                formData.append('file', file);
-                const result = await Api.upload(`/cca/documents?patient_id=${currentPatientId}`, formData);
-                if (result?.document?.status === 'OCR_FAILED' || result?.ocr_warning) {
-                    toast(`${file.name} was saved, but OCR could not read it — try a clearer scan or a text-based PDF`, 'error');
-                } else {
-                    toast(`${file.name} uploaded`, 'success');
-                }
-                loadNurseDocuments();
-            } catch (err) {
-                toast(`Could not upload ${file.name}: ${apiErrorMessage(err)}`, 'error');
-            }
         }
 
         function toggleChip(el) {

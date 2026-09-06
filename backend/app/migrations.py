@@ -118,6 +118,16 @@ ADDITIVE_COLUMNS = [
     ("cca_treatment_sessions", "arrived_at", "TIMESTAMP"),
     ("cca_treatment_sessions", "chair_bed", "VARCHAR(50)"),
     ("cca_treatment_sessions", "expected_duration_minutes", "INTEGER"),
+    # Explicit MDT-track vs direct-authorization flag set by the treating clinician at draft
+    # time (enhancement: "Pass to MDT" checkbox) -- see TreatmentPlan.requires_mdt's docstring
+    # and sign_treatment_plan's enforcement gate in routers/cca.py.
+    ("cca_treatment_plans", "requires_mdt", "BOOLEAN DEFAULT FALSE"),
+    # Day Care/Infusion Nurse monitoring observation additions: nurse-observed Pain Scale (0-5)
+    # and VIP (Visual Infusion Phlebitis) Score (0-5) alongside the existing free-text
+    # vitals/symptoms/notes on each observation. Pure documentation fields -- nothing computed
+    # or thresholded against them.
+    ("cca_infusion_monitoring_observations", "pain_score", "INTEGER"),
+    ("cca_infusion_monitoring_observations", "vip_score", "INTEGER"),
 ]
 
 
