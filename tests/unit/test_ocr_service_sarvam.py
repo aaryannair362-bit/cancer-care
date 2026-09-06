@@ -95,6 +95,45 @@ def _sarvam_provider(monkeypatch):
     monkeypatch.setattr(ocr_service.settings, "OCR_PROVIDER", "sarvam")
 
 
+def test_strip_embedded_base64_images_removes_image_data_keeps_captions():
+    """Regression test for a real bug found by running an actual 10-page scanned document
+    through the live Sarvam API: its markdown output embedded 20 full-resolution page/figure
+    images inline as base64 data URIs, consuming 95% of the "text" (623,713 of 625,492
+    characters) -- which meant extract_clinical_facts()'s 8000-character cap to Groq was
+    almost entirely base64 noise, silently burying real clinical content on later pages past
+    where the model could ever see it. AI-generated figure captions (real, short, occasionally
+    useful text) must survive; only the base64 payload itself is stripped."""
+    text = (
+        "Diagnosis: Breast carcinoma\n\n"
+        "![Image](data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUDBAQEAwUEBAQFBQUG)\n\n"
+        "*The image displays a circular blue ink stamp.*\n\n"
+        "Medications: Tamoxifen 20mg OD"
+    )
+    cleaned = ocr_service._strip_embedded_base64_images(text)
+    assert "base64" not in cleaned
+    assert "Breast carcinoma" in cleaned
+    assert "Medications: Tamoxifen 20mg OD" in cleaned
+    assert "circular blue ink stamp" in cleaned
+
+
+def test_extract_document_strips_embedded_base64_images_from_sarvam_output(monkeypatch):
+    """End-to-end version of the same regression at the extract_document() level: a page
+    dominated by an embedded base64 image must not drown out the real text on the same page."""
+    huge_fake_image = "A" * 50000
+    zip_bytes = _make_zip({"output.md": (
+        f"Diagnosis: Breast carcinoma\n\n"
+        f"![Image](data:image/jpeg;base64,{huge_fake_image})\n\n"
+        f"Medications: Tamoxifen 20mg OD"
+    )})
+    _install_fake_sdk(monkeypatch, [_FakeDocJob(zip_bytes)])
+
+    result = ocr_service.extract_document(_make_pdf(1), "application/pdf")
+
+    assert len(result["text"]) < 1000  # real content only, not the ~50KB fake image
+    assert "Breast carcinoma" in result["text"]
+    assert "Tamoxifen" in result["text"]
+
+
 def test_extract_document_uses_sarvam_and_parses_markdown_output(monkeypatch):
     zip_bytes = _make_zip({"output.md": "Diagnosis: Breast carcinoma\nMedications: Tamoxifen"})
     _install_fake_sdk(monkeypatch, [_FakeDocJob(zip_bytes)])

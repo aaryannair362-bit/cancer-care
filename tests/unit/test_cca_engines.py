@@ -14,8 +14,10 @@ from backend.app.models_cca import (
 )
 from backend.app.cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
-    evaluate_guideline_readiness, synthesize_nexus_brief, generate_care_plan_prefill
+    evaluate_guideline_readiness, synthesize_nexus_brief, generate_care_plan_prefill,
+    extract_clinical_facts,
 )
+from backend.app.scribe import scribe
 
 
 @pytest.fixture
@@ -70,6 +72,42 @@ def test_contradiction_detection_engine(db_session):
     assert ctrs[0].status == "OPEN"
     assert fact_left.id in ctrs[0].conflicting_fact_ids
     assert fact_right.id in ctrs[0].conflicting_fact_ids
+
+
+def test_extract_clinical_facts_requests_a_higher_token_budget_than_the_generic_default(monkeypatch):
+    """Regression test for a real, reproducible bug: found by running an actual dense oncology
+    document (a CT staging report plus a full metabolic lab panel) through the live pipeline
+    repeatedly -- Groq's response was intermittently (not always -- generation-to-generation
+    non-determinism) truncated mid-JSON at _call_groq_api's 3000-token default, which
+    extract_clinical_facts() has no way to recover from (the shared _generate_json malformed-
+    JSON fallback only ever produces scribe_transcript()'s unrelated shape), silently yielding
+    zero facts despite real, extractable content. Verified fixed by requesting max_tokens=6000
+    instead and re-running the same real document 5 times with zero failures (was previously
+    ~50% failure rate on that document). This test pins the higher budget at the unit level so
+    it can't silently regress back to the shared default."""
+    captured = {}
+
+    def _fake_generate_json(prompt, system=None, temperature=0.3, max_tokens=3000):
+        captured["max_tokens"] = max_tokens
+        return {"facts": []}
+
+    monkeypatch.setattr(scribe, "_generate_json", _fake_generate_json)
+    extract_clinical_facts("Diagnosis: Breast carcinoma")
+    assert captured["max_tokens"] > 3000
+
+
+def test_extract_clinical_facts_parses_real_shaped_response(monkeypatch):
+    def _fake_generate_json(prompt, system=None, temperature=0.3, max_tokens=3000):
+        return {"facts": [
+            {"fact_type": "PRIMARY_SITE", "value": "Breast", "verbatim": "Breast carcinoma", "confidence": 0.95},
+            {"fact_type": "NOT_A_REAL_TYPE", "value": "should be dropped"},
+        ]}
+
+    monkeypatch.setattr(scribe, "_generate_json", _fake_generate_json)
+    facts = extract_clinical_facts("Diagnosis: Breast carcinoma")
+    assert len(facts) == 1
+    assert facts[0]["fact_type"] == "PRIMARY_SITE"
+    assert facts[0]["value"] == "Breast"
 
 
 def test_staging_readiness_state_machine(db_session):

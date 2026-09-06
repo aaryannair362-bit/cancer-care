@@ -9,6 +9,21 @@ from . import lab_test_matcher
 from . import rate_limiter
 
 MAX_RATE_LIMIT_RETRIES = 3
+# Status codes retried the same way as 429 (see _post_with_retry) -- 413 included after finding
+# it live: a genuinely small (~27KB) request got one back from Groq, and replaying the identical
+# payload seconds later succeeded, confirming it was transient, not a real payload-size problem.
+# 502/503/504 are the standard "upstream had a bad moment" gateway codes.
+_TRANSIENT_ERROR_STATUS_CODES = {413, 502, 503, 504}
+# See scribe_transcript()'s own comment for the full reasoning -- this is the largest transcript
+# size verified live to fit inside Groq's real 8000-token/minute account limit for a single
+# request (system prompt + wrapped transcript + completion). Verified live: 25,382 chars worked
+# untruncated, 37,039 chars silently failed; estimate_tokens()'s own formula (chars/4 + a fixed
+# 800-token completion allowance) puts the real breaking point at roughly 27,450 chars given
+# this prompt template's fixed overhead. 26,000 sits with margin below both the calculated
+# breaking point and leaves headroom for token-estimation error, while being less needlessly
+# conservative than an earlier 24,000 cap that was truncating (and flagging) consultations,
+# like a real proven-working 25,382-character one, that didn't actually need it.
+_MAX_TRANSCRIPT_CHARS_FOR_SCRIBING = 26000
 
 # Doctor-patient transcripts and the AI's structured output derived from them are PHI. Raw
 # request/response content is only ever emitted at DEBUG (off by default -- Python's logging
@@ -45,10 +60,10 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
 
     def _post_with_retry(self, url: str, request_kwargs: dict, _retry: int = 0) -> dict:
         """
-        Shared POST-with-429-backoff-retry and PHI-safe error logging for any Groq REST
-        call (chat completions or audio translations) -- owns only the retry/error envelope,
-        not the payload shape, so `request_kwargs` (headers/json/files/data/timeout/...) is
-        passed straight through to `requests.post` unexamined. Returns the parsed JSON body.
+        Shared POST-with-retry-backoff and PHI-safe error logging for any Groq REST call (chat
+        completions or audio translations) -- owns only the retry/error envelope, not the
+        payload shape, so `request_kwargs` (headers/json/files/data/timeout/...) is passed
+        straight through to `requests.post` unexamined. Returns the parsed JSON body.
         """
         try:
             response = requests.post(url, **request_kwargs)
@@ -69,6 +84,20 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
                                wait, _retry + 1, MAX_RATE_LIMIT_RETRIES)
                 time.sleep(wait)
                 return self._post_with_retry(url, request_kwargs, _retry=_retry + 1)
+            if response.status_code in _TRANSIENT_ERROR_STATUS_CODES and _retry < MAX_RATE_LIMIT_RETRIES:
+                # Found live: a 413 for a ~27KB request body (nowhere near any real size limit --
+                # confirmed by immediately replaying the exact same payload seconds later, which
+                # succeeded) that would otherwise fall straight through to _generate_json's
+                # broad except and silently return an empty draft, exactly like an unretried 429
+                # used to. Treating 413/502/503/504 as transient and retrying with the same
+                # bounded backoff as 429 (no Retry-After header to honor for these, so a fixed
+                # exponential schedule) turns a one-off Groq-side hiccup into a slightly slower
+                # request instead of a silent failure.
+                wait = min(3 * (2 ** _retry), 20)
+                logger.warning("Groq returned transient status %d, retrying in %.1fs (attempt %d/%d)",
+                               response.status_code, wait, _retry + 1, MAX_RATE_LIMIT_RETRIES)
+                time.sleep(wait)
+                return self._post_with_retry(url, request_kwargs, _retry=_retry + 1)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -78,7 +107,7 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
                 logger.debug("Response body: %s", e.response.text)
             raise
 
-    def _call_groq_api(self, prompt: str, system: str = None, temperature: float = 0.3) -> str:
+    def _call_groq_api(self, prompt: str, system: str = None, temperature: float = 0.3, max_tokens: int = 3000) -> str:
         if not self.api_key:
             raise ValueError("Groq API key not configured. Set GROQ_API_KEY in environment.")
 
@@ -90,7 +119,7 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
                 {"role": "user", "content": prompt}
             ],
             "temperature": temperature,
-            "max_tokens": 3000,
+            "max_tokens": max_tokens,
         }
         if self._reasoning_format_supported:
             # Reasoning-capable models (e.g. the qwen3 line) emit a <think>...</think>
@@ -122,7 +151,7 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
                 and response.status_code == 400 and "reasoning_format" in response.text
             ):
                 self._reasoning_format_supported = False
-                return self._call_groq_api(prompt, system, temperature)
+                return self._call_groq_api(prompt, system, temperature, max_tokens)
             raise
         return data["choices"][0]["message"]["content"]
 
@@ -167,9 +196,9 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
         # parses. Easy to get wrong by habit; there is no shared precedent in this file.
         return (result.get("text") or "").strip()
 
-    def _generate_json(self, prompt: str, system: str = None, temperature: float = 0.3) -> dict:
+    def _generate_json(self, prompt: str, system: str = None, temperature: float = 0.3, max_tokens: int = 3000) -> dict:
         try:
-            raw = self._call_groq_api(prompt, system, temperature)
+            raw = self._call_groq_api(prompt, system, temperature, max_tokens)
             logger.debug("RAW RESPONSE: %s...", raw[:500])
             # Defense-in-depth: _call_groq_api already requests reasoning_format="hidden" so
             # a <think>...</think> block should never appear in `content`, but strip one out
@@ -302,6 +331,23 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
         return result
 
     def scribe_transcript(self, transcript: str) -> dict:
+        # Groq's real per-minute token budget for this account is 8000 (verified live against
+        # response headers, on BOTH the standard and higher-tier "Prod" key -- this is a hard
+        # account-level ceiling, not something rate_limiter.py's pacing can work around). A
+        # single scribe_transcript() call for a genuinely long consultation (a 45+ minute visit,
+        # transcript >~29,000 characters once wrapped in this prompt) needs more tokens than
+        # that in ONE request, which token_bucket.consume() cannot ever satisfy -- caught by
+        # _generate_json's broad except, silently returning {} and backfilling to an EMPTY
+        # draft with no error surfaced anywhere. Verified live: a 25,382-character transcript
+        # (real ~30-minute consultation) worked; a 37,039-character one (real ~45-minute
+        # consultation) silently produced nothing. Truncating here, at a size proven to work,
+        # and clearly flagging when that happens (both a dedicated field and a note prepended to
+        # "advice", so it's visible even without a frontend change) is far safer than a doctor
+        # receiving a blank draft with no indication anything went wrong.
+        truncated = len(transcript) > _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING
+        if truncated:
+            transcript = transcript[:_MAX_TRANSCRIPT_CHARS_FOR_SCRIBING].rsplit(".", 1)[0] + "."
+
         prompt = f"""Process the following spoken consultation transcript and structure it perfectly.
 
 Transcript of conversation:
@@ -338,6 +384,14 @@ Return a JSON object with the following structure:
         # Same idea for recommended lab tests: "CBC"/"Widal"/a misspelled test name gets
         # normalized against the canonical lab test master (see lab_test_matcher.py).
         result["labTests"] = lab_test_matcher.correct_lab_test_names(result["labTests"])
+        result["transcriptTruncated"] = truncated
+        if truncated:
+            note = (
+                "Note: this consultation transcript was very long and only the first portion "
+                "could be processed by the AI scribe. Please review the remainder of the "
+                "recording/transcript manually and add anything missed."
+            )
+            result["advice"] = f"{note}\n\n{result['advice']}".strip()
         return result
 
     def clinical_helper(self, current_draft: dict, query: str) -> str:

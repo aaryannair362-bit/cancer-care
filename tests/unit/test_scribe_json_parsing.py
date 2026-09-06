@@ -23,7 +23,7 @@ def engine():
 
 
 def _stub_call(engine, raw_return=None, raise_exc=None):
-    def _fake(prompt, system=None, temperature=0.3):
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000):
         if raise_exc is not None:
             raise raise_exc
         return raw_return
@@ -117,6 +117,41 @@ def test_scribe_transcript_backfills_missing_keys(engine):
     assert result["hpi"] == ""
 
 
+def test_scribe_transcript_truncates_very_long_transcripts_and_flags_it(engine):
+    """Regression test for a real bug found live: Groq's real account-level limit is 8000
+    tokens/minute (verified against live response headers, on both the standard and
+    higher-tier "Prod" key) -- a single scribe_transcript() call for a genuinely long
+    consultation needs more tokens than that in ONE request, which token_bucket.consume()
+    can never satisfy. That was previously caught by _generate_json's broad except and
+    silently returned an EMPTY draft with no error anywhere. Verified live: a 25,382-character
+    transcript worked; a 37,039-character one silently produced nothing. Now the transcript is
+    capped before it ever reaches the prompt, and the doctor is told, not left with a blank
+    draft that looks complete."""
+    captured = {}
+
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000):
+        captured["prompt_len"] = len(prompt)
+        return json.dumps({"chiefComplaint": "fever"})
+
+    engine._call_groq_api = _fake
+    long_transcript = "Doctor: how are you feeling today. Patient: not well. " * 1000  # far over the cap
+    result = engine.scribe_transcript(long_transcript)
+
+    from app.scribe import _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING
+    assert captured["prompt_len"] < _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING + 2000  # cap + prompt template overhead
+    assert captured["prompt_len"] < len(long_transcript)
+    assert result["transcriptTruncated"] is True
+    assert "very long" in result["advice"]
+    assert result["chiefComplaint"] == "fever"
+
+
+def test_scribe_transcript_does_not_flag_a_normal_length_transcript(engine):
+    _stub_call(engine, raw_return=json.dumps({"chiefComplaint": "cough"}))
+    result = engine.scribe_transcript("Doctor: how are you. Patient: I have a cough for two days.")
+    assert result["transcriptTruncated"] is False
+    assert "very long" not in result["advice"]
+
+
 def test_scribe_transcript_backfills_explicit_null_values():
     """JSON `null` for a key (parsed as Python None) must be treated as missing, not kept as None."""
     engine = ScribeEngine()
@@ -181,7 +216,7 @@ def test_system_prompt_forbids_medications_in_hpi_or_chief_complaint(engine):
 def test_scribe_transcript_prompt_field_descriptions_exclude_medications(engine):
     captured = {}
 
-    def _fake(prompt, system=None, temperature=0.3):
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000):
         captured["prompt"] = prompt
         return json.dumps({})
 
@@ -245,6 +280,42 @@ def test_call_groq_api_retries_on_429_and_succeeds(monkeypatch, engine):
     result = engine._call_groq_api("some prompt")
     assert result == '{"chiefComplaint": "ok"}'
     assert len(calls) == 2  # first call 429'd, second succeeded
+
+
+@pytest.mark.parametrize("status", [413, 502, 503, 504])
+def test_call_groq_api_retries_on_transient_error_statuses(monkeypatch, engine, status):
+    """Regression: found live -- a genuinely small (~27KB) request got a 413 back from Groq,
+    and replaying the identical payload seconds later succeeded, confirming it was a transient
+    hiccup, not a real payload-size problem. Before this fix, any non-429 error status fell
+    straight through to the caller with no retry at all, silently degrading to an empty draft
+    exactly like the old unretried-429 bug this file already regression-tests above."""
+    engine.api_key = "some-key"
+    calls = []
+
+    class _Transient:
+        def __init__(self):
+            self.status_code = status
+            self.headers = {}
+
+    class _Success:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"chiefComplaint": "ok"}'}}]}
+
+    def _fake_post(*a, **k):
+        calls.append(1)
+        return _Transient() if len(calls) == 1 else _Success()
+
+    monkeypatch.setattr("app.scribe.requests.post", _fake_post)
+    monkeypatch.setattr("app.scribe.time.sleep", lambda *a, **k: None)
+
+    result = engine._call_groq_api("some prompt")
+    assert result == '{"chiefComplaint": "ok"}'
+    assert len(calls) == 2
 
 
 def test_call_groq_api_drops_reasoning_format_when_model_rejects_it(monkeypatch, engine):

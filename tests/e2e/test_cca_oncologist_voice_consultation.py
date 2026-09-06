@@ -51,7 +51,7 @@ def test_medical_oncologist_voice_consultation_saves_and_is_readable_back(
 
     oncologist, patient = cca_patient
 
-    def _fake_call_groq_api(prompt, system=None, temperature=0.3):
+    def _fake_call_groq_api(prompt, system=None, temperature=0.3, max_tokens=3000):
         return json.dumps({
             "chiefComplaint": "Mild fatigue, occasional nausea",
             "hpi": "58F with newly staged Stage IIA invasive ductal carcinoma, HR+/HER2-.",

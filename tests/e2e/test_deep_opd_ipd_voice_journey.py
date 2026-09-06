@@ -200,7 +200,7 @@ DISCHARGE_SUMMARY = {
 }
 
 
-def _groq_dispatcher(prompt, system=None, temperature=0.3):
+def _groq_dispatcher(prompt, system=None, temperature=0.3, max_tokens=3000):
     """Routes the mocked Groq call by prompt content -- OPD, the IPD round, the nurse voice
     consult, the discharge summary, and the drug-interaction check all share one
     scribe._call_groq_api entry point but use distinguishable prompt templates/content."""

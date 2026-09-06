@@ -17,33 +17,50 @@ import pytest
 from app import sarvam_batch_transcriber as batch
 
 
+class _FakeTaskDetail:
+    def __init__(self, error_message=None):
+        self.error_message = error_message
+
+
 class _FakeStatus:
-    def __init__(self, job_state):
+    def __init__(self, job_state, successful_files_count=1, job_details=None):
         self.job_state = job_state
+        self.successful_files_count = successful_files_count
+        self.job_details = job_details
 
 
 class _FakeJob:
     """Mimics sarvamai's SpeechToTextJob -- see the real SDK's speech_to_text_job/job.py."""
 
-    def __init__(self, job_id="job-123", output_payload=None, final_state="Completed", write_output=True):
+    def __init__(
+        self, job_id="job-123", output_payload=None, final_state="Completed", write_output=True,
+        successful_files_count=1, job_details=None, start_fail_count=0,
+    ):
         self.job_id = job_id
         self._output_payload = output_payload if output_payload is not None else {"transcript": "hello world"}
         self._final_state = final_state
         self._write_output = write_output
+        self._successful_files_count = successful_files_count
+        self._job_details = job_details
+        self._start_fail_count = start_fail_count
         self.create_kwargs = {}
         self.uploaded_paths = None
         self.started = False
+        self.start_call_count = 0
 
     def upload_files(self, file_paths):
         self.uploaded_paths = list(file_paths)
         return True
 
     def start(self):
+        self.start_call_count += 1
+        if self.start_call_count <= self._start_fail_count:
+            raise batch.BadRequestError(body={"error": {"message": "body.files : Value error, files list must not be empty"}})
         self.started = True
         return _FakeStatus("Running")
 
     def wait_until_complete(self, poll_interval=5, timeout=1800):
-        return _FakeStatus(self._final_state)
+        return _FakeStatus(self._final_state, self._successful_files_count, self._job_details)
 
     def download_outputs(self, output_dir):
         if not self._write_output:
@@ -129,3 +146,62 @@ def test_transcribe_long_audio_silent_recording_returns_empty_string_not_error(m
     _install_fake_sdk(monkeypatch, job)
 
     assert batch.transcribe_long_audio(b"x", "audio/webm", "recording.webm") == ""
+
+
+def test_transcribe_long_audio_raises_with_sarvams_own_reason_when_file_fails_to_process(monkeypatch):
+    """Regression test for a real bug found live: a >7200s (2-hour) recording completes the
+    JOB (job_state="Completed") while the single file inside fails outright
+    (successful_files_count=0) -- checking only job_state would proceed to look for an output
+    file that was never created and raise a generic "no output file" error instead of Sarvam's
+    own specific, actionable reason (verified live: "400: Audio duration exceeds the maximum
+    limit of 7200 seconds.")."""
+    job = _FakeJob(
+        successful_files_count=0,
+        job_details=[_FakeTaskDetail(error_message="400: Audio duration exceeds the maximum limit of 7200 seconds.")],
+    )
+    _install_fake_sdk(monkeypatch, job)
+
+    with pytest.raises(RuntimeError, match="Audio duration exceeds the maximum limit of 7200 seconds"):
+        batch.transcribe_long_audio(b"x", "audio/webm", "recording.webm")
+
+
+def test_transcribe_long_audio_retries_start_when_upload_registration_races(monkeypatch):
+    """Regression test for a real race condition found live with a ~45MB/132-minute file:
+    calling start() immediately after upload_files() can hit Sarvam's backend before it finishes
+    registering the uploaded file, raising BadRequestError("...files list must not be empty...").
+    Confirmed live that retrying start() after a short delay resolves it -- this pins that
+    retry behavior rather than surfacing the transient error to the caller."""
+    job = _FakeJob(start_fail_count=2)
+    _install_fake_sdk(monkeypatch, job)
+    monkeypatch.setattr(batch.time, "sleep", lambda *a, **k: None)
+
+    result = batch.transcribe_long_audio(b"x", "audio/webm", "recording.webm")
+
+    assert result == "hello world"
+    assert job.start_call_count == 3
+
+
+def test_transcribe_long_audio_gives_up_after_max_start_retries(monkeypatch):
+    job = _FakeJob(start_fail_count=batch.START_RETRY_ATTEMPTS)
+    _install_fake_sdk(monkeypatch, job)
+    monkeypatch.setattr(batch.time, "sleep", lambda *a, **k: None)
+
+    with pytest.raises(batch.BadRequestError):
+        batch.transcribe_long_audio(b"x", "audio/webm", "recording.webm")
+
+
+def test_transcribe_long_audio_does_not_retry_a_different_bad_request_error(monkeypatch):
+    """Only the specific "files list must not be empty" race condition is retried -- any other
+    400 (e.g. a genuinely malformed request) must surface immediately, not be masked by retries."""
+    job = _FakeJob(start_fail_count=1)
+    job._start_fail_count = 1
+
+    def _start_raises_different_error():
+        raise batch.BadRequestError(body={"error": {"message": "invalid model specified"}})
+
+    job.start = _start_raises_different_error
+    _install_fake_sdk(monkeypatch, job)
+    monkeypatch.setattr(batch.time, "sleep", lambda *a, **k: None)
+
+    with pytest.raises(batch.BadRequestError):
+        batch.transcribe_long_audio(b"x", "audio/webm", "recording.webm")

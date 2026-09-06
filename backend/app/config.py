@@ -28,6 +28,17 @@ class Settings(BaseSettings):
     # for OCR (see OCR_PROVIDER below and ocr_service.py) -- one vendor credential, two features.
     SARVAM_API_KEY: str = os.getenv("SARVAM_API_KEY", "")
     TRANSCRIPTION_PROVIDER: str = os.getenv("TRANSCRIPTION_PROVIDER", "sarvam")
+    # The finalized, tested model as of this writing (verified live against the real Batch
+    # Speech-to-Text API) -- see sarvam_batch_transcriber.py. Not every model Sarvam offers
+    # works for this app's use case: mode="translate" (always-English output for Hinglish
+    # speech) only takes effect on saaras:v3/v4, not the SDK's own default ("saarika:v2.5").
+    SARVAM_STT_MODEL: str = os.getenv("SARVAM_STT_MODEL", "saaras:v3")
+    # BCP-47 language code passed to Sarvam Document AI (see ocr_service.py). Finalized default
+    # is English -- but see CHANGELOG/session notes: a real production document containing
+    # Bengali script characters surfaced this as a real, not just theoretical, tuning knob.
+    # Left here (not hardcoded) so a deployment serving predominantly non-English documents can
+    # change it without a code deploy.
+    SARVAM_OCR_LANGUAGE: str = os.getenv("SARVAM_OCR_LANGUAGE", "en-IN")
     # "sarvam" (Sarvam Document AI, see ocr_service.py) or "local" (RapidOCR, no external call).
     # Left blank by default here -- resolved below, after Settings() construction, against the
     # already-loaded SARVAM_API_KEY (same reason GROQ_API_KEY_Prod is applied post-construction

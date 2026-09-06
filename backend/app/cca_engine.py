@@ -539,7 +539,19 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
     """AI-drafts candidate (fact_type, value, verbatim, confidence) tuples from a document's
     OCR'd text. Never raises: an extraction failure (Groq error, malformed response, wrong
     shape) yields an empty list -- the document still gets ingested with its raw OCR text, it
-    just has zero PROPOSED facts for the clinician to review, rather than the request failing."""
+    just has zero PROPOSED facts for the clinician to review, rather than the request failing.
+
+    max_tokens is raised above _call_groq_api's 3000-token default deliberately: a document
+    with genuinely rich content (e.g. a full metabolic panel plus imaging findings plus staging
+    info) can need more than 3000 tokens to enumerate every fact as JSON with a verbatim quote
+    each -- verified live, the exact same real document intermittently (not always -- a
+    generation-to-generation, non-deterministic truncation) had its response cut off mid-JSON at
+    the 3000-token default, which _generate_json's malformed-JSON fallback cannot recover into
+    this function's {"facts": [...]} shape (that fallback only ever produces the unrelated
+    scribe_transcript() shape), silently yielding zero facts despite real, extractable content
+    in the document. Also asking for SHORTER verbatim spans reduces the same pressure further
+    without asking the model to extract less -- both changes address the actual overflow, not
+    just its symptom."""
     if not document_text or not document_text.strip():
         return []
 
@@ -548,14 +560,14 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
         "Extract ONLY facts explicitly and literally stated in the text -- never infer, "
         "estimate, or guess a value that is not written down. Return strict JSON of the shape "
         '{"facts": [{"fact_type": "<one of ' + "|".join(FACT_TYPES) + '>", '
-        '"value": "<short structured value>", "verbatim": "<exact quoted source text>", '
-        '"confidence": <0.0-1.0>}]}. If nothing relevant is found, return {"facts": []}. '
-        "Never include markdown or commentary outside the JSON object."
+        '"value": "<short structured value>", "verbatim": "<exact quoted source text, at most '
+        'roughly 15 words>", "confidence": <0.0-1.0>}]}. If nothing relevant is found, return '
+        '{"facts": []}. Never include markdown or commentary outside the JSON object.'
     )
     prompt = f"Extract clinical facts from this document:\n\n{document_text[:8000]}"
 
     try:
-        result = scribe._generate_json(prompt, system=system)
+        result = scribe._generate_json(prompt, system=system, max_tokens=6000)
     except Exception:
         return []
 

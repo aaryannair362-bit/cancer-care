@@ -195,7 +195,6 @@ _SARVAM_DOC_AI_CONTENT_TYPES = {"application/pdf", "image/png", "image/jpeg"}
 # is split into consecutive <=10-page sub-documents, each digitised as its own job, and the
 # results stitched back together in page order.
 _SARVAM_DOC_AI_MAX_PAGES_PER_JOB = 10
-_SARVAM_DOC_AI_LANGUAGE = "en-IN"
 # "md" (Markdown), not "html" or "json": the SDK's own docstring says output is delivered as a
 # ZIP whose internal layout isn't otherwise documented -- Markdown is the one format that's
 # still meaningfully readable as near-plain-text without needing to know that layout in advance
@@ -224,6 +223,27 @@ def _split_pdf_into_chunks(content: bytes, max_pages: int) -> list[tuple[int, by
     return chunks
 
 
+# Sarvam Document AI's markdown output embeds full-resolution page/figure images inline as
+# `![...](data:image/...;base64,<data>)` -- NOT documented in advance, found by running a real
+# scanned multi-page document through the live API: on one real 10-page report this was 20
+# embedded images consuming 95% of the returned "text" (623,713 of 625,492 characters). Left
+# in place, this defeated clinical fact extraction two ways: extract_clinical_facts() only
+# sends the first 8000 characters to Groq, so a document's actual content past the first
+# embedded image (often within the first page) never reached the model at all; and even
+# without that cap, feeding a fact-extraction prompt 95% base64 noise wastes tokens and risks
+# hitting context limits. Strip these blocks -- they're never useful as "text" in any
+# downstream consumer (_clinical_signals()'s regex, extract_clinical_facts(), the stored
+# excerpt) -- while leaving Sarvam's own AI-generated alt-text captions for figures (e.g. "The
+# image displays a circular blue ink stamp...") in place, since those already occasionally
+# carry real information (a hospital name/seal) and cost only a sentence, not tens of
+# thousands of characters.
+_BASE64_IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\(data:image/[^;]+;base64,[^)]*\)")
+
+
+def _strip_embedded_base64_images(text: str) -> str:
+    return _BASE64_IMAGE_PATTERN.sub("", text).strip()
+
+
 def _run_one_sarvam_doc_job(client, file_bytes: bytes, ext: str) -> str:
     """
     Runs one Sarvam Document AI digitise job on a single file (<= 10 pages, Sarvam's own cap)
@@ -241,7 +261,7 @@ def _run_one_sarvam_doc_job(client, file_bytes: bytes, ext: str) -> str:
             f.write(file_bytes)
 
         job = client.document_intelligence.create_job(
-            language=_SARVAM_DOC_AI_LANGUAGE, output_format=_SARVAM_DOC_AI_OUTPUT_FORMAT,
+            language=settings.SARVAM_OCR_LANGUAGE, output_format=_SARVAM_DOC_AI_OUTPUT_FORMAT,
         )
         job.upload_file(in_path)
         job.start()
@@ -276,6 +296,7 @@ def _run_one_sarvam_doc_job(client, file_bytes: bytes, ext: str) -> str:
                 if raw.strip():
                     texts.append(raw)
         combined = "\n\n".join(texts).strip()
+        combined = _strip_embedded_base64_images(combined)
         if not combined:
             raise RuntimeError("Sarvam Document AI returned an empty result")
         return combined

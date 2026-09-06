@@ -52,7 +52,7 @@ def test_headnurse_can_generate_discharge_summary_through_ui(js_page, live_serve
 
     head_nurse, nurse, patient = ward_setup
 
-    def _fake_call(prompt, system=None, temperature=0.3):
+    def _fake_call(prompt, system=None, temperature=0.3, max_tokens=3000):
         return json.dumps({
             "admissionSummary": "Admitted post-operatively for recovery",
             "hospitalCourse": "Uneventful recovery, vitals stable throughout",
@@ -84,7 +84,7 @@ def test_print_button_appears_after_generation_and_opens_preview(js_page, live_s
 
     head_nurse, nurse, patient = ward_setup
 
-    def _fake_call(prompt, system=None, temperature=0.3):
+    def _fake_call(prompt, system=None, temperature=0.3, max_tokens=3000):
         return json.dumps({
             "admissionSummary": "Admitted post-op", "hospitalCourse": "Uneventful",
             "dischargeDiagnosis": "Recovered well", "medicationsAtDischarge": [{"drugName": "Paracetamol", "dose": "500mg", "frequency": "TID", "duration": "3 days"}],
@@ -117,7 +117,7 @@ def test_nurse_does_not_see_generate_button_but_sees_existing_summary(js_page, l
 
     head_nurse, nurse, patient = ward_setup
 
-    def _fake_call(prompt, system=None, temperature=0.3):
+    def _fake_call(prompt, system=None, temperature=0.3, max_tokens=3000):
         return json.dumps({
             "admissionSummary": "x", "hospitalCourse": "x", "dischargeDiagnosis": "Recovered",
             "medicationsAtDischarge": [], "followUpInstructions": "x", "conditionAtDischarge": "Stable",

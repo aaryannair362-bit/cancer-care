@@ -44,7 +44,7 @@ def test_radiologist_generate_ai_draft_populates_findings_and_impression(
 
     radiologist, patient, order = radiology_setup
 
-    def _fake_call_groq_api(prompt, system=None, temperature=0.3):
+    def _fake_call_groq_api(prompt, system=None, temperature=0.3, max_tokens=3000):
         return json.dumps({
             "chiefComplaint": "",
             "hpi": "No suspicious pulmonary nodules. No mediastinal or hilar lymphadenopathy.",

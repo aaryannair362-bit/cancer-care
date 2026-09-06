@@ -23,11 +23,12 @@ internally. Verified by reading the SDK's own installed source
 describe the high-level flow but not this transport detail, so the source was the ground truth,
 not a guess.
 
-model="saaras:v3" is required, not the SDK's own default ("saarika:v2.5"): verified against the
-installed SDK's SpeechToTextJobParametersParams docstring that mode="translate" only has effect
-"for saaras:v3 or saaras:v4" models. mode="translate"/language_code="unknown" mirror the old
-sarvam_transcriber.py REST call exactly, for output parity with what this app already relied on
-(always-English output for Hinglish speech -- see that retired module's docstring for why).
+settings.SARVAM_STT_MODEL (config.py, default "saaras:v3") is required, not the SDK's own
+default ("saarika:v2.5"): verified against the installed SDK's SpeechToTextJobParametersParams
+docstring that mode="translate" only has effect "for saaras:v3 or saaras:v4" models.
+mode="translate"/language_code="unknown" mirror the old sarvam_transcriber.py REST call exactly,
+for output parity with what this app already relied on (always-English output for Hinglish
+speech -- see that retired module's docstring for why).
 """
 from __future__ import annotations
 
@@ -35,14 +36,14 @@ import json
 import logging
 import os
 import tempfile
+import time
 
-from sarvamai import SarvamAI
+from sarvamai import BadRequestError, SarvamAI
 
 from .config import settings
 
 logger = logging.getLogger(__name__)
 
-MODEL = "saaras:v3"
 MODE = "translate"
 LANGUAGE_CODE = "unknown"
 # Batch STT processes well under real-time, but this is a generous ceiling for a full-length
@@ -50,6 +51,15 @@ LANGUAGE_CODE = "unknown"
 # ever shows a legitimate job taking longer than this to finish.
 POLL_INTERVAL_SEC = 5
 JOB_TIMEOUT_SEC = 1800
+# Verified live with a real ~45MB/132-minute file: calling start() immediately after
+# upload_files() can race Sarvam's own backend registering the uploaded file -- upload_files()
+# returns True and get_status() briefly shows total_files=0, and start() can then 400 with
+# "body.files : Value error, files list must not be empty". Retrying start() after a short
+# delay resolves it (confirmed: the same job succeeded in registering its file within seconds
+# on manual retry). This is a transport-timing issue, not a real validation failure, so it's
+# retried here rather than surfaced as an error.
+START_RETRY_ATTEMPTS = 4
+START_RETRY_DELAY_SEC = 3
 
 
 def transcribe_long_audio(audio_bytes: bytes, content_type: str, filename: str) -> str:
@@ -75,14 +85,25 @@ def transcribe_long_audio(audio_bytes: bytes, content_type: str, filename: str) 
             f.write(audio_bytes)
 
         job = client.speech_to_text_job.create_job(
-            model=MODEL, mode=MODE, language_code=LANGUAGE_CODE,
+            model=settings.SARVAM_STT_MODEL, mode=MODE, language_code=LANGUAGE_CODE,
         )
         job.upload_files([in_path])
-        job.start()
+        _start_with_retry(job)
         status = job.wait_until_complete(poll_interval=POLL_INTERVAL_SEC, timeout=JOB_TIMEOUT_SEC)
         if status.job_state.lower() != "completed":
             logger.error("Sarvam batch STT job %s ended in state %r", job.job_id, status.job_state)
             raise RuntimeError(f"Sarvam batch STT job did not complete (state={status.job_state})")
+
+        # job_state can be "Completed" while the single file inside still failed outright
+        # (verified live: a >7200s file completes the JOB with successful_files_count=0,
+        # failed_files_count=1) -- checking only job_state would proceed to look for an output
+        # file that was never created and raise a confusing "no output file" error instead of
+        # Sarvam's own specific, actionable reason.
+        if not status.successful_files_count:
+            details = status.job_details or []
+            reason = details[0].error_message if details and details[0].error_message else "unknown reason"
+            logger.error("Sarvam batch STT job %s completed but the file failed to process: %s", job.job_id, reason)
+            raise RuntimeError(f"Sarvam batch STT could not process this audio: {reason}")
 
         out_dir = os.path.join(tmp_dir, "out")
         job.download_outputs(output_dir=out_dir)
@@ -101,3 +122,21 @@ def transcribe_long_audio(audio_bytes: bytes, content_type: str, filename: str) 
         # failure -- return "" rather than raise, matching the old per-chunk contract's
         # "skip empty content, don't fail the whole consultation over it" behavior.
         return transcript
+
+
+def _start_with_retry(job) -> None:
+    """See START_RETRY_ATTEMPTS' comment for the real race condition this works around."""
+    for attempt in range(START_RETRY_ATTEMPTS):
+        try:
+            job.start()
+            return
+        except BadRequestError as e:
+            body = getattr(e, "body", None) or {}
+            message = (body.get("error") or {}).get("message", "") if isinstance(body, dict) else ""
+            if "files list must not be empty" not in message or attempt == START_RETRY_ATTEMPTS - 1:
+                raise
+            logger.warning(
+                "Sarvam batch STT job %s: start() raced the upload registration (attempt %d/%d), retrying in %ds",
+                job.job_id, attempt + 1, START_RETRY_ATTEMPTS, START_RETRY_DELAY_SEC,
+            )
+            time.sleep(START_RETRY_DELAY_SEC)

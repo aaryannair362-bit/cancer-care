@@ -176,7 +176,7 @@ def mock_groq_json(monkeypatch, payload_or_raw):
     else:
         raw = _json.dumps(payload_or_raw)
 
-    def _fake(prompt, system=None, temperature=0.3):
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000):
         return raw
 
     monkeypatch.setattr(app_main.scribe, "_call_groq_api", _fake)
