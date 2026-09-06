@@ -24,31 +24,14 @@ Docker) for the accuracy gain is worth reconsidering.
 Language: RapidOCR's bundled models target Latin-script text; documents in non-Latin scripts
 (e.g. Devanagari) are out of scope, same limitation docTR had. No per-page or per-request timeout
 is actually enforced in code -- see OCR_BENCHMARK.md's Production behavior section.
-
-OCR_PROVIDER="sarvam" (config.py; the default whenever SARVAM_API_KEY is configured) offloads
-OCR to Sarvam's Document AI (Sarvam Vision 1.5) instead of running RapidOCR in this process at
-all -- see _extract_via_sarvam() below. This addresses the two production failure modes RapidOCR
-can't: it moves the compute off Render's free-tier process entirely (no more competing with
-FastAPI/uvicorn for the same 512MB), and it uses a model built for full-page layout/table
-understanding rather than RapidOCR's plain per-line text detection, which is what mixed
-image+text pages need. On ANY failure (network, quota, an unexpected response shape) this falls
-back automatically to the local RapidOCR path below -- same "never hard-fail a document"
-philosophy this file already followed before Sarvam existed as an option.
 """
 from __future__ import annotations
 
 import io
-import logging
 import re
 import threading
 from datetime import datetime
 from typing import Any
-
-from sarvamai import SarvamAI
-
-from .config import settings
-
-logger = logging.getLogger(__name__)
 
 _engine = None
 _engine_lock = threading.Lock()
@@ -104,7 +87,7 @@ def _clinical_signals(text: str) -> dict[str, Any]:
     return result
 
 
-def _extract_local(content: bytes, content_type: str) -> dict[str, Any]:
+def extract_document(content: bytes, content_type: str) -> dict[str, Any]:
     page_text: list[dict[str, Any]] = []
     engines: list[str] = []
 
@@ -184,158 +167,3 @@ def _extract_local(content: bytes, content_type: str) -> dict[str, Any]:
         "processed_at": datetime.utcnow(),
         "ocr_failed_pages": [p["page"] for p in page_text if p["method"] == "ocr_failed"],
     }
-
-
-# Sarvam Document AI's digitise endpoint accepts PDF/PNG/JPG/ZIP -- TIFF (also accepted by this
-# app's own upload forms, for multi-page scanner output) is NOT in that list, so a TIFF is never
-# even attempted here; it goes straight to the local RapidOCR path instead of wasting a call
-# Sarvam would just reject.
-_SARVAM_DOC_AI_CONTENT_TYPES = {"application/pdf", "image/png", "image/jpeg"}
-# Verified against docs.sarvam.ai: PDF/ZIP uploads are capped at 10 pages per job. A longer PDF
-# is split into consecutive <=10-page sub-documents, each digitised as its own job, and the
-# results stitched back together in page order.
-_SARVAM_DOC_AI_MAX_PAGES_PER_JOB = 10
-_SARVAM_DOC_AI_LANGUAGE = "en-IN"
-# "md" (Markdown), not "html" or "json": the SDK's own docstring says output is delivered as a
-# ZIP whose internal layout isn't otherwise documented -- Markdown is the one format that's
-# still meaningfully readable as near-plain-text without needing to know that layout in advance
-# (an HTML file would need tag-stripping; an undocumented JSON block schema would need guessing
-# field names). This keeps _run_one_sarvam_doc_job's parsing honest about what it actually knows.
-_SARVAM_DOC_AI_OUTPUT_FORMAT = "md"
-_SARVAM_DOC_AI_POLL_INTERVAL_SEC = 2.0
-_SARVAM_DOC_AI_TIMEOUT_SEC = 300.0
-
-
-def _split_pdf_into_chunks(content: bytes, max_pages: int) -> list[tuple[int, bytes]]:
-    """Returns [(first_page_number (1-indexed), chunk_pdf_bytes), ...], each chunk holding at
-    most `max_pages` consecutive pages in original order. A PDF with <= max_pages pages returns
-    a single chunk starting at page 1, unchanged."""
-    from pypdf import PdfReader, PdfWriter
-
-    reader = PdfReader(io.BytesIO(content))
-    chunks: list[tuple[int, bytes]] = []
-    for start in range(0, len(reader.pages), max_pages):
-        writer = PdfWriter()
-        for page in reader.pages[start:start + max_pages]:
-            writer.add_page(page)
-        buf = io.BytesIO()
-        writer.write(buf)
-        chunks.append((start + 1, buf.getvalue()))
-    return chunks
-
-
-def _run_one_sarvam_doc_job(client, file_bytes: bytes, ext: str) -> str:
-    """
-    Runs one Sarvam Document AI digitise job on a single file (<= 10 pages, Sarvam's own cap)
-    and returns its extracted text. Raises on any failure -- extract_document() below catches
-    that and falls back to local RapidOCR for the whole document, so a wrong assumption in here
-    (see the ZIP-parsing note) degrades to "OCR ran locally instead", never to bad clinical text.
-    """
-    import os
-    import tempfile
-    import zipfile
-
-    with tempfile.TemporaryDirectory(prefix="sarvam_docai_") as tmp_dir:
-        in_path = os.path.join(tmp_dir, f"document{ext}")
-        with open(in_path, "wb") as f:
-            f.write(file_bytes)
-
-        job = client.document_intelligence.create_job(
-            language=_SARVAM_DOC_AI_LANGUAGE, output_format=_SARVAM_DOC_AI_OUTPUT_FORMAT,
-        )
-        job.upload_file(in_path)
-        job.start()
-        status = job.wait_until_complete(
-            poll_interval=_SARVAM_DOC_AI_POLL_INTERVAL_SEC, timeout=_SARVAM_DOC_AI_TIMEOUT_SEC,
-        )
-        if status.job_state not in ("Completed", "PartiallyCompleted"):
-            raise RuntimeError(f"Sarvam Document AI job did not complete (state={status.job_state})")
-
-        zip_path = os.path.join(tmp_dir, "output.zip")
-        job.download_output(zip_path)
-
-        # Sarvam's digitise output ZIP was NOT documented in advance to hold more than one
-        # file -- verified live against the real API during development: for output_format="md"
-        # it actually contains BOTH the requested "document.md" (the clean text this function
-        # wants) AND a "metadata/page_NNN.json" per page (block-level coordinates/confidence/
-        # reading-order, meant for layout-aware consumers, not plain-text extraction). An
-        # earlier version of this function concatenated every file in the ZIP indiscriminately,
-        # which duplicated every page's text (once from the .md, once re-embedded inside the
-        # metadata JSON's own "text" fields) and polluted _clinical_signals() with malformed,
-        # JSON-escaped duplicate matches -- caught by testing against the real API, not assumed.
-        # Only read the file(s) matching the requested output extension; ignore everything else
-        # in the archive (metadata/*, or any future addition) by construction.
-        texts = []
-        with zipfile.ZipFile(zip_path) as zf:
-            names = sorted(
-                n for n in zf.namelist()
-                if not n.endswith("/") and n.lower().endswith(f".{_SARVAM_DOC_AI_OUTPUT_FORMAT}")
-            )
-            for name in names:
-                raw = zf.read(name).decode("utf-8", errors="replace")
-                if raw.strip():
-                    texts.append(raw)
-        combined = "\n\n".join(texts).strip()
-        if not combined:
-            raise RuntimeError("Sarvam Document AI returned an empty result")
-        return combined
-
-
-def _extract_via_sarvam(content: bytes, content_type: str) -> dict[str, Any]:
-    if not settings.SARVAM_API_KEY:
-        raise ValueError("Sarvam API key not configured.")
-    if content_type not in _SARVAM_DOC_AI_CONTENT_TYPES:
-        raise ValueError(f"Sarvam Document AI does not support {content_type!r}")
-
-    client = SarvamAI(api_subscription_key=settings.SARVAM_API_KEY)
-
-    if content_type == "application/pdf":
-        from pypdf import PdfReader
-        chunks = _split_pdf_into_chunks(content, _SARVAM_DOC_AI_MAX_PAGES_PER_JOB)
-        page_count = len(PdfReader(io.BytesIO(content)).pages)
-        ext = ".pdf"
-    else:
-        chunks = [(1, content)]
-        page_count = 1
-        ext = ".png" if content_type == "image/png" else ".jpg"
-
-    # Each chunk is tagged with the 1-indexed page it starts at -- Sarvam's response doesn't
-    # give per-page text within a job, so this is job-level (not true per-page) granularity;
-    # for the common case (<=10 page document, one job) it's exactly one entry for the whole
-    # document, same shape a single-image OCR result already has.
-    page_text: list[dict[str, Any]] = [
-        {"page": first_page, "text": _run_one_sarvam_doc_job(client, chunk_bytes, ext), "method": "sarvam_ocr"}
-        for first_page, chunk_bytes in chunks
-    ]
-
-    full_text = "\n\n".join(p["text"] for p in page_text if p["text"]).strip()
-    if not full_text:
-        raise RuntimeError("Sarvam Document AI returned no readable text")
-
-    return {
-        "text": full_text,
-        "pages": page_text,
-        "page_count": page_count,
-        "engine": "sarvam_doc_ai",
-        "signals": _clinical_signals(full_text),
-        "processed_at": datetime.utcnow(),
-        "ocr_failed_pages": [],
-    }
-
-
-def extract_document(content: bytes, content_type: str) -> dict[str, Any]:
-    """
-    Extracts text (+ derived clinical signals) from a PDF or image. Tries Sarvam Document AI
-    first when OCR_PROVIDER="sarvam" (config.py's default whenever SARVAM_API_KEY is set) --
-    see this module's docstring for why. On ANY failure from that path (network error, quota,
-    unsupported file type, an unexpected response shape), falls back to the local RapidOCR path
-    (_extract_local) automatically, so Sarvam being briefly unavailable can never take document
-    upload down entirely. With OCR_PROVIDER="local" (or no Sarvam key configured), goes straight
-    to local RapidOCR, unchanged from this module's original behavior.
-    """
-    if settings.OCR_PROVIDER == "sarvam":
-        try:
-            return _extract_via_sarvam(content, content_type)
-        except Exception as exc:
-            logger.warning("Sarvam Document AI OCR failed, falling back to local OCR: %s", exc)
-    return _extract_local(content, content_type)

@@ -115,6 +115,19 @@
         .btn-signin:active {
             transform: translateY(0);
         }
+        .disclaimer-box {
+            margin-top: 24px;
+            padding: 14px 16px;
+            background: #F1F5F9;
+            border: 1px solid #E2E8F0;
+            border-radius: 10px;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            font-size: 12px;
+            line-height: 1.5;
+            color: #475569;
+        }
         .disclaimer-icon {
             font-size: 15px;
             line-height: 1;
@@ -127,8 +140,23 @@
             text-align: center;
             margin-top: 10px;
         }
+        .pwd-toggle-link {
+            text-align: center;
+            margin-top: 18px;
+            font-size: 12px;
+        }
+        .pwd-toggle-link a {
+            color: #64748B;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        .pwd-toggle-link a:hover {
+            color: #0F172A;
+            text-decoration: underline;
+        }
         #password-auth-section {
-            margin-top: 20px;
+            display: none;
+            margin-top: 16px;
             padding-top: 16px;
             border-top: 1px solid #E2E8F0;
         }
@@ -168,7 +196,7 @@
                     <select id="persona-select" class="role-dropdown">
                         <optgroup label="🎗️ Oncology OS (CCA Roles)">
                             <option value="ccafrontdesk@aivana.com|CCAFrontDesk" selected>Front Desk / Registration</option>
-                            <option value="navigator@aivana.com|CCANurseNavigator">Primary Investigation</option>
+                            <option value="navigator@aivana.com|CCANurseNavigator">Nurse Navigator</option>
                             <option value="oncologist@aivana.com|CCAMedicalOncologist">Medical Oncologist</option>
                             <option value="surgeon@aivana.com|CCASurgicalOncologist">Surgical Oncologist</option>
                             <option value="radonc@aivana.com|CCARadiationOncologist">Radiation Oncologist</option>
@@ -189,6 +217,15 @@
                 <button type="submit" id="btn-submit" class="btn-signin" style="background: #3B5A80; padding: 12px; font-size: 14px; font-weight: 600; border-radius: 8px;">Sign in</button>
                 <div id="login-error" class="error-message"></div>
             </form>
+
+            <div class="disclaimer-box" style="background: #EFF6FF; border: 1px solid #BFDBFE; border-radius: 8px; padding: 12px 14px; margin-top: 20px; font-size: 12px; color: #1E40AF; display: flex; gap: 10px; align-items: flex-start; text-align: left;">
+                <div style="font-size: 14px; line-height: 1;">🛡️</div>
+                <div style="line-height: 1.4;">Demonstration authentication only. No SSO, OAuth, MFA, identity provider, or production authorization is configured.</div>
+            </div>
+
+            <div class="pwd-toggle-link" style="margin-top: 16px;">
+                <a href="#" id="toggle-pwd-btn">Need traditional password login?</a>
+            </div>
 
             <div id="password-auth-section">
                 <form id="traditional-login-form">
@@ -238,6 +275,12 @@
     });
 
     // Traditional Password Login
+    document.getElementById('toggle-pwd-btn').addEventListener('click', (e) => {
+        e.preventDefault();
+        const section = document.getElementById('password-auth-section');
+        section.style.display = section.style.display === 'block' ? 'none' : 'block';
+    });
+
     document.getElementById('traditional-login-form').addEventListener('submit', async (e) => {
         e.preventDefault();
         const email = document.getElementById('trad-email').value.trim();

@@ -404,17 +404,12 @@
                         <div id="order-detected-tests" style="margin-bottom:12px; font-size:12px; color:var(--ink-500);"></div>
                         <div class="form-grid-3">
                             <div class="form-group">
-                                <label class="form-label">Order type <span id="order-type-auto-tag" style="display:none; font-weight:400; color:var(--ink-500);">(auto-suggested — change if needed)</span></label>
-                                <select id="order-type" class="form-select" onchange="document.getElementById('order-type-auto-tag').style.display='none';">
-                                    <option value="LAB">Lab</option>
-                                    <option value="RADIOLOGY">Radiology</option>
-                                    <option value="PATHOLOGY">Pathology</option>
-                                    <option value="MOLECULAR_DIAGNOSTIC">Molecular Diagnostic</option>
-                                </select>
+                                <label class="form-label">Order type</label>
+                                <select id="order-type" class="form-select"><option value="LAB">Lab</option></select>
                             </div>
                             <div class="form-group">
                                 <label class="form-label">Item (manual / ad-hoc order)</label>
-                                <input type="text" id="order-item" class="form-input" placeholder="Only used if no detected tests are checked above" oninput="suggestOrderType()" />
+                                <input type="text" id="order-item" class="form-input" placeholder="Only used if no detected tests are checked above" />
                             </div>
                             <div class="form-group">
                                 <label class="form-label">Priority</label>
@@ -507,7 +502,7 @@
                         <div class="section-card">
                             <div class="section-title" style="font-size:15px;">Assigned Care Team</div>
                             <div class="care-team-list-item">Medical Oncologist</div>
-                            <div class="care-team-list-item">Primary Investigation</div>
+                            <div class="care-team-list-item">Nurse Navigator</div>
                             <div class="care-team-list-item">MDT Coordinator</div>
                             <div class="care-team-list-item" style="border-bottom:none;">Care Coordinator</div>
                         </div>
@@ -868,7 +863,7 @@
                     '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:12px;">' +
                     lastDetectedLabTests.map((t, i) => `
                         <label style="display:inline-flex; align-items:center; gap:5px; background:#EFF6FF; border:1px solid var(--blue-badge-bg); border-radius:999px; padding:5px 12px; cursor:pointer;">
-                            <input type="checkbox" class="detected-lab-test-checkbox" value="${escapeHtml(t)}" checked onchange="suggestOrderType()" />
+                            <input type="checkbox" class="detected-lab-test-checkbox" value="${escapeHtml(t)}" checked />
                             ${escapeHtml(t)}
                         </label>
                     `).join('') + '</div>';
@@ -878,7 +873,6 @@
             if (indicationContext && document.getElementById('order-indication')) {
                 document.getElementById('order-indication').value = indicationContext;
             }
-            suggestOrderType();
         }
 
         function addManualLabTest() {
@@ -891,37 +885,6 @@
             }
             renderDetectedLabTests();
             toast(`Added "${name}" to lab tests list`, 'success');
-        }
-
-        // Deterministic keyword match against every checked detected test plus the manual item
-        // field -- pre-fills Order Type so the doctor doesn't have to categorise each order by
-        // hand, but never locks it: the dropdown stays a normal editable <select> and this only
-        // sets its initial value (the onchange handler on #order-type hides the "auto-suggested"
-        // tag the moment the doctor picks something themselves). Not an LLM call -- same
-        // curated-keyword-list approach this codebase already uses for lab-test-name correction
-        // and drug interactions, deliberately, since a wrong AI-invented category here has real
-        // downstream routing consequences (Lab vs Pathology vs Molecular Diagnostic queues). All
-        // checked items in one click share this single order type -- a mixed batch spanning two
-        // categories still needs the doctor to split it into two Raise Order clicks.
-        const ORDER_TYPE_KEYWORDS = {
-            MOLECULAR_DIAGNOSTIC: ['fish', 'ngs', 'next generation sequencing', 'pcr', 'pd-l1', 'pdl1', 'egfr', 'alk', 'ros1', 'braf', 'kras', 'brca', 'mutation', 'genomic', 'gene panel', 'gene expression', 'sequencing', 'msi', 'her2 fish'],
-            PATHOLOGY: ['biopsy', 'histopath', 'histopathology', 'cytology', 'fnac', 'frozen section', 'ihc', 'immunohistochemistry', 'specimen', 'excision', 'core needle'],
-            RADIOLOGY: ['ct ', 'cect', 'mri', 'pet-ct', 'pet ct', 'x-ray', 'xray', 'ultrasound', 'usg', 'mammogram', 'bone scan', 'imaging'],
-        };
-
-        function suggestOrderType() {
-            const itemName = (document.getElementById('order-item').value || '').toLowerCase();
-            const checkedTests = Array.from(document.querySelectorAll('.detected-lab-test-checkbox:checked')).map(cb => cb.value.toLowerCase());
-            const combined = [itemName, ...checkedTests].join(' | ');
-            const typeSelect = document.getElementById('order-type');
-            const tagEl = document.getElementById('order-type-auto-tag');
-            if (!combined.trim()) { tagEl.style.display = 'none'; return; }
-            let matched = 'LAB'; // default, matches the backend's own default when order_type is omitted
-            if (ORDER_TYPE_KEYWORDS.MOLECULAR_DIAGNOSTIC.some(kw => combined.includes(kw))) matched = 'MOLECULAR_DIAGNOSTIC';
-            else if (ORDER_TYPE_KEYWORDS.PATHOLOGY.some(kw => combined.includes(kw))) matched = 'PATHOLOGY';
-            else if (ORDER_TYPE_KEYWORDS.RADIOLOGY.some(kw => combined.includes(kw))) matched = 'RADIOLOGY';
-            typeSelect.value = matched;
-            tagEl.style.display = 'inline';
         }
 
         async function submitConsultationNote() {
@@ -1239,37 +1202,6 @@
             DISCONTINUED: 'Discontinue Regimen',
         };
 
-        const MED_STATUS_BADGE = { Pending: 'badge-amber', InProgress: 'badge-blue', Paused: 'badge-amber', Stopped: 'badge-rose', Completed: 'badge-green', Omitted: 'badge-rose' };
-
-        async function renderMedicationAdministrationStatusCard(order) {
-            // Read-only for the treating doctor -- lets them see, without opening the Infusion
-            // Nurse's own screen, whether each medication on today's signed order has been
-            // started/completed and at what time. No write actions here; administration itself
-            // stays the Infusion Nurse's action (POST /treatment/medications/{id}/event).
-            try {
-                const data = await Api.get(`${CCA_API}/treatment/${order.id}/medications?patient_id=${currentPatientId}`);
-                const meds = data.results || [];
-                if (!meds.length) {
-                    return `<div class="section-card"><div class="section-title">Medication Administration Status</div><p class="section-sub" style="margin-top:6px;">No medications transcribed by Day-Care/Infusion Nursing yet for this order.</p></div>`;
-                }
-                return `<div class="section-card">
-                    <div class="section-title">Medication Administration Status</div>
-                    <div class="section-sub" style="margin-bottom:10px;">As recorded by Day-Care/Infusion Nursing — read-only here.</div>
-                    ${meds.map(m => `
-                        <div class="participant-row">
-                            <div>
-                                <div style="font-size:13px; font-weight:600;">${escapeHtml(m.medication_name)} <span style="font-weight:400; color:var(--ink-500);">${escapeHtml(m.dose || '—')} · ${escapeHtml(m.route || '—')}</span></div>
-                                <div style="font-size:12px; color:var(--ink-500);">${m.start_time ? 'Started: ' + new Date(m.start_time).toLocaleString() : 'Not started yet'}${m.end_time ? ' · Completed: ' + new Date(m.end_time).toLocaleString() : ''}</div>
-                            </div>
-                            <span class="badge ${MED_STATUS_BADGE[m.status] || 'badge-amber'}">${escapeHtml(m.status)}</span>
-                        </div>
-                    `).join('')}
-                </div>`;
-            } catch (err) {
-                return `<div class="section-card"><div class="section-title">Medication Administration Status</div><p class="section-sub" style="margin-top:6px;">${escapeHtml(apiErrorMessage(err))}</p></div>`;
-            }
-        }
-
         async function renderTreatmentOrderCard(plan) {
             let order = null;
             try {
@@ -1317,13 +1249,11 @@
             } catch (err) {
                 return `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`;
             }
-            const medsSection = await renderMedicationAdministrationStatusCard(order);
             return `
                 <div class="section-card">
                     <div class="section-title">Treatment Order <span class="badge badge-blue">SIGNED</span></div>
                     <div class="section-sub">${escapeHtml(assessment.protocol)} · ${escapeHtml(assessment.cycle_info)}</div>
                 </div>
-                ${medsSection}
                 <div class="section-card">
                     <div class="section-title">Toxicity History (CTCAE v5.0)</div>
                     ${(assessment.toxicity_history || []).map(t => `<div class="participant-row">${escapeHtml(t.term)} <span class="badge ${Number(t.grade) === 0 ? 'badge-green' : 'badge-amber'}">Grade ${Number(t.grade)}</span></div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No toxicity events recorded.</p>'}
@@ -1424,17 +1354,6 @@
                                 <div class="form-group"><label class="form-label">Protocol / Regimen</label><input type="text" id="tp-protocol" class="form-input" placeholder="e.g. AC-T (Doxorubicin/Cyclophosphamide -> Paclitaxel)" /></div>
                                 <div class="form-group"><label class="form-label">Planned sessions/cycles</label><input type="number" id="tp-sessions" class="form-input" value="8" /></div>
                             </div>
-                            <div class="form-group" style="margin-bottom:10px;">
-                                <label class="form-label" style="display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:600;">
-                                    <input type="checkbox" id="tp-pass-to-mdt" onchange="document.getElementById('tp-mdt-question-group').style.display = this.checked ? 'block' : 'none';" style="width:auto; height:auto;" />
-                                    Pass to MDT / Tumour Board
-                                </label>
-                                <div class="section-sub" style="margin-top:2px;">Checked: this patient's complete case is sent to the Tumour Board and this plan cannot be signed until the MDT records an approved decision. Unchecked (default): you develop and sign this plan directly — no MDT review required.</div>
-                            </div>
-                            <div id="tp-mdt-question-group" class="form-group" style="display:none; margin-bottom:12px;">
-                                <label class="form-label">Clinical question for MDT</label>
-                                <textarea id="tp-mdt-question" class="form-textarea" rows="2" placeholder="e.g. Neoadjuvant chemotherapy vs upfront surgery?"></textarea>
-                            </div>
                             <button class="btn-navy" onclick="submitCreateTreatmentPlan()">Create Draft</button>
                             <div id="tp-create-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
                         </div>
@@ -1446,16 +1365,12 @@
                 const canAmend = !['COMPLETED', 'SUPERSEDED', 'CANCELLED'].includes(plan.status);
                 const canSign = ['DRAFT', 'PROPOSED'].includes(plan.status);
                 const orderSection = plan.status === 'ACTIVE' ? await renderTreatmentOrderCard(plan) : '';
-                const mdtAttachSection = (plan.requires_mdt && !plan.mdt_decision_id && canSign) ? await renderMdtDecisionAttachCard(plan) : '';
                 container.innerHTML = `
                     ${cancerContextSection}
                     <div class="section-card">
                         <div class="section-head">
                             <div><div class="section-title">${escapeHtml(plan.modality)} (v${plan.version_no})</div><div class="section-sub">${escapeHtml(plan.protocol_name || 'Protocol not yet recorded')} · Intent: ${escapeHtml(plan.intent || '—')}</div></div>
-                            <div>
-                                <span class="badge ${TREATMENT_PLAN_STATUS_BADGE[plan.status] || 'badge-blue'}">${escapeHtml(plan.status)}</span>
-                                <span class="badge ${plan.requires_mdt ? 'badge-amber' : 'badge-blue'}" style="margin-left:6px;">${plan.requires_mdt ? 'MDT Pathway' : 'Direct Authorization'}</span>
-                            </div>
+                            <span class="badge ${TREATMENT_PLAN_STATUS_BADGE[plan.status] || 'badge-blue'}">${escapeHtml(plan.status)}</span>
                         </div>
                         <div class="grid-3">
                             <div><div class="onc-col-label">Planned / Completed</div><div class="onc-col-value" style="font-size:13px;">${plan.completed_sessions || 0} / ${plan.planned_sessions || '—'}</div></div>
@@ -1474,7 +1389,6 @@
                         </div>
                         <div id="tp-action-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
                     </div>
-                    ${mdtAttachSection}
                     ${orderSection}
                     ${canAmend ? `
                     <div class="section-card">
@@ -1498,61 +1412,17 @@
 
         async function submitCreateTreatmentPlan() {
             const statusEl = document.getElementById('tp-create-status');
-            const passToMdt = document.getElementById('tp-pass-to-mdt').checked;
-            const mdtQuestion = passToMdt ? document.getElementById('tp-mdt-question').value.trim() : '';
-            if (passToMdt && !mdtQuestion) { toast('A clinical question is required to pass this case to MDT', 'error'); return; }
             try {
-                if (passToMdt) {
-                    // "Pass to MDT" ON: send the complete case package to the Tumour Board first
-                    // (reuses the existing 1-click case-package compiler) -- the plan itself is
-                    // then tagged requires_mdt so it cannot be signed until MDT approves.
-                    await Api.post(`${CCA_API}/mdt/cases`, { patient_id: currentPatientId, question: mdtQuestion });
-                }
                 await Api.post(`${CCA_API}/treatment-plans`, {
                     patient_id: currentPatientId,
                     modality: document.getElementById('tp-modality').value,
                     intent: document.getElementById('tp-intent').value,
                     protocol_name: document.getElementById('tp-protocol').value,
                     planned_sessions: Number(document.getElementById('tp-sessions').value) || 8,
-                    requires_mdt: passToMdt,
                 });
-                toast(passToMdt ? 'Draft Treatment Plan created and case submitted to MDT' : 'Draft Treatment Plan created', 'success');
+                toast('Draft Treatment Plan created', 'success');
                 loadTreatmentPlanView();
             } catch (err) { statusEl.textContent = ''; toast(apiErrorMessage(err), 'error'); }
-        }
-
-        async function renderMdtDecisionAttachCard(plan) {
-            // Only shown for a requires_mdt plan with no mdt_decision_id yet -- offers every
-            // decision the Tumour Board has already approved/partially-approved for this
-            // patient, so the doctor can attach one before signing (sign_treatment_plan's gate
-            // requires this link to exist and be approved).
-            try {
-                const data = await Api.get(`${CCA_API}/mdt/cases?patient_id=${plan.patient_id}`);
-                const eligible = (data.mdt_cases || []).filter(c => c.latest_decision && ['APPROVED', 'PARTIALLY_APPROVED'].includes(c.latest_decision.status));
-                if (!eligible.length) {
-                    return `<div class="section-card"><div class="section-title">Attach MDT Decision</div><p class="section-sub" style="margin-top:6px;">This plan requires an MDT decision before it can be signed. No approved decision is on record yet — check the MDT tab once the Tumour Board has reported back.</p></div>`;
-                }
-                return `<div class="section-card">
-                    <div class="section-title">Attach MDT Decision</div>
-                    <div class="section-sub" style="margin-bottom:10px;">This plan requires MDT review before signing. Select the approved decision this plan is executing.</div>
-                    <div class="form-group"><select id="tp-mdt-decision-select" class="form-select">
-                        ${eligible.map(c => `<option value="${c.latest_decision.id}">${escapeHtml(c.latest_decision.status)} — ${escapeHtml((c.latest_decision.recommendation || '').slice(0, 80))}</option>`).join('')}
-                    </select></div>
-                    <button class="btn-outline" onclick="submitLinkMdtDecision(${plan.id})">Attach Decision</button>
-                </div>`;
-            } catch (err) {
-                return `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`;
-            }
-        }
-
-        async function submitLinkMdtDecision(planId) {
-            const select = document.getElementById('tp-mdt-decision-select');
-            if (!select || !select.value) { toast('Select an MDT decision to attach', 'error'); return; }
-            try {
-                await Api.post(`${CCA_API}/treatment-plans/${planId}/link-mdt-decision`, { mdt_decision_id: Number(select.value) });
-                toast('MDT decision attached — ready to sign', 'success');
-                loadTreatmentPlanView();
-            } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
         async function signTreatmentPlanSubmit() {

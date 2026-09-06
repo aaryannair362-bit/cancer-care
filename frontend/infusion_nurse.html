@@ -803,9 +803,6 @@
                     <div class="med-card-meta">
                         Verified: ${m.product_label_verified ? '✔ Product/label' : '— Product/label'} · ${m.expiry_integrity_checked ? '✔ Expiry/integrity' : '— Expiry/integrity'}${m.second_verifier_name ? ' · 2nd verifier: ' + escapeHtml(m.second_verifier_name) : ''}
                     </div>
-                    <div class="med-card-meta" style="font-weight:600;">
-                        ${m.start_time ? `Started: ${new Date(m.start_time).toLocaleString()}` : 'Not started yet'}${m.end_time ? ` · Completed: ${new Date(m.end_time).toLocaleString()}` : ''}
-                    </div>
                     ${m.omission_reason ? `<div class="med-card-meta" style="color:var(--rose-badge-text);">Reason: ${escapeHtml(m.omission_reason)}</div>` : ''}
                     <div class="med-card-actions">
                         ${!m.product_label_verified || !m.expiry_integrity_checked ? `<button class="btn-outline btn-sm" onclick="quickVerify(${m.id})">Verify Product/Expiry</button>` : ''}
@@ -872,7 +869,7 @@
                         ${data.results.map(o => `
                             <div class="timeline-item">
                                 <div class="timeline-time">${escapeHtml(new Date(o.observation_time).toLocaleString())}</div>
-                                <div><span class="badge badge-blue" style="margin-right:6px;">${escapeHtml(o.phase)}</span>${o.vitals ? escapeHtml(JSON.stringify(o.vitals)) + ' · ' : ''}${escapeHtml(o.symptoms || '')} ${o.notes ? '· ' + escapeHtml(o.notes) : ''}${o.pain_score !== null && o.pain_score !== undefined ? ' · Pain: ' + o.pain_score + '/5' : ''}${o.vip_score !== null && o.vip_score !== undefined ? ' · VIP: ' + o.vip_score + '/5' : ''} <span style="color:var(--ink-400);">— ${escapeHtml(o.recorded_by || '')}</span></div>
+                                <div><span class="badge badge-blue" style="margin-right:6px;">${escapeHtml(o.phase)}</span>${o.vitals ? escapeHtml(JSON.stringify(o.vitals)) + ' · ' : ''}${escapeHtml(o.symptoms || '')} ${o.notes ? '· ' + escapeHtml(o.notes) : ''} <span style="color:var(--ink-400);">— ${escapeHtml(o.recorded_by || '')}</span></div>
                             </div>
                         `).join('') || '<p class="empty-hint">No observations recorded yet.</p>'}
                     </div>
@@ -881,21 +878,6 @@
                         <div class="form-group"><label class="form-label">Vitals</label><input type="text" id="mon-vitals" class="form-input" placeholder="e.g. BP 120/78, Pulse 84, SpO2 98%" /></div>
                         <div class="form-group"><label class="form-label">Symptoms</label><input type="text" id="mon-symptoms" class="form-input" /></div>
                     </div>
-                    <div class="form-grid-3">
-                        <div class="form-group"><label class="form-label">Pain Scale (0-5)</label><input type="number" id="mon-pain-score" class="form-input" min="0" max="5" placeholder="e.g. 2" /></div>
-                        <div class="form-group" style="grid-column: span 2;">
-                            <label class="form-label">VIP Score (0-5, Visual Infusion Phlebitis)</label>
-                            <select id="mon-vip-score" class="form-select">
-                                <option value="">Not assessed</option>
-                                <option value="0">0 — No symptoms, site healthy</option>
-                                <option value="1">1 — Slight pain and/or slight redness near site</option>
-                                <option value="2">2 — Two of: pain, redness, swelling</option>
-                                <option value="3">3 — Pain along cannula path, redness, induration</option>
-                                <option value="4">4 — As above plus a palpable venous cord</option>
-                                <option value="5">5 — As above plus pyrexia (advanced thrombophlebitis)</option>
-                            </select>
-                        </div>
-                    </div>
                     <div class="form-group"><label class="form-label">Nursing observation</label><textarea id="mon-notes" class="form-textarea"></textarea></div>
                     <button class="btn-outline" onclick="submitMonitoring()">+ Record Observation</button>
                 `;
@@ -903,8 +885,6 @@
         }
 
         async function submitMonitoring() {
-            const painVal = document.getElementById('mon-pain-score').value;
-            const vipVal = document.getElementById('mon-vip-score').value;
             try {
                 await Api.post(`${CCA_API}/treatment/monitoring`, {
                     patient_id: currentPatientId, order_id: currentOrderId,
@@ -912,8 +892,6 @@
                     vitals: { free_text: document.getElementById('mon-vitals').value || null },
                     symptoms: document.getElementById('mon-symptoms').value || null,
                     notes: document.getElementById('mon-notes').value || null,
-                    pain_score: painVal === '' ? null : Number(painVal),
-                    vip_score: vipVal === '' ? null : Number(vipVal),
                 });
                 toast('Observation recorded', 'success');
                 loadMonitoring();

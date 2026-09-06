@@ -18,8 +18,7 @@ from ..auth import (
     is_cca_nurse_navigator, is_cca_medical_oncologist, is_cca_surgical_oncologist,
     is_cca_radiation_oncologist, is_cca_patient_liaison, is_cca_infusion_nurse,
     is_cca_radiologist, is_cca_financial_counsellor, is_cca_external_mdt_specialist,
-    is_cca_pharmacist, is_nursing_station, can_sign_treatment_plan,
-    can_approve_mdt_recommendation, log_audit,
+    is_cca_pharmacist, can_sign_treatment_plan, can_approve_mdt_recommendation, log_audit,
 )
 from ..config import settings
 from ..ocr_service import extract_document
@@ -178,22 +177,6 @@ def _coerce_int(body: dict, key: str, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         raise HTTPException(400, f"{key} must be an integer")
-
-
-def _coerce_optional_scale_score(body: dict, key: str, max_value: int):
-    """Field-shape validation only (a 0-max_value bound), not a clinical rule -- this never
-    decides anything about the value, just rejects a non-integer or an out-of-range one before
-    it reaches the DB. Used for the nurse-observed Pain Scale and VIP Score, both optional."""
-    value = body.get(key)
-    if value is None or value == "":
-        return None
-    try:
-        value = int(value)
-    except (TypeError, ValueError):
-        raise HTTPException(400, f"{key} must be an integer")
-    if not (0 <= value <= max_value):
-        raise HTTPException(400, f"{key} must be between 0 and {max_value}")
-    return value
 
 
 # ---------------------------------------------------------
@@ -857,18 +840,6 @@ def get_case_summary(
 # 2. Documents, Extractions & Verification Workspace (SCR-06/07)
 # ---------------------------------------------------------
 
-def _can_upload_cca_document(user: dict) -> bool:
-    """
-    Document ingestion is Front Desk's job -- mirrors the general HMS module's equivalent gate
-    (routers/patient_documents.py's _can_upload()), extended with is_doctor since frontdesk.html
-    itself is reachable by the Doctor/Admin/NursingStation/CCAFrontDesk roles (see
-    frontend/js/api.js's NAV_ITEMS "frontdesk" entry). No other CCA role should be able to
-    upload -- previously this endpoint had no role gate at all, so removing the upload UI from
-    nurse_navigator.html alone wouldn't have stopped a direct API call.
-    """
-    return is_admin(user) or is_nursing_station(user) or is_cca_front_desk(user) or is_doctor(user)
-
-
 @router.post("/documents", status_code=201)
 async def upload_document(
     patient_id: int = Query(...), file: UploadFile = File(...),
@@ -881,8 +852,6 @@ async def upload_document(
     this is what makes the verification workspace actually usable for a real patient's real
     uploaded records, not just the one scripted demo case.
     """
-    if not _can_upload_cca_document(current_user):
-        raise HTTPException(403, "Only Front Desk can upload patient documents")
     org_id = _org_id(current_user)
     patient = _get_org_patient(db, patient_id, org_id)
 
@@ -2093,17 +2062,6 @@ def list_mdt_cases(
             CCAPatient, MDTCase.patient_id == CCAPatient.id
         ).filter(CCAPatient.organization_id == org_id)
     cases = query.order_by(MDTCase.id.desc()).all()
-
-    def _latest_decision_out(case_id: int):
-        # Most recent decision on this case, if any -- the same "latest wins" row
-        # approve_mdt_recommendation and record_mdt_recommendation already treat as current.
-        # Surfaced here so a Treatment Plan screen can offer an "Attach MDT Decision" choice
-        # without a second round-trip per case.
-        d = db.query(MDTDecision).filter(MDTDecision.case_id == case_id).order_by(MDTDecision.id.desc()).first()
-        if not d:
-            return None
-        return {"id": d.id, "status": d.status, "recommendation": d.recommendation}
-
     return {
         "mdt_cases": [
             {
@@ -2114,8 +2072,7 @@ def list_mdt_cases(
                 "tumor_board": c.tumor_board,
                 "status": c.status,
                 "requested_by": c.requested_by,
-                "scheduled_for": c.scheduled_for.isoformat() if c.scheduled_for else None,
-                "latest_decision": _latest_decision_out(c.id),
+                "scheduled_for": c.scheduled_for.isoformat() if c.scheduled_for else None
             }
             for c in cases
         ]
@@ -2286,7 +2243,6 @@ def _treatment_plan_dict(plan: TreatmentPlan) -> dict:
         "patient_id": plan.patient_id,
         "care_plan_id": plan.care_plan_id,
         "mdt_decision_id": plan.mdt_decision_id,
-        "requires_mdt": bool(plan.requires_mdt),
         "intent": plan.intent,
         "modality": plan.modality,
         "protocol_name": plan.protocol_name,
@@ -2338,7 +2294,6 @@ async def create_treatment_plan(
     plan = TreatmentPlan(
         patient_id=patient_id,
         mdt_decision_id=body.get("mdt_decision_id"),
-        requires_mdt=bool(body.get("requires_mdt", False)),
         intent=body.get("intent", "Curative"),
         modality=body.get("modality", "Systemic Chemotherapy"),
         protocol_name=body.get("protocol_name"),
@@ -2493,48 +2448,6 @@ async def amend_treatment_plan(
     return {"status": "success", "treatment_plan": {"id": plan.id, "version_no": plan.version_no, "status": plan.status}}
 
 
-@router.post("/treatment-plans/{id}/link-mdt-decision")
-async def link_mdt_decision(
-    id: int, request: Request, db: Session = Depends(get_cca_db),
-    current_user: dict = Depends(get_current_user)
-):
-    """Attaches an already-approved MDT decision to a Treatment Plan marked requires_mdt,
-    once the Tumour Board has reported back -- separate from amend_treatment_plan because
-    this isn't a protocol/content change (no version bump, no change_reason), just recording
-    which MDT decision this plan is executing. This is what sign_treatment_plan's requires_mdt
-    gate checks for before allowing the plan to go ACTIVE."""
-    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == id).first()
-    if not plan:
-        raise HTTPException(404, "Treatment plan not found")
-    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
-    _require_modality_signer(current_user, plan.modality)
-
-    if plan.status not in ("DRAFT", "PROPOSED"):
-        raise HTTPException(409, f"Cannot link an MDT decision to a Treatment Plan in {plan.status} status")
-
-    body = await request.json()
-    mdt_decision_id = body.get("mdt_decision_id")
-    if not mdt_decision_id:
-        raise HTTPException(422, "mdt_decision_id is required")
-
-    decision = db.query(MDTDecision).filter(MDTDecision.id == mdt_decision_id).first()
-    if not decision or decision.patient_id != plan.patient_id:
-        raise HTTPException(422, "mdt_decision_id must reference an MDT decision for this same patient")
-    if decision.status not in ("APPROVED", "PARTIALLY_APPROVED"):
-        raise HTTPException(409, f"This MDT decision is not yet approved by the treating clinician (status: {decision.status})")
-
-    plan.mdt_decision_id = decision.id
-    actor = _actor(current_user)
-    publish(
-        db, "TREATMENT_PLAN_MDT_DECISION_LINKED", patient_id=plan.patient_id, actor=actor, role=current_user.get("role"),
-        title=f"MDT decision linked to Treatment Plan: {plan.modality}", category="TREATMENT_PLAN",
-        description=f"{actor} linked MDT decision #{decision.id} to the {plan.modality} Treatment Plan.",
-        treatment_plan_id=plan.id, mdt_decision_id=decision.id,
-    )
-    db.commit()
-    return {"status": "success", "treatment_plan": _treatment_plan_dict(plan)}
-
-
 @router.post("/treatment-plans/{id}/sign")
 async def sign_treatment_plan(
     id: int, request: Request, db: Session = Depends(get_cca_db),
@@ -2552,16 +2465,6 @@ async def sign_treatment_plan(
 
     if plan.status not in ("DRAFT", "PROPOSED"):
         raise HTTPException(409, f"Cannot sign a Treatment Plan in {plan.status} status")
-
-    # "Pass to MDT" enforcement (requires_mdt is the doctor's own explicit choice at draft
-    # time, see TreatmentPlan.requires_mdt's docstring) -- a non-MDT plan is completely
-    # unaffected by this block and signs exactly as it always has.
-    if plan.requires_mdt:
-        if not plan.mdt_decision_id:
-            raise HTTPException(409, "This plan was marked for MDT review and cannot be signed until an approved MDT decision is linked (see POST /treatment-plans/{id}/link-mdt-decision).")
-        decision = db.query(MDTDecision).filter(MDTDecision.id == plan.mdt_decision_id).first()
-        if not decision or decision.status not in ("APPROVED", "PARTIALLY_APPROVED"):
-            raise HTTPException(409, "This plan was marked for MDT review and its linked MDT decision is not yet approved (or partially approved) by the treating clinician.")
 
     body = await request.json() if request.headers.get("content-length") not in (None, "0") else {}
     actor = _actor(current_user)
@@ -4229,7 +4132,6 @@ def _monitoring_out(o: InfusionMonitoringObservation) -> dict:
         "id": o.id, "patient_id": o.patient_id, "treatment_order_id": o.treatment_order_id,
         "phase": o.phase, "observation_time": o.observation_time.isoformat(),
         "vitals": o.vitals, "symptoms": o.symptoms, "notes": o.notes,
-        "pain_score": o.pain_score, "vip_score": o.vip_score,
         "recorded_by": o.recorded_by, "recorded_at": o.recorded_at.isoformat(),
     }
 
@@ -4264,8 +4166,6 @@ async def record_monitoring(
     record = InfusionMonitoringObservation(
         patient_id=patient_id, treatment_order_id=order_id, phase=body.get("phase", "During"),
         vitals=body.get("vitals"), symptoms=body.get("symptoms"), notes=body.get("notes"),
-        pain_score=_coerce_optional_scale_score(body, "pain_score", 5),
-        vip_score=_coerce_optional_scale_score(body, "vip_score", 5),
         recorded_by=_actor(current_user),
     )
     db.add(record)

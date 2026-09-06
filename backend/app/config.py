@@ -23,17 +23,10 @@ class Settings(BaseSettings):
     # already-known-too-slow qwen model with no warning. Matching the default to the real,
     # working value removes that trap regardless of the env var.
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-    # Sarvam AI's Saaras v3 (sarvam_batch_transcriber.py) -- audio transcription engine
-    # purpose-built for Hindi/English medical speech and code-switching. Also used, same key,
-    # for OCR (see OCR_PROVIDER below and ocr_service.py) -- one vendor credential, two features.
+    # Sarvam AI's Saaras v3 (sarvam_transcriber.py) -- audio transcription engine
+    # purpose-built for Hindi/English medical speech and code-switching.
     SARVAM_API_KEY: str = os.getenv("SARVAM_API_KEY", "")
     TRANSCRIPTION_PROVIDER: str = os.getenv("TRANSCRIPTION_PROVIDER", "sarvam")
-    # "sarvam" (Sarvam Document AI, see ocr_service.py) or "local" (RapidOCR, no external call).
-    # Left blank by default here -- resolved below, after Settings() construction, against the
-    # already-loaded SARVAM_API_KEY (same reason GROQ_API_KEY_Prod is applied post-construction
-    # below: a bare os.getenv() at class-body-eval time can't see a key that only exists in the
-    # backend/.env file, which pydantic-settings loads later, during Settings() itself).
-    OCR_PROVIDER: str = os.getenv("OCR_PROVIDER", "")
     # Allowed CORS origins. Since frontend is served by FastAPI directly, requests are
     # same-origin by default. "*" or specific domains allow external access.
     ALLOWED_ORIGINS: str = os.getenv("ALLOWED_ORIGINS", "*")
@@ -61,13 +54,6 @@ settings = Settings()
 # exist.
 if settings.GROQ_API_KEY_Prod:
     settings.GROQ_API_KEY = settings.GROQ_API_KEY_Prod
-
-# No explicit OCR_PROVIDER override: default to Sarvam Document AI only when a Sarvam key is
-# actually configured, so a deployment/test run with no SARVAM_API_KEY keeps working exactly as
-# it always did (local RapidOCR only) rather than silently trying an external call with no
-# credential for it.
-if not settings.OCR_PROVIDER:
-    settings.OCR_PROVIDER = "sarvam" if settings.SARVAM_API_KEY else "local"
 
 _INSECURE_DEFAULT_SECRET_KEY = "your-super-secret-key-change-this-in-production"
 if settings.SECRET_KEY == _INSECURE_DEFAULT_SECRET_KEY:
