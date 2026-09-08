@@ -24,7 +24,7 @@ from ..auth import (
     can_approve_mdt_recommendation, log_audit,
 )
 from ..config import settings
-from ..ocr_service import extract_document
+from ..ocr_service import extract_document, strip_markup_for_display
 from ..scribe import scribe
 from .. import drug_matcher
 from ..document_pages import process_document_pages
@@ -64,7 +64,8 @@ from ..models_cca import (
 from ..cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
     evaluate_guideline_readiness, synthesize_nexus_brief, generate_care_plan_prefill,
-    classify_document, extract_clinical_facts,
+    classify_document, extract_clinical_facts, build_results_from_document_facts,
+    build_medication_lists,
 )
 from ..cca_seed import seed_cca_database, simulate_ct_result
 from ..cca_product_decisions import CARE_PLAN_IN_PROGRESS_STATUSES, TREATMENT_ORDERS_SYSTEM_OF_RECORD
@@ -966,10 +967,15 @@ def get_case_summary(
     facts_by_type: Dict[str, List[dict]] = {}
     facts_per_document: Dict[int, int] = {}
     for f in facts:
-        facts_by_type.setdefault(f.fact_type, []).append({
-            "id": f.id, "value": f.value, "status": f.status, "document_id": f.document_id,
-            "confidence": f.confidence,
-        })
+        # MEDICATION facts now live under "medications" (build_medication_lists, Current/Past
+        # Medications tabs) instead of the generic fact-chip list -- excluded here so they don't
+        # render twice. Still counted in facts_per_document (that count is "how many facts were
+        # drafted from this document", independent of which tab shows them).
+        if f.fact_type != "MEDICATION":
+            facts_by_type.setdefault(f.fact_type, []).append({
+                "id": f.id, "value": f.value, "status": f.status, "document_id": f.document_id,
+                "confidence": f.confidence,
+            })
         if f.document_id is not None:
             facts_per_document[f.document_id] = facts_per_document.get(f.document_id, 0) + 1
 
@@ -1040,7 +1046,7 @@ def get_case_summary(
                 "classification": d.classification_class,
                 "status": d.status, "uploaded_by": d.uploaded_by,
                 "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
-                "excerpt": (d.ocr_text or "")[:400],
+                "excerpt": strip_markup_for_display(d.ocr_text or "")[:400],
                 "fact_count": facts_per_document.get(d.id, 0),
                 "file_url": f"/api/cca/patients/{patient_id}/documents/{d.id}/file" if d.file_content else None,
             }
@@ -1065,6 +1071,7 @@ def get_case_summary(
         ],
         "radiation": radiation_out,
         "clinical_facts": facts_by_type,
+        "medications": build_medication_lists(db, patient_id),
         "encounters": [
             {
                 "id": e.id, "started_at": e.started_at.isoformat() if e.started_at else None,
@@ -1089,6 +1096,22 @@ def get_case_summary(
              "resulted_at": r.resulted_at.isoformat() if r.resulted_at else None}
             for r in results
         ],
+        # Same rows as "results" above, pre-split for Patient History's Past Labs / Past Results
+        # tabs -- "results" is kept as-is for any other/older consumer.
+        "results_by_period": {
+            "past_labs": [
+                {"id": r.id, "title": r.title, "is_critical": r.is_critical, "status": r.status,
+                 "excerpt": ((r.impression or r.findings_text or "")[:300] or None),
+                 "resulted_at": r.resulted_at.isoformat() if r.resulted_at else None}
+                for r in results if r.result_type == "LAB"
+            ],
+            "past_results": [
+                {"id": r.id, "result_type": r.result_type, "title": r.title, "is_critical": r.is_critical,
+                 "status": r.status, "excerpt": ((r.impression or r.findings_text or "")[:300] or None),
+                 "resulted_at": r.resulted_at.isoformat() if r.resulted_at else None}
+                for r in results if r.result_type != "LAB"
+            ],
+        },
         "journey": [
             {"event_type": ev.event_type, "title": ev.event_title, "description": ev.description,
              "actor": ev.actor_name, "actor_role": ev.actor_role,
@@ -1184,6 +1207,7 @@ async def upload_document(
     db.flush()
 
     fact_rows = []
+    result_rows = []
     if not ocr_failed_reason:
         drafted_facts = extract_clinical_facts(ocr_text)
         for f in drafted_facts:
@@ -1193,6 +1217,16 @@ async def upload_document(
             )
             db.add(fact)
             fact_rows.append(fact)
+        # Surfaces a document's own lab/imaging findings straight into Patient History's
+        # "Results" section on upload -- see build_results_from_document_facts's docstring for
+        # why this doesn't also synthesize a CCAOrder.
+        for r in build_results_from_document_facts(drafted_facts, filename):
+            result = CCAResult(
+                patient_id=patient_id, document_id=doc.id, result_type=r["result_type"],
+                title=r["title"], findings_text=r["findings_text"], status="NEW",
+            )
+            db.add(result)
+            result_rows.append(result)
         db.flush()
         detect_contradictions(db, patient_id)
 
@@ -1214,6 +1248,7 @@ async def upload_document(
             f"{actor} uploaded {filename}, but text extraction failed ({ocr_failed_reason}). Saved for manual review."
             if ocr_failed_reason else
             f"{actor} uploaded {filename}, classified as {doc_class}. {len(fact_rows)} candidate fact(s) drafted for review."
+            + (f" {len(result_rows)} result(s) recorded." if result_rows else "")
             + (f" Note: {partial_ocr_warning}." if partial_ocr_warning else "")
         ),
         actor_name=actor,
@@ -1238,6 +1273,7 @@ async def upload_document(
             "status": doc.status,
         },
         "facts_drafted": len(fact_rows),
+        "results_recorded": len(result_rows),
         "ocr_warning": ocr_failed_reason or partial_ocr_warning,
     }
 

@@ -20,6 +20,61 @@ const CCA_SUMMARY_FACT_LABELS = {
     MEDICATION: 'Medication', ALLERGY: 'Allergy',
 };
 
+const CCA_MED_SOURCE_LABEL = {
+    IV_CHEMO: 'IV / Systemic Therapy', ORAL_THERAPY: 'Oral Therapy',
+    PALLIATIVE: 'Palliative / Supportive Care', HOME_MEDICATION: 'Home Medication (reconciled)',
+    DOCUMENT_HISTORY: 'Noted in outside document',
+};
+const CCA_MED_STOPPED_STATUSES = new Set(['CANCELLED', 'DISCONTINUED', 'Discontinued', 'Discontinue']);
+
+/** One Current/Past Medications row -- shared by both tabs since the shape (build_medication_lists,
+ * backend/app/cca_engine.py) is identical, only the bucket (current vs past) differs. */
+function _ccaSummaryMedicationRow(m) {
+    const badgeClass = CCA_MED_STOPPED_STATUSES.has(m.status) ? 'badge-rose' : 'badge-green';
+    return `
+        <div class="cca-sum-row">
+            <div class="cca-sum-row-main">
+                <div class="cca-sum-row-title">${escapeHtml(m.drug || 'Unspecified drug')}</div>
+                <div class="cca-sum-row-sub">${escapeHtml(CCA_MED_SOURCE_LABEL[m.source] || m.source || '')}${m.detail ? ' · ' + escapeHtml(m.detail) : ''}</div>
+                ${m.since ? `<div class="cca-sum-row-sub">Since ${fmtDateTime(m.since)}</div>` : ''}
+                ${(m.stopped_at || m.stopped_reason) ? `<div class="cca-sum-row-sub" style="margin-top:4px;">Stopped${m.stopped_at ? ' ' + fmtDateTime(m.stopped_at) : ''}${m.stopped_reason ? ': ' + escapeHtml(m.stopped_reason) : ''}</div>` : ''}
+            </div>
+            <span class="badge ${badgeClass}">${escapeHtml(m.status || 'Unknown')}</span>
+        </div>`;
+}
+
+const CCA_RESULT_STATUS_BADGE = { NEW: 'badge-amber', PENDING_REVIEW: 'badge-amber', ACKNOWLEDGED: 'badge-green', ACTIONED: 'badge-green' };
+
+/** One Past Labs / Past Results row -- same CCAResult shape as the original flat "Results"
+ * section used, just pre-filtered by result_type server-side (results_by_period). */
+function _ccaSummaryResultRow(r) {
+    return `
+        <div class="cca-sum-row">
+            <div class="cca-sum-row-main">
+                <div class="cca-sum-row-title">${escapeHtml(r.title)}${r.result_type ? ` <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(r.result_type)}</span>` : ''}</div>
+                <div class="cca-sum-row-sub">${r.resulted_at ? fmtDateTime(r.resulted_at) : '—'}</div>
+                ${r.excerpt ? `<div class="cca-sum-row-sub" style="margin-top:4px;">${escapeHtml(r.excerpt)}</div>` : ''}
+            </div>
+            <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+                ${r.is_critical ? '<span class="badge badge-rose">🔴 Critical</span>' : ''}
+                <span class="badge ${CCA_RESULT_STATUS_BADGE[r.status] || 'badge-amber'}">${escapeHtml(r.status || 'Unknown')}</span>
+            </div>
+        </div>`;
+}
+
+/** Shows tabKey's panel and hides the rest, within one renderCaseSummaryPanel container --
+ * pure client-side switch, all tabs' data already arrived in the one case-summary fetch. */
+function _ccaSummarySwitchTab(containerId, tabKey) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    container.querySelectorAll('.cca-tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === tabKey);
+    });
+    container.querySelectorAll('.cca-tab-panel').forEach(panel => {
+        panel.hidden = panel.dataset.tabPanel !== tabKey;
+    });
+}
+
 function _ccaSummaryEnsureStyles() {
     if (document.getElementById('cca-summary-styles')) return;
     const style = document.createElement('style');
@@ -49,6 +104,10 @@ function _ccaSummaryEnsureStyles() {
         .cca-sum-scan-tile { cursor:pointer; border:1px solid var(--line); border-radius:var(--radius-md); overflow:hidden; background:var(--bg-card-subtle); text-align:left; }
         .cca-sum-scan-thumb { width:100%; height:110px; object-fit:cover; display:block; background:#1e293b; }
         .cca-sum-scan-caption { padding:6px 8px; font-size:11px; color:var(--ink-600); }
+        .cca-tab-strip { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:14px; border-bottom:1px solid var(--line); padding-bottom:0; }
+        .cca-tab-btn { background:none; border:none; border-bottom:2px solid transparent; padding:8px 12px; font-size:12.5px; font-weight:600; color:var(--ink-500); cursor:pointer; white-space:nowrap; }
+        .cca-tab-btn:hover { color:var(--ink-800); }
+        .cca-tab-btn.active { color:var(--brand-primary); border-bottom-color:var(--brand-primary); }
         /* Slide-in in-app document viewer (Patient History "View"/scan thumbnails) -- replaces
            opening the file in a new browser tab. Injected once by _ccaSummaryEnsureDrawer(). */
         .cca-doc-drawer-backdrop { position:fixed; inset:0; background:rgba(15,23,32,0.45); z-index:399; opacity:0; pointer-events:none; transition:opacity .2s ease; }
@@ -279,10 +338,10 @@ async function renderCaseSummaryPanel(containerId, patientId, options = {}) {
             `).join('')}
         </div>` : '';
 
-    const factEntries = Object.entries(summary.clinical_facts || {}).filter(([type]) => !hideMedications || type !== 'MEDICATION');
+    const factEntries = Object.entries(summary.clinical_facts || {});
     const factsSection = `
         <div class="section-card">
-            <div class="section-title" style="margin-bottom:12px;">${hideMedications ? 'Diagnoses &amp; Extracted Findings' : 'Diagnoses, Medications &amp; Extracted Findings'}</div>
+            <div class="section-title" style="margin-bottom:12px;">Past Findings</div>
             ${factEntries.length ? factEntries.map(([type, facts]) => `
                 <div class="cca-sum-fact-group">
                     <div class="cca-sum-fact-group-title">${escapeHtml(CCA_SUMMARY_FACT_LABELS[type] || type)}</div>
@@ -309,23 +368,28 @@ async function renderCaseSummaryPanel(containerId, patientId, options = {}) {
             `).join('') : '<p class="cca-sum-empty">No investigations ordered yet.</p>'}
         </div>`;
 
-    const RESULT_STATUS_BADGE = { NEW: 'badge-amber', PENDING_REVIEW: 'badge-amber', ACKNOWLEDGED: 'badge-green', ACTIONED: 'badge-green' };
-    const resultsSection = `
+    const medications = summary.medications || { current: [], past: [] };
+    const currentMedsSection = `
         <div class="section-card">
-            <div class="section-title" style="margin-bottom:12px;">Results</div>
-            ${(summary.results || []).length ? summary.results.map(r => `
-                <div class="cca-sum-row">
-                    <div class="cca-sum-row-main">
-                        <div class="cca-sum-row-title">${escapeHtml(r.title)} <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(r.result_type || '')}</span></div>
-                        <div class="cca-sum-row-sub">${r.resulted_at ? fmtDateTime(r.resulted_at) : '—'}</div>
-                        ${r.excerpt ? `<div class="cca-sum-row-sub" style="margin-top:4px;">${escapeHtml(r.excerpt)}</div>` : ''}
-                    </div>
-                    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
-                        ${r.is_critical ? '<span class="badge badge-rose">🔴 Critical</span>' : ''}
-                        <span class="badge ${RESULT_STATUS_BADGE[r.status] || 'badge-amber'}">${escapeHtml(r.status || 'Unknown')}</span>
-                    </div>
-                </div>
-            `).join('') : '<p class="cca-sum-empty">No results on record yet.</p>'}
+            <div class="section-title" style="margin-bottom:12px;">Current Medications</div>
+            ${(medications.current || []).length ? medications.current.map(_ccaSummaryMedicationRow).join('') : '<p class="cca-sum-empty">No active or ongoing medications on record.</p>'}
+        </div>`;
+    const pastMedsSection = `
+        <div class="section-card">
+            <div class="section-title" style="margin-bottom:12px;">Past Medications</div>
+            ${(medications.past || []).length ? medications.past.map(_ccaSummaryMedicationRow).join('') : '<p class="cca-sum-empty">No discontinued or historical medications on record.</p>'}
+        </div>`;
+
+    const resultsByPeriod = summary.results_by_period || { past_labs: [], past_results: [] };
+    const pastLabsSection = `
+        <div class="section-card">
+            <div class="section-title" style="margin-bottom:12px;">Past Labs</div>
+            ${(resultsByPeriod.past_labs || []).length ? resultsByPeriod.past_labs.map(_ccaSummaryResultRow).join('') : '<p class="cca-sum-empty">No past lab results on record.</p>'}
+        </div>`;
+    const pastResultsSection = `
+        <div class="section-card">
+            <div class="section-title" style="margin-bottom:12px;">Past Results</div>
+            ${(resultsByPeriod.past_results || []).length ? resultsByPeriod.past_results.map(_ccaSummaryResultRow).join('') : '<p class="cca-sum-empty">No past imaging/pathology results on record.</p>'}
         </div>`;
 
     const encountersSection = `
@@ -359,7 +423,26 @@ async function renderCaseSummaryPanel(containerId, patientId, options = {}) {
             `).join('') : '<p class="cca-sum-empty">No journey events recorded yet.</p>'}
         </div>`;
 
-    container.innerHTML = header + vitalsSection + documentsSection + scansSection + radiationSection + factsSection + ordersSection + resultsSection + encountersSection + journeySection +
+    const overviewPanel = vitalsSection + documentsSection + scansSection + radiationSection + ordersSection;
+    const tabs = [
+        { key: 'overview', label: 'Overview', html: overviewPanel },
+        ...(hideMedications ? [] : [
+            { key: 'current-meds', label: 'Current Medications', html: currentMedsSection },
+            { key: 'past-meds', label: 'Past Medications', html: pastMedsSection },
+        ]),
+        { key: 'past-labs', label: 'Past Labs', html: pastLabsSection },
+        { key: 'past-results', label: 'Past Results', html: pastResultsSection },
+        { key: 'past-findings', label: 'Past Findings', html: factsSection },
+        { key: 'encounters', label: 'Encounters', html: encountersSection },
+        { key: 'journey', label: 'Journey', html: journeySection },
+    ];
+    const tabStrip = `
+        <div class="cca-tab-strip">
+            ${tabs.map((t, i) => `<button type="button" class="cca-tab-btn${i === 0 ? ' active' : ''}" data-tab="${t.key}" onclick="_ccaSummarySwitchTab('${containerId}', '${t.key}')">${escapeHtml(t.label)}</button>`).join('')}
+        </div>`;
+    const tabPanels = tabs.map((t, i) => `<div class="cca-tab-panel" data-tab-panel="${t.key}" ${i === 0 ? '' : 'hidden'}>${t.html}</div>`).join('');
+
+    container.innerHTML = header + tabStrip + tabPanels +
         `<p style="font-size:11.5px; color:var(--ink-500); margin-top:-8px;">${escapeHtml(summary.disclaimer)}</p>`;
 
     // Scan thumbnails are served behind auth (same as the document "View" file endpoint), so

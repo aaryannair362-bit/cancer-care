@@ -15,9 +15,12 @@ from .models_cca import (
     CCAPatient, ClinicalFact, CCAContradiction, CCACancerDiagnosis,
     CCABiomarkerResult, StagingRecord, StagingEvidence, GuidelineContext,
     ClinicalBrief, MDTCase, MDTDecision, CCAIntakeAssessment, CCADocument,
-    CCAOrder, CCAResult
+    CCAOrder, CCAResult, TreatmentOrder, OralTherapyPrescription, OralTherapyHoldEvent,
+    MedicationReconciliationEntry,
 )
-from .models_cca_oncology_ext import CCARadiationPhase, RadiationFraction, RadiationPrescription
+from .models_cca_oncology_ext import (
+    CCARadiationPhase, RadiationFraction, RadiationPrescription, PalliativeTreatmentOrder,
+)
 from .scribe import scribe
 
 
@@ -419,6 +422,102 @@ def synthesize_nexus_brief(db: Session, patient_id: int) -> Dict:
     }
 
 
+def build_medication_lists(db: Session, patient_id: int) -> Dict[str, List[Dict]]:
+    """Patient History's Current/Past Medications split (architecture: no cross-table medication
+    aggregator existed before this -- IV chemo, oral therapy, palliative/supportive orders, home
+    medications reconciled at intake, and medications mentioned in outside documents each live in
+    their own table with their own status vocabulary). Reads existing status fields only -- every
+    write path that flips one (cancel_treatment_order, record_clearance_decision's DISCONTINUED
+    branch, create_oral_therapy_hold_event, transition_palliative_order) already exists; this
+    function never writes anything, so "a medicine stopped in a cycle moves to Past" falls out of
+    those endpoints' existing behavior for free.
+
+    A DRAFT order/prescription (never signed/authorized) is excluded from both lists -- it isn't
+    a medication yet. `stopped_at`/`stopped_reason` are left None where the underlying model
+    genuinely doesn't record a discontinuation timestamp/reason (e.g. TreatmentOrder.cancel has
+    no dedicated column for either) rather than guessed from an unrelated timestamp.
+    """
+    current: List[Dict] = []
+    past: List[Dict] = []
+
+    orders = db.query(TreatmentOrder).filter(TreatmentOrder.patient_id == patient_id).all()
+    superseded_order_ids = {o.supersedes_id for o in orders if o.supersedes_id}
+    for o in orders:
+        if o.status == "DRAFT":
+            continue
+        instructions = o.instructions if isinstance(o.instructions, dict) else {}
+        item = {
+            "source": "IV_CHEMO",
+            "drug": instructions.get("drug") or "Unspecified drug",
+            "detail": ", ".join(f"{k}: {v}" for k, v in instructions.items() if k != "drug" and v),
+            "status": o.status, "since": o.signed_at or o.created_at,
+            "stopped_at": None, "stopped_reason": o.revision_reason if o.status == "CANCELLED" else None,
+        }
+        (past if o.status == "CANCELLED" or o.id in superseded_order_ids else current).append(item)
+
+    rxs = db.query(OralTherapyPrescription).filter(OralTherapyPrescription.patient_id == patient_id).all()
+    superseded_rx_ids = {r.supersedes_id for r in rxs if r.supersedes_id}
+    latest_discontinue_event: Dict[int, OralTherapyHoldEvent] = {}
+    for e in db.query(OralTherapyHoldEvent).filter(
+        OralTherapyHoldEvent.patient_id == patient_id, OralTherapyHoldEvent.event_type == "Discontinue"
+    ).order_by(OralTherapyHoldEvent.created_at.asc()):
+        latest_discontinue_event[e.prescription_id] = e  # ascending order -> last write wins == latest
+    for rx in rxs:
+        if rx.status == "DRAFT":
+            continue
+        ev = latest_discontinue_event.get(rx.id)
+        item = {
+            "source": "ORAL_THERAPY",
+            "drug": rx.drug,
+            "detail": ", ".join(filter(None, [rx.final_prescribed_dose, rx.frequency])),
+            "status": rx.status, "since": rx.signed_at or rx.created_at,
+            "stopped_at": ev.created_at if (rx.status == "DISCONTINUED" and ev) else None,
+            "stopped_reason": ev.reason if (rx.status == "DISCONTINUED" and ev) else None,
+        }
+        is_past = rx.status in ("DISCONTINUED", "COMPLETED") or rx.id in superseded_rx_ids
+        (past if is_past else current).append(item)
+
+    for p in db.query(PalliativeTreatmentOrder).filter(PalliativeTreatmentOrder.patient_id == patient_id).all():
+        if p.status == "Draft":
+            continue
+        item = {
+            "source": "PALLIATIVE",
+            "drug": p.order_type, "detail": p.instructions,
+            "status": p.status, "since": p.signed_at or p.created_at,
+            "stopped_at": None, "stopped_reason": p.discontinued_reason if p.status == "Discontinued" else None,
+        }
+        (past if p.status == "Discontinued" else current).append(item)
+
+    for m in db.query(MedicationReconciliationEntry).filter(MedicationReconciliationEntry.patient_id == patient_id).all():
+        is_discontinued = m.action == "Discontinue"
+        item = {
+            "source": "HOME_MEDICATION",
+            "drug": m.drug_name, "detail": ", ".join(filter(None, [m.dose, m.frequency, m.route])),
+            "status": m.action, "since": m.reconciled_at,
+            "stopped_at": m.reconciled_at if is_discontinued else None,
+            "stopped_reason": m.action_reason if is_discontinued else None,
+        }
+        (past if is_discontinued else current).append(item)
+
+    # Free-text medication mentions extracted from outside documents: always historical (no
+    # ongoing status of their own), and a clinician-rejected extraction is dropped outright.
+    for f in db.query(ClinicalFact).filter(
+        ClinicalFact.patient_id == patient_id, ClinicalFact.fact_type == "MEDICATION",
+        ClinicalFact.status != "REJECTED",
+    ).all():
+        past.append({
+            "source": "DOCUMENT_HISTORY",
+            "drug": f.value, "detail": f.verbatim_span,
+            "status": f.status, "since": f.created_at,
+            "stopped_at": None, "stopped_reason": None,
+        })
+
+    epoch = datetime(1970, 1, 1)
+    current.sort(key=lambda i: i["since"] or epoch, reverse=True)
+    past.sort(key=lambda i: i["stopped_at"] or i["since"] or epoch, reverse=True)
+    return {"current": current, "past": past}
+
+
 def generate_care_plan_prefill(db: Session, patient_id: int) -> Dict:
     """
     Pre-populates a Live Care Plan draft from verified diagnosis, staging, NCCN context, and MDT decisions.
@@ -623,6 +722,46 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
             "confidence": confidence if isinstance(confidence, (int, float)) and 0 <= confidence <= 1 else 0.75,
         })
     return cleaned
+
+
+# Maps a drafted fact's fact_type onto the CCAResult.result_type it should contribute to --
+# only fact types that ARE a lab/imaging finding, never every fact type (e.g. MEDICATION,
+# ALLERGY have no business becoming a "result").
+_RESULT_TYPE_BY_FACT_TYPE = {"LAB_RESULT": "LAB", "IMAGING_FINDING": "IMAGING"}
+_RESULT_TYPE_LABEL = {"LAB": "Lab results", "IMAGING": "Imaging findings"}
+
+
+def build_results_from_document_facts(facts: List[Dict], doc_filename: str) -> List[Dict]:
+    """Groups a just-drafted document's LAB_RESULT/IMAGING_FINDING facts into at most one
+    CCAResult-shaped dict per result_type, so a document's own already-extracted lab/imaging
+    findings show up in Patient History's "Results" (and "Past Labs"/"Past Results") section
+    immediately on upload -- previously CCAOrder/CCAResult were only ever written by a separate
+    clinician-driven ordering/results workflow, never by document ingestion, so "Results" stayed
+    empty even for a document that plainly contains lab results (e.g. an insurance claim's
+    attached lab report). Deliberately does NOT synthesize a CCAOrder -- nothing was actually
+    ordered through this system for a historical outside document, so "Investigations Ordered"
+    staying empty for a document-only ingestion is correct, not a gap.
+
+    Returns [], never raises -- a document drafting zero LAB_RESULT/IMAGING_FINDING facts (most
+    document types: referrals, prescriptions, consult notes, ...) is the common case, not an
+    error. Callers are responsible for actually constructing/persisting CCAResult rows -- this
+    function, like extract_clinical_facts and classify_and_extract_page above, never touches the
+    database itself.
+    """
+    by_type: Dict[str, List[str]] = {}
+    for f in facts:
+        result_type = _RESULT_TYPE_BY_FACT_TYPE.get(f.get("fact_type"))
+        if result_type and f.get("value"):
+            by_type.setdefault(result_type, []).append(f["value"])
+
+    return [
+        {
+            "result_type": result_type,
+            "title": f"{_RESULT_TYPE_LABEL[result_type]} -- {doc_filename}",
+            "findings_text": "; ".join(values),
+        }
+        for result_type, values in by_type.items()
+    ]
 
 
 # ---------------------------------------------------------------------------
