@@ -256,6 +256,28 @@ def _strip_embedded_base64_images(text: str) -> str:
     return _BASE64_IMAGE_PATTERN.sub("", text).strip()
 
 
+_HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
+
+
+def strip_markup_for_display(text: str) -> str:
+    """Strips HTML tags and markdown table/heading decoration from OCR'd text before it's shown
+    as a short human-facing preview (Patient History's "Ingested Documents" excerpt). Sarvam
+    Document AI's markdown output routinely renders a table as literal HTML (e.g.
+    `<table><tbody><tr><td>...`) rather than markdown pipes -- verified against real
+    data_insurance/ scans -- which reads as raw markup noise, not content, in a one-line preview.
+    Never applied to the stored `ocr_text` itself (still the verbatim source of truth for
+    re-extraction/audit and for _clinical_signals()/extract_clinical_facts()) -- only to what's
+    rendered as a short excerpt.
+    """
+    if not text:
+        return ""
+    cleaned = _HTML_TAG_PATTERN.sub(" ", text)
+    cleaned = re.sub(r"^#{1,6}\s*", "", cleaned, flags=re.MULTILINE)
+    cleaned = cleaned.replace("*", "").replace("|", " ")
+    cleaned = re.sub(r"-{3,}", " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _extract_embedded_image_bytes(text: str) -> tuple[str, bytes] | None:
     """
     Returns (mime_type, raw_bytes) for the largest inline base64 image embedded in Sarvam's

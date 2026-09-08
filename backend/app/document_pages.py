@@ -45,6 +45,21 @@ def process_document_pages(document_id: int, content: bytes, content_type: str, 
         if not doc:
             return  # document was deleted/never committed -- nothing to attach pages to
 
+        # upload_document already ran extract_clinical_facts() over the WHOLE document's text
+        # (truncated to its own first 8000 chars) before scheduling this background task, and
+        # committed those as ClinicalFact rows. For a short document that fits inside that
+        # truncation, this loop's own per-page classify_and_extract_page() call sees the exact
+        # same text and -- when a page isn't confidently keyword-classified and falls through to
+        # its LLM path -- can (re-)draft the identical fact a second time, with no de-dup between
+        # the two passes. Tracking what already exists for this document up front keeps the
+        # genuinely useful case (a long document's later pages, past that 8000-char truncation,
+        # contributing facts the whole-document pass never saw) while dropping true repeats.
+        existing_facts = {
+            (f.fact_type, f.value)
+            for f in db.query(ClinicalFact.fact_type, ClinicalFact.value)
+            .filter(ClinicalFact.document_id == document_id)
+        }
+
         for page in pages:
             try:
                 classification = classify_and_extract_page(page["text"], page["is_image_heavy"])
@@ -66,6 +81,10 @@ def process_document_pages(document_id: int, content: bytes, content_type: str, 
             ))
 
             for fact in classification["facts"]:
+                key = (fact["fact_type"], fact["value"])
+                if key in existing_facts:
+                    continue
+                existing_facts.add(key)
                 db.add(ClinicalFact(
                     patient_id=doc.patient_id, document_id=document_id, fact_type=fact["fact_type"],
                     value=fact["value"], verbatim_span=fact["verbatim"], page_number=page["page"],
