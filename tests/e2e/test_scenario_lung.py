@@ -249,6 +249,11 @@ def test_lung_cancer_full_pipeline(js_page, live_server_url, lung_org_users, mon
     js_page.wait_for_timeout(600)
     js_page.evaluate(f"openPathologyOrder({path_order_id})")
     js_page.wait_for_timeout(400)
+    # Specimen Receipt & Accession gate (SCR-PAT-002): the report form isn't reachable until the
+    # specimen is accessioned -- pre-existing product behavior this test previously didn't drive.
+    js_page.fill(f"#acc-number-{path_order_id}", "ACC-0001")
+    js_page.click(f'button[onclick="submitSpecimenAccession({path_order_id})"]')
+    js_page.wait_for_timeout(500)
     js_page.fill("#path-findings", "Adenocarcinoma, moderately differentiated, right upper lobe. EGFR exon 19 deletion positive, ALK negative, PD-L1 TPS 40%.")
     js_page.click(f'button[onclick="submitPathologyReport({path_order_id})"]')
     js_page.wait_for_timeout(700)
@@ -573,6 +578,11 @@ def test_lung_cancer_full_pipeline(js_page, live_server_url, lung_org_users, mon
     final_history_html = js_page.inner_html("#history-content")
     assert "Investigations Ordered" in final_history_html
     assert "Repeat Renal Panel" in final_history_html or "Pre-Cycle 2 Renal Panel" in final_history_html
+    # Current/Past Medications tabs (Patient History redesign): the signed, not-yet-executed
+    # Cycle 2 Treatment Order must show up as an IV/Systemic Therapy medication under "Current
+    # Medications" -- it hasn't been cancelled or discontinued anywhere in this scenario.
+    assert "Current Medications" in final_history_html and "Past Medications" in final_history_html
+    assert "IV / Systemic Therapy" in final_history_html
     assert js_page.js_errors == [], f"final patient history errors: {js_page.js_errors}"
 
     # ---- 20. Negative permission check: Front Desk cannot see clinical case summary ----

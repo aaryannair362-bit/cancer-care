@@ -10,12 +10,14 @@ from sqlalchemy.orm import sessionmaker
 from backend.app.models import Base
 from backend.app.models_cca import (
     CCAPatient, ClinicalFact, CCAContradiction, CCACancerDiagnosis,
-    CCABiomarkerResult, StagingRecord, StagingEvidence
+    CCABiomarkerResult, StagingRecord, StagingEvidence, TreatmentOrder,
+    OralTherapyPrescription, OralTherapyHoldEvent, MedicationReconciliationEntry,
 )
+from backend.app.models_cca_oncology_ext import PalliativeTreatmentOrder
 from backend.app.cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
     evaluate_guideline_readiness, synthesize_nexus_brief, generate_care_plan_prefill,
-    extract_clinical_facts,
+    extract_clinical_facts, build_medication_lists, build_results_from_document_facts,
 )
 from backend.app.scribe import scribe
 
@@ -230,3 +232,121 @@ def test_care_plan_prefill_refuses_to_invent_a_regimen_without_an_mdt_decision(d
     assert prefill["ready"] is False
     assert prefill["components"] == {}
     assert prefill["mdt_recommendation"] is None
+
+
+def test_build_medication_lists_buckets_current_vs_past_across_all_sources(db_session):
+    """One representative row per medication source (Patient History's Current/Past Medications
+    tabs), covering the status that should land it in each bucket -- a signed/active order or
+    prescription is Current; a cancelled/discontinued one is Past; a document-derived MEDICATION
+    fact is always Past since it carries no ongoing status of its own."""
+    patient = CCAPatient(mrn="TEST-MRN-06", name="Med List Patient", age=58, sex="F", organization_id=1)
+    db_session.add(patient)
+    db_session.commit()
+
+    current_order = TreatmentOrder(
+        patient_id=patient.id, treatment_plan_id=1, treatment_session_id=1,
+        instructions={"drug": "Doxorubicin", "dose": "60mg/m2"}, status="SIGNED",
+    )
+    past_order = TreatmentOrder(
+        patient_id=patient.id, treatment_plan_id=1, treatment_session_id=1,
+        instructions={"drug": "Cyclophosphamide"}, status="CANCELLED",
+    )
+    current_rx = OralTherapyPrescription(patient_id=patient.id, drug="Letrozole", status="ACTIVE")
+    past_rx = OralTherapyPrescription(patient_id=patient.id, drug="Capecitabine", status="DISCONTINUED")
+    current_pal = PalliativeTreatmentOrder(
+        patient_id=patient.id, order_type="Pain Management", instructions="Morphine SR 10mg BD", status="Active",
+    )
+    past_pal = PalliativeTreatmentOrder(
+        patient_id=patient.id, order_type="Symptom Control", instructions="Ondansetron",
+        status="Discontinued", discontinued_reason="Symptom resolved",
+    )
+    current_home_med = MedicationReconciliationEntry(
+        intake_assessment_id=1, patient_id=patient.id, drug_name="Metformin", action="Continue",
+    )
+    past_home_med = MedicationReconciliationEntry(
+        intake_assessment_id=1, patient_id=patient.id, drug_name="Aspirin", action="Discontinue",
+        action_reason="Bleeding risk before surgery",
+    )
+    doc_history_fact = ClinicalFact(
+        patient_id=patient.id, fact_type="MEDICATION", value="Metoprolol 25mg OD", status="VERIFIED",
+    )
+    db_session.add_all([
+        current_order, past_order, current_rx, past_rx, current_pal, past_pal,
+        current_home_med, past_home_med, doc_history_fact,
+    ])
+    db_session.commit()
+    past_rx_discontinue_event = OralTherapyHoldEvent(
+        prescription_id=past_rx.id, patient_id=patient.id, event_type="Discontinue",
+        reason="Hand-foot syndrome grade 3",
+    )
+    db_session.add(past_rx_discontinue_event)
+    db_session.commit()
+
+    result = build_medication_lists(db_session, patient.id)
+    current_drugs = {m["drug"] for m in result["current"]}
+    past_drugs = {m["drug"] for m in result["past"]}
+
+    assert current_drugs == {"Doxorubicin", "Letrozole", "Pain Management", "Metformin"}
+    assert past_drugs == {
+        "Cyclophosphamide", "Capecitabine", "Symptom Control", "Aspirin", "Metoprolol 25mg OD",
+    }
+
+    past_rx_item = next(m for m in result["past"] if m["drug"] == "Capecitabine")
+    assert past_rx_item["stopped_reason"] == "Hand-foot syndrome grade 3"
+    past_home_med_item = next(m for m in result["past"] if m["drug"] == "Aspirin")
+    assert past_home_med_item["stopped_reason"] == "Bleeding risk before surgery"
+
+
+def test_build_medication_lists_excludes_drafts_and_moves_superseded_to_past(db_session):
+    """A DRAFT order/prescription was never actually authorized -- it isn't a medication on the
+    patient's record yet, so it must appear in neither list. A SIGNED order that has since been
+    superseded by a newer one (supersedes_id) is no longer what the patient is actually on, even
+    though its own status column was never flipped to CANCELLED -- it must count as Past too."""
+    patient = CCAPatient(mrn="TEST-MRN-07", name="Draft Supersede Patient", age=47, sex="M", organization_id=1)
+    db_session.add(patient)
+    db_session.commit()
+
+    draft_order = TreatmentOrder(
+        patient_id=patient.id, treatment_plan_id=1, treatment_session_id=1,
+        instructions={"drug": "Should Not Appear"}, status="DRAFT",
+    )
+    original_order = TreatmentOrder(
+        patient_id=patient.id, treatment_plan_id=1, treatment_session_id=1,
+        instructions={"drug": "Paclitaxel Standard"}, status="SIGNED",
+    )
+    db_session.add_all([draft_order, original_order])
+    db_session.commit()
+    revised_order = TreatmentOrder(
+        patient_id=patient.id, treatment_plan_id=1, treatment_session_id=1,
+        instructions={"drug": "Paclitaxel Reduced"}, status="SIGNED", supersedes_id=original_order.id,
+    )
+    db_session.add(revised_order)
+    db_session.commit()
+
+    result = build_medication_lists(db_session, patient.id)
+    all_drugs = {m["drug"] for m in result["current"] + result["past"]}
+    assert "Should Not Appear" not in all_drugs
+    assert "Paclitaxel Standard" in {m["drug"] for m in result["past"]}
+    assert "Paclitaxel Reduced" in {m["drug"] for m in result["current"]}
+
+
+def test_build_results_from_document_facts_groups_lab_and_imaging_only():
+    facts = [
+        {"fact_type": "LAB_RESULT", "value": "Hemoglobin 11.2 g/dL"},
+        {"fact_type": "LAB_RESULT", "value": "WBC 6800/uL"},
+        {"fact_type": "IMAGING_FINDING", "value": "No metastatic lesions on CT chest"},
+        {"fact_type": "MEDICATION", "value": "Tamoxifen 20mg OD"},
+    ]
+    results = build_results_from_document_facts(facts, "report.pdf")
+    by_type = {r["result_type"]: r for r in results}
+
+    assert set(by_type) == {"LAB", "IMAGING"}
+    assert "Hemoglobin 11.2 g/dL" in by_type["LAB"]["findings_text"]
+    assert "WBC 6800/uL" in by_type["LAB"]["findings_text"]
+    assert by_type["IMAGING"]["findings_text"] == "No metastatic lesions on CT chest"
+    assert "report.pdf" in by_type["LAB"]["title"]
+
+
+def test_build_results_from_document_facts_returns_empty_for_no_matching_facts():
+    facts = [{"fact_type": "PRIMARY_SITE", "value": "Breast"}, {"fact_type": "ALLERGY", "value": "Penicillin"}]
+    assert build_results_from_document_facts(facts, "referral.pdf") == []

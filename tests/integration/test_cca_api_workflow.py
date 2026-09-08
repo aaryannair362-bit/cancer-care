@@ -630,6 +630,89 @@ def test_document_upload_extracts_facts_and_creates_journey_event(client, header
     assert any(e["event_type"] == "DOC_INGESTION" and "new_biopsy.pdf" in e["event_title"] for e in journey)
 
 
+def _fake_lab_ocr_result(*_args, **_kwargs):
+    return {
+        "text": "SIELabs Report\nComplete Urine Examination (CUE) performed\nWidal Test (Slide Method) performed",
+        "pages": [{"page": 1, "text": "SIELabs Report", "method": "embedded_text"}],
+        "page_count": 1, "engine": "pypdf",
+        "signals": {"diagnoses": [], "medications": [], "allergies": [], "investigations": [], "procedures": [], "dates_mentioned": [], "text_preview": ""},
+        "processed_at": datetime.utcnow(),
+    }
+
+
+def test_document_upload_creates_a_result_from_drafted_lab_facts(client, headers, db_session, doctor, monkeypatch):
+    """Regression coverage for a reported bug: a document containing lab results (e.g. an
+    insurance claim's attached lab report) correctly drafted LAB_RESULT ClinicalFacts, but
+    Patient History's "Results" section (and now "Past Labs") stayed empty regardless -- CCAOrder/
+    CCAResult were only ever written by a separate clinician-driven ordering/results workflow,
+    never by document ingestion. build_results_from_document_facts + upload_document now records
+    a CCAResult straight from the drafted facts."""
+    from app.routers import cca as cca_router
+
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    orders_before = client.get(f"/api/cca/patients/{patient_id}/case-summary", headers=headers).json()["orders"]
+    monkeypatch.setattr(cca_router, "extract_document", _fake_lab_ocr_result)
+    mock_groq_json(monkeypatch, {"facts": [
+        {"fact_type": "LAB_RESULT", "value": "Complete Urine Examination (CUE) performed", "verbatim": "CUE performed", "confidence": 0.9},
+        {"fact_type": "LAB_RESULT", "value": "Widal Test (Slide Method) performed", "verbatim": "Widal Test performed", "confidence": 0.9},
+    ]})
+
+    res = client.post(
+        f"/api/cca/documents?patient_id={patient_id}",
+        files={"file": ("lab_report.pdf", b"%PDF-1.4 fake lab report", "application/pdf")},
+        headers=headers,
+    )
+    assert res.status_code == 201, res.text
+    assert res.json()["results_recorded"] == 1
+
+    summary = client.get(f"/api/cca/patients/{patient_id}/case-summary", headers=headers).json()
+    past_labs = summary["results_by_period"]["past_labs"]
+    assert len(past_labs) == 1
+    assert "Complete Urine Examination" in past_labs[0]["excerpt"]
+    assert "Widal Test" in past_labs[0]["excerpt"]
+    # "Investigations Ordered" is deliberately untouched by a document-only ingestion -- nothing
+    # was actually ordered through this system for a historical outside document.
+    assert summary["orders"] == orders_before
+
+
+def test_document_upload_background_page_pass_does_not_duplicate_whole_document_facts(client, headers, db_session, doctor, monkeypatch):
+    """Regression coverage: document_pages.process_document_pages' per-page classifier used to
+    persist a ClinicalFact with no de-dup against the ones upload_document's own whole-document
+    extract_clinical_facts() call already committed -- for a short document whose text fits
+    entirely inside both passes, a page that fell through to the LLM classification path could
+    draft and save the identical (fact_type, value) a second time."""
+    from app import document_pages as document_pages_module
+    from app.models_cca import ClinicalFact
+    from app.routers import cca as cca_router
+
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    monkeypatch.setattr(cca_router, "extract_document", _fake_lab_ocr_result)
+    mock_groq_json(monkeypatch, {"facts": [
+        {"fact_type": "LAB_RESULT", "value": "Hemoglobin 11.2 g/dL", "verbatim": "Hb 11.2", "confidence": 0.9},
+    ]})
+    monkeypatch.setattr(document_pages_module, "classify_and_extract_page", lambda *a, **k: {
+        "page_type": "LAB_REPORT", "confidence": 0.9,
+        "facts": [
+            {"fact_type": "LAB_RESULT", "value": "Hemoglobin 11.2 g/dL", "verbatim": "Hb 11.2", "confidence": 0.9},
+            {"fact_type": "LAB_RESULT", "value": "Platelet count 210000/uL", "verbatim": "Plt 210000", "confidence": 0.9},
+        ],
+    })
+
+    res = client.post(
+        f"/api/cca/documents?patient_id={patient_id}",
+        files={"file": ("cbc.pdf", b"%PDF-1.4 fake cbc report", "application/pdf")},
+        headers=headers,
+    )
+    assert res.status_code == 201, res.text
+    doc_id = res.json()["document"]["id"]
+
+    facts = db_session.query(ClinicalFact).filter(ClinicalFact.document_id == doc_id).all()
+    hb_facts = [f for f in facts if f.value == "Hemoglobin 11.2 g/dL"]
+    plt_facts = [f for f in facts if f.value == "Platelet count 210000/uL"]
+    assert len(hb_facts) == 1, "the per-page pass re-drafted a fact the whole-document pass already saved"
+    assert len(plt_facts) == 1, "a genuinely new per-page fact must still be saved"
+
+
 def test_document_upload_rejects_disallowed_file_type_and_duplicate(client, headers, db_session, doctor, monkeypatch):
     from app.routers import cca as cca_router
 
