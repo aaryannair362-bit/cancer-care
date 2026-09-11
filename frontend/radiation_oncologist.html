@@ -270,6 +270,8 @@
             <a class="sidebar-nav-item" id="nav-consultation" onclick="showTab('consultation')"><div class="nav-item-left"><span>🩺</span><span>Consultation</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-careplan" onclick="showTab('careplan')"><div class="nav-item-left"><span>📋</span><span>Care Plan</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-treatmentplan" onclick="showTab('treatmentplan')"><div class="nav-item-left"><span>💊</span><span>Treatment Plan</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-radiationplan" onclick="showTab('radiationplan')"><div class="nav-item-left"><span>☢️</span><span>Radiation Plan</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-procedurenotes" onclick="showTab('procedurenotes')"><div class="nav-item-left"><span>🩻</span><span>Procedures &amp; Notes</span></div><span class="nav-chevron">›</span></a>
 
             <div class="sidebar-section-title">CLINICAL INTELLIGENCE / COORDINATION</div>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
@@ -452,6 +454,18 @@
                 <div id="treatmentplan-content"><!-- Populated via JS: loadTreatmentPlanView() --></div>
             </div>
 
+            <div id="view-radiationplan" class="view-panel">
+                <h1 class="page-title">Radiation Plan</h1>
+                <p class="page-subtitle">Radiation course, dose phases (site/dose/fractions each), and delivered-fraction tracking for the selected patient. A course may contain more than one phase (e.g. a boost after the primary field).</p>
+                <div id="radiationplan-content"><!-- Populated via JS: loadRadiationPlanView() --></div>
+            </div>
+
+            <div id="view-procedurenotes" class="view-panel">
+                <h1 class="page-title">Procedures &amp; Notes</h1>
+                <p class="page-subtitle">Bedside/outpatient procedures performed outside the operating theatre (e.g. brachytherapy applicator placement) — distinct from the surgical operative note.</p>
+                <div id="procedurenotes-content"><!-- Populated via JS: loadProcedureNotesView() --></div>
+            </div>
+
             <!-- ===== NEXUS (static demo hub) ===== -->
             <div id="view-nexus" class="view-panel">
                 <h1 class="page-title">NEXUS</h1>
@@ -587,6 +601,8 @@
             if (tab === 'consultation') refreshConsultationView();
             if (tab === 'careplan') loadCarePlanView();
             if (tab === 'treatmentplan') loadTreatmentPlanView();
+            if (tab === 'radiationplan') loadRadiationPlanView();
+            if (tab === 'procedurenotes') loadProcedureNotesView();
             if (tab === 'guideline') loadGuidelinePathway();
             if (tab === 'staging') loadStagingWorkspace();
             if (tab === 'mdt') loadMdtWorkspace();
@@ -747,7 +763,12 @@
             try {
                 const transcript = await scribeVoiceRecorder.stop();
                 document.getElementById('scribe-transcript').value = transcript;
-                statusEl.textContent = transcript ? '✅ Transcribed. Review below, then Generate AI Draft.' : 'No speech detected — type manually.';
+                if (scribeVoiceRecorder.wasInterrupted()) {
+                    statusEl.textContent = '⚠️ Recording was interrupted before you clicked Stop — the transcript below may be incomplete. Review it carefully.';
+                    toast('Recording was interrupted — transcript may be incomplete', 'error');
+                } else {
+                    statusEl.textContent = transcript ? '✅ Transcribed. Review below, then Generate AI Draft.' : 'No speech detected — type manually.';
+                }
             } catch (err) {
                 statusEl.textContent = `⚠️ ${err.message || 'Transcription failed'} — type the transcript manually.`;
             }
@@ -1609,6 +1630,202 @@
                     </div>
                 `).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No version history.</p>';
             } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        // ---------------------------------------------------------------
+        // Radiation Plan (Oncology Review Results PDF items 2-5) -- course + dose phases +
+        // delivered-fraction tracking. Planning/physics-QA steps are the Radiation
+        // Physicist's (radiation_physicist.html); this page only prescribes phases and gives
+        // final treatment approval, matching _require_rt_phase_step_signer server-side.
+        // ---------------------------------------------------------------
+        const RT_PHASE_STATUS_BADGE = {
+            prescribed: 'badge-amber', simulation_pending: 'badge-amber', simulation_complete: 'badge-amber',
+            contouring: 'badge-amber', planning: 'badge-amber', physics_qa: 'badge-blue',
+            physician_approved: 'badge-blue', treatment_ready: 'badge-blue', on_treatment: 'badge-green',
+            interrupted: 'badge-rose', completed: 'badge-green',
+        };
+        let currentRadiationCourseId = null;
+
+        async function loadRadiationPlanView() {
+            const container = document.getElementById('radiationplan-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/radiation-prescriptions`);
+                const courses = data.radiation_prescriptions || [];
+                if (!courses.length) {
+                    container.innerHTML = `
+                        <div class="section-card">
+                            <div class="section-title">Start a Radiation Course</div>
+                            <div class="section-sub" style="margin-bottom:12px;">Creates the course; add one or more dose phases (each with its own site/dose/fractions) once created.</div>
+                            <div class="form-grid-2">
+                                <div class="form-group"><label class="form-label">Diagnosis</label><input type="text" id="rt-diagnosis" class="form-input" /></div>
+                                <div class="form-group"><label class="form-label">Intent</label><input type="text" id="rt-intent" class="form-input" value="Curative" /></div>
+                            </div>
+                            <div class="form-grid-2">
+                                <div class="form-group"><label class="form-label">Technique</label><input type="text" id="rt-technique" class="form-input" placeholder="e.g. IMRT, VMAT, 3DCRT" /></div>
+                                <div class="form-group"><label class="form-label">Concurrent systemic treatment?</label><select id="rt-concurrent" class="form-select"><option value="false">No</option><option value="true">Yes</option></select></div>
+                            </div>
+                            <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Special Instructions (visible to Radiation Technologist throughout delivery)</label><textarea id="rt-special-instructions" class="form-textarea" rows="2" placeholder="e.g. pacemaker precautions, positioning notes"></textarea></div>
+                            <button class="btn-navy" onclick="submitNewRadiationCourse()">Start Course</button>
+                        </div>`;
+                    return;
+                }
+                const course = courses[0];
+                currentRadiationCourseId = course.id;
+                const phasesData = await Api.get(`${CCA_API}/radiation-prescriptions/${course.id}/phases`);
+                const phases = phasesData.phases || [];
+
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-head"><div class="section-title">Course</div><span class="section-sub">${escapeHtml(course.diagnosis || 'No diagnosis recorded')} · ${escapeHtml(course.intent || '')} ${course.technique ? '· ' + escapeHtml(course.technique) : ''}</span></div>
+                        ${course.special_instructions ? `<div class="section-sub" style="background:var(--amber-badge-bg); color:var(--amber-badge-text); padding:8px 12px; border-radius:var(--radius-sm);">⚠ Special Instructions: ${escapeHtml(course.special_instructions)}</div>` : ''}
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Dose Phases</div>
+                        ${phases.length ? phases.map(p => `
+                            <div class="worklist-row" style="grid-template-columns: 1.4fr 1fr 1fr 0.8fr auto;">
+                                <div><div class="wl-label">Phase ${p.phase_number}</div><div class="wl-value">${escapeHtml(p.label)}</div><div style="font-size:12px; color:var(--ink-500);">${escapeHtml(p.treatment_site)}${p.laterality ? ' · ' + escapeHtml(p.laterality) : ''}</div></div>
+                                <div><div class="wl-label">Dose</div><div class="wl-value" style="font-size:13px;">${p.total_prescribed_dose_gy} Gy</div></div>
+                                <div><div class="wl-label">Fractions</div><div class="wl-value" style="font-size:13px;">${p.number_of_fractions} × ${p.dose_per_fraction_gy} Gy</div></div>
+                                <div><span class="badge ${RT_PHASE_STATUS_BADGE[p.rt_sub_status] || 'badge-amber'}">${escapeHtml(p.rt_sub_status.replace(/_/g, ' '))}</span></div>
+                                <div style="display:flex; flex-direction:column; gap:4px;">
+                                    ${p.rt_sub_status === 'physics_qa' ? `<button class="btn-navy" style="font-size:11px; padding:6px 10px;" onclick="transitionRadiationPhase(${p.id}, 'physician_approved')">Approve</button>` : ''}
+                                    ${p.rt_sub_status === 'physician_approved' ? `<button class="btn-navy" style="font-size:11px; padding:6px 10px;" onclick="transitionRadiationPhase(${p.id}, 'treatment_ready')">Mark Treatment Ready</button>` : ''}
+                                    ${['on_treatment','interrupted'].includes(p.rt_sub_status) ? `<button class="btn-outline" style="font-size:11px; padding:6px 10px;" onclick="completeRadiationPhase(${p.id})">Complete Phase</button>` : ''}
+                                    <button class="btn-outline" style="font-size:11px; padding:6px 10px;" onclick="viewRadiationPhaseFractions(${p.id})">Fractions</button>
+                                </div>
+                            </div>
+                            <div id="rt-fractions-${p.id}" style="display:none; margin:-4px 0 10px; padding:10px 14px; background:var(--bg-card-subtle); border-radius:var(--radius-md);"></div>
+                        `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No phases prescribed yet.</p>'}
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Add Dose Phase</div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Label</label><input type="text" id="rtp-label" class="form-input" placeholder="e.g. Breast + Nodes" /></div>
+                            <div class="form-group"><label class="form-label">Treatment Site</label><input type="text" id="rtp-site" class="form-input" /></div>
+                        </div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Laterality</label><select id="rtp-laterality" class="form-select"><option value="">N/A</option><option value="left">Left</option><option value="right">Right</option><option value="bilateral">Bilateral</option></select></div>
+                            <div class="form-group"><label class="form-label">Frequency</label><input type="text" id="rtp-frequency" class="form-input" placeholder="e.g. Once daily, 5 days/week" /></div>
+                        </div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Total Dose (Gy)</label><input type="number" step="0.1" id="rtp-total-dose" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Dose per Fraction (Gy)</label><input type="number" step="0.01" id="rtp-dose-per-fraction" class="form-input" /></div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Number of Fractions</label><input type="number" id="rtp-fractions" class="form-input" /></div>
+                        <button class="btn-navy" onclick="submitNewRadiationPhase()">Add Phase</button>
+                    </div>
+                    <div id="radiationplan-status" style="font-size:12px; color:var(--ink-500);"></div>
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitNewRadiationCourse() {
+            try {
+                await Api.post(`${CCA_API}/radiation-prescriptions`, {
+                    patient_id: currentPatientId, diagnosis: document.getElementById('rt-diagnosis').value,
+                    intent: document.getElementById('rt-intent').value, technique: document.getElementById('rt-technique').value,
+                    concurrent_systemic_treatment: document.getElementById('rt-concurrent').value === 'true',
+                    special_instructions: document.getElementById('rt-special-instructions').value,
+                });
+                toast('Radiation course started', 'success');
+                loadRadiationPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitNewRadiationPhase() {
+            try {
+                await Api.post(`${CCA_API}/radiation-prescriptions/${currentRadiationCourseId}/phases`, {
+                    label: document.getElementById('rtp-label').value, treatment_site: document.getElementById('rtp-site').value,
+                    laterality: document.getElementById('rtp-laterality').value || null, frequency: document.getElementById('rtp-frequency').value,
+                    total_prescribed_dose_gy: Number(document.getElementById('rtp-total-dose').value),
+                    dose_per_fraction_gy: Number(document.getElementById('rtp-dose-per-fraction').value),
+                    number_of_fractions: Number(document.getElementById('rtp-fractions').value),
+                });
+                toast('Dose phase added', 'success');
+                loadRadiationPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function transitionRadiationPhase(phaseId, status) {
+            try {
+                await Api.post(`${CCA_API}/radiation-phases/${phaseId}/transition`, { status });
+                toast('Phase updated', 'success');
+                loadRadiationPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function completeRadiationPhase(phaseId) {
+            try {
+                await Api.post(`${CCA_API}/radiation-phases/${phaseId}/complete`, {});
+                toast('Phase marked complete', 'success');
+                loadRadiationPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function viewRadiationPhaseFractions(phaseId) {
+            const el = document.getElementById(`rt-fractions-${phaseId}`);
+            if (el.style.display !== 'none') { el.style.display = 'none'; return; }
+            el.style.display = 'block';
+            el.innerHTML = 'Loading…';
+            try {
+                const data = await Api.get(`${CCA_API}/radiation-phases/${phaseId}/fractions`);
+                const fractions = data.fractions || [];
+                const delivered = fractions.filter(f => f.status === 'delivered').length;
+                el.innerHTML = `<div style="font-size:12px; font-weight:700; margin-bottom:6px;">${delivered} of ${fractions.length} fractions delivered</div>` +
+                    fractions.map(f => `<div style="font-size:12px; color:var(--ink-700); padding:3px 0;">#${f.fraction_number} — ${escapeHtml(f.status)}${f.delivered_dose_gy ? ' · ' + f.delivered_dose_gy + ' Gy' : ''}${f.variance_or_toxicity ? ' · ⚠ ' + escapeHtml(f.variance_or_toxicity) : ''}</div>`).join('');
+            } catch (err) { el.innerHTML = `<p style="color:var(--rose-badge-text); font-size:12px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        // ---------------------------------------------------------------
+        // Procedures & Notes (Oncology Review Results PDF item 33: Radiation Oncology)
+        // ---------------------------------------------------------------
+        async function loadProcedureNotesView() {
+            const container = document.getElementById('procedurenotes-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/procedure-notes`);
+                const notes = data.results || [];
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Recorded Procedures</div>
+                        ${notes.map(n => `
+                            <div style="background:var(--bg-card-subtle); border:1px solid var(--line); border-radius:var(--radius-md); padding:12px 14px; margin-bottom:8px;">
+                                <div style="font-size:13px; font-weight:700; color:var(--ink-900);">${escapeHtml(n.procedure_name)}</div>
+                                ${n.indication ? `<div style="font-size:12px; color:var(--ink-600); margin-top:2px;">Indication: ${escapeHtml(n.indication)}</div>` : ''}
+                                ${n.findings ? `<div style="font-size:12px; color:var(--ink-600); margin-top:2px;">Findings: ${escapeHtml(n.findings)}</div>` : ''}
+                                <div style="font-size:11px; color:var(--ink-500); margin-top:4px;">${escapeHtml(n.performed_by)} · ${new Date(n.performed_at).toLocaleString()}</div>
+                            </div>
+                        `).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No procedures recorded yet.</p>'}
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Record a Procedure</div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Procedure *</label><input type="text" id="pn-procedure" class="form-input" placeholder="e.g. Brachytherapy applicator placement" /></div>
+                            <div class="form-group"><label class="form-label">Indication</label><input type="text" id="pn-indication" class="form-input" /></div>
+                        </div>
+                        <div class="form-group"><label class="form-label">Findings</label><textarea id="pn-findings" class="form-textarea" rows="2"></textarea></div>
+                        <div class="form-group"><label class="form-label">Technique</label><textarea id="pn-technique" class="form-textarea" rows="2"></textarea></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Complications</label><textarea id="pn-complications" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-navy" onclick="submitProcedureNote()">Record Procedure Note</button>
+                    </div>
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitProcedureNote() {
+            const procedure = document.getElementById('pn-procedure').value;
+            if (!procedure) { toast('Procedure name is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/procedure-notes`, {
+                    procedure_name: procedure, indication: document.getElementById('pn-indication').value || null,
+                    findings: document.getElementById('pn-findings').value || null,
+                    technique: document.getElementById('pn-technique').value || null,
+                    complications: document.getElementById('pn-complications').value || null,
+                });
+                toast('Procedure note recorded', 'success');
+                loadProcedureNotesView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
         // ---------------------------------------------------------------

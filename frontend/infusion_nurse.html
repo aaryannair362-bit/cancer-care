@@ -188,6 +188,7 @@
         let currentOrderId = null;
         let currentSubTab = 'overview';
         let patientListMode = 'queue';
+        let currentMedications = [];
 
         function showTab(tab) {
             document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
@@ -319,6 +320,7 @@
             ['orders', 'Orders & Pharmacy'],
             ['administration', 'Administration'],
             ['monitoring', 'Monitoring'],
+            ['blood', 'Blood Transfusion'],
             ['completion', 'Completion'],
         ];
 
@@ -363,7 +365,7 @@
         // (matches the backend contract -- see cca.py's _get_order_for_workspace). Overview and
         // Pre-Treatment (CTCAE toxicity, lab placeholder) are order-independent -- a nurse can
         // record a toxicity assessment before any order exists for this cycle.
-        const SUBTABS_REQUIRING_ORDER = new Set(['orders', 'administration', 'monitoring', 'completion']);
+        const SUBTABS_REQUIRING_ORDER = new Set(['orders', 'administration', 'monitoring', 'blood', 'completion']);
 
         function renderSubtab(key) {
             const el = document.getElementById('subtab-content');
@@ -376,6 +378,7 @@
             if (key === 'orders') return renderOrdersTab(el);
             if (key === 'administration') return renderAdministrationTab(el);
             if (key === 'monitoring') return renderMonitoringTab(el);
+            if (key === 'blood') return renderBloodTab(el);
             if (key === 'completion') return renderCompletionTab(el);
         }
 
@@ -436,9 +439,10 @@
                 <div class="inline-panel reaction">
                     <div class="inline-panel-title">Infusion Reaction / Emergency</div>
                     <div class="form-grid-2">
-                        <div class="form-group"><label class="form-label">Medication running</label><input type="text" id="rx-medication" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Medication running (from this order)</label><select id="rx-administration" class="form-select"><option value="">— select drug —</option>${currentMedications.map(m => `<option value="${m.id}">${escapeHtml(m.medication_name)}${m.dose ? ' (' + escapeHtml(m.dose) + ')' : ''}</option>`).join('')}</select></div>
                         <div class="form-group"><label class="form-label">Infusion action</label><select id="rx-action" class="form-select"><option>Paused</option><option>Stopped</option></select></div>
                     </div>
+                    <div class="form-group"><label class="form-label">Medication running (if not listed above)</label><input type="text" id="rx-medication" class="form-input" placeholder="free text, only if the drug isn't on this order's medication list" /></div>
                     <div class="form-group"><label class="form-label">Symptoms *</label><textarea id="rx-symptoms" class="form-textarea" placeholder="Onset, symptoms, severity"></textarea></div>
                     <div class="form-group"><label class="form-label">Vitals</label><input type="text" id="rx-vitals" class="form-input" placeholder="e.g. BP 88/54, pulse 118, SpO2 92%" /></div>
                     <div class="form-group"><label class="form-label">Who was informed</label><input type="text" id="rx-informed" class="form-input" placeholder="e.g. Dr. Menon, on-call oncologist" /></div>
@@ -457,8 +461,10 @@
             const symptoms = document.getElementById('rx-symptoms').value;
             if (!symptoms) { toast('Symptoms is required', 'error'); return; }
             try {
+                const administrationIdVal = document.getElementById('rx-administration').value;
                 await Api.post(`${CCA_API}/treatment/reaction`, {
                     patient_id: currentPatientId, order_id: currentOrderId,
+                    administration_id: administrationIdVal ? parseInt(administrationIdVal, 10) : null,
                     medication_running: document.getElementById('rx-medication').value || null,
                     infusion_action: document.getElementById('rx-action').value,
                     symptoms, vitals: { free_text: document.getElementById('rx-vitals').value || null },
@@ -766,6 +772,7 @@
             try {
                 const data = await Api.get(`${CCA_API}/treatment/${currentOrderId}/medications?patient_id=${currentPatientId}`);
                 const meds = data.results;
+                currentMedications = meds;
                 card.innerHTML = `
                     <div class="section-head"><div class="section-title">Medication Administration</div></div>
                     <p class="section-sub" style="margin-bottom:12px;">Transcribe each medication from the signed order (see Orders &amp; Pharmacy tab) as its own card — premedications and antineoplastics alike.</p>
@@ -851,6 +858,167 @@
                 });
                 toast('Medication line added', 'success');
                 loadMedications();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---- Blood Transfusion tab (Gap Analysis PDF items 28-29) ----
+
+        let currentBloodProducts = [];
+        const BLOOD_STATUS_BADGE = { Pending: 'badge-amber', InProgress: 'badge-blue', Paused: 'badge-amber', Stopped: 'badge-rose', Completed: 'badge-green' };
+
+        async function renderBloodTab(el) {
+            el.innerHTML = `
+                <div class="section-card" id="blood-products-card"><p class="empty-hint">Loading blood products…</p></div>
+                <div class="section-card" id="transfusion-feedback-card" style="margin-top:16px;"><p class="empty-hint">Loading transfusion feedback…</p></div>
+            `;
+            loadBloodProducts();
+            loadTransfusionFeedback();
+        }
+
+        async function loadBloodProducts() {
+            const card = document.getElementById('blood-products-card');
+            try {
+                const data = await Api.get(`${CCA_API}/treatment/${currentOrderId}/blood-products?patient_id=${currentPatientId}`);
+                const products = data.results;
+                currentBloodProducts = products;
+                card.innerHTML = `
+                    <div class="section-head"><div class="section-title">Blood Product Administration</div></div>
+                    <p class="section-sub" style="margin-bottom:12px;">Documents each crossmatched unit already authorized by the blood bank -- verify before administering.</p>
+                    ${products.map(b => bloodProductCardHtml(b)).join('') || '<p class="empty-hint">No blood products recorded yet for this treatment order.</p>'}
+                    <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
+                    <div class="form-grid-3">
+                        <div class="form-group"><label class="form-label">Product type</label><select id="bp-type" class="form-select"><option>PRBC</option><option>Platelets</option><option>FFP</option><option>Cryoprecipitate</option><option>Other</option></select></div>
+                        <div class="form-group"><label class="form-label">Unit ID</label><input type="text" id="bp-unit-id" class="form-input" placeholder="e.g. blood bag/unit number" /></div>
+                        <div class="form-group"><label class="form-label">Blood group</label><input type="text" id="bp-group" class="form-input" placeholder="e.g. O+" /></div>
+                    </div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Crossmatch/compatibility reference</label><input type="text" id="bp-crossmatch-ref" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">2nd verifier name</label><input type="text" id="bp-verifier" class="form-input" /></div>
+                    </div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="bp-crossmatch-confirmed"/> <label for="bp-crossmatch-confirmed">Crossmatch/compatibility confirmed</label></div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="bp-consent-confirmed"/> <label for="bp-consent-confirmed">Patient consent confirmed</label></div>
+                    <div class="form-grid-3">
+                        <div class="form-group"><label class="form-label">Volume</label><input type="text" id="bp-volume" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Rate</label><input type="text" id="bp-rate" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Pre-transfusion vitals</label><input type="text" id="bp-vitals" class="form-input" placeholder="e.g. BP 118/76, Temp 36.8" /></div>
+                    </div>
+                    <button class="btn-outline" onclick="submitAddBloodProduct()">+ Add Blood Product Unit</button>
+                `;
+            } catch (err) { card.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        function bloodProductCardHtml(b) {
+            const actions = [];
+            if (b.status === 'Pending' || b.status === 'Stopped') actions.push(['START', 'Start']);
+            if (b.status === 'InProgress') { actions.push(['PAUSE', 'Pause']); actions.push(['COMPLETE', 'Complete']); actions.push(['STOP', 'Stop']); }
+            if (b.status === 'Paused') { actions.push(['RESUME', 'Resume']); actions.push(['COMPLETE', 'Complete']); actions.push(['STOP', 'Stop']); }
+            return `
+                <div class="med-card">
+                    <div class="med-card-head">
+                        <div><div class="med-card-title">${escapeHtml(b.product_type)} <span class="badge badge-blue" style="margin-left:6px;">Unit ${escapeHtml(b.unit_id)}</span></div>
+                        <div class="med-card-meta">${escapeHtml(b.blood_group || '—')}${b.volume ? ' · ' + escapeHtml(b.volume) : ''}${b.rate ? ' · ' + escapeHtml(b.rate) : ''}</div></div>
+                        <span class="badge ${BLOOD_STATUS_BADGE[b.status] || 'badge-amber'}">${escapeHtml(b.status)}</span>
+                    </div>
+                    <div class="med-card-meta">
+                        ${b.crossmatch_confirmed ? '✔ Crossmatch confirmed' : '— Crossmatch not confirmed'} · ${b.consent_confirmed ? '✔ Consent confirmed' : '— Consent not confirmed'}${b.second_verifier_name ? ' · 2nd verifier: ' + escapeHtml(b.second_verifier_name) : ''}
+                    </div>
+                    <div class="med-card-meta" style="font-weight:600;">
+                        ${b.start_time ? `Started: ${new Date(b.start_time).toLocaleString()}` : 'Not started yet'}${b.end_time ? ` · Ended: ${new Date(b.end_time).toLocaleString()}` : ''}
+                    </div>
+                    <div class="med-card-actions">
+                        ${actions.map(([evt, label]) => `<button class="${evt === 'STOP' ? 'btn-danger' : 'btn-navy'} btn-sm" onclick="submitBloodProductEvent(${b.id}, '${evt}')">${label}</button>`).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        async function submitBloodProductEvent(administrationId, eventType) {
+            let notes = null;
+            if (eventType === 'STOP') {
+                notes = prompt('Reason for stopping this unit:');
+                if (!notes) { toast('A documented reason is required', 'error'); return; }
+            }
+            try {
+                await Api.post(`${CCA_API}/treatment/blood-products/${administrationId}/event`, { event_type: eventType, notes });
+                toast(`Recorded: ${eventType}`, 'success');
+                loadBloodProducts();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitAddBloodProduct() {
+            const unitId = document.getElementById('bp-unit-id').value;
+            if (!unitId) { toast('Unit ID is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/treatment/blood-products`, {
+                    patient_id: currentPatientId, order_id: currentOrderId,
+                    product_type: document.getElementById('bp-type').value, unit_id: unitId,
+                    blood_group: document.getElementById('bp-group').value || null,
+                    crossmatch_confirmed: document.getElementById('bp-crossmatch-confirmed').checked,
+                    crossmatch_reference: document.getElementById('bp-crossmatch-ref').value || null,
+                    consent_confirmed: document.getElementById('bp-consent-confirmed').checked,
+                    second_verifier_name: document.getElementById('bp-verifier').value || null,
+                    volume: document.getElementById('bp-volume').value || null,
+                    rate: document.getElementById('bp-rate').value || null,
+                    pre_transfusion_vitals: { free_text: document.getElementById('bp-vitals').value || null },
+                });
+                toast('Blood product unit added', 'success');
+                loadBloodProducts();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadTransfusionFeedback() {
+            const card = document.getElementById('transfusion-feedback-card');
+            try {
+                const data = await Api.get(`${CCA_API}/treatment/${currentOrderId}/transfusion-feedback?patient_id=${currentPatientId}`);
+                const rows = data.results;
+                card.innerHTML = `
+                    <div class="section-head"><div class="section-title">Post-Transfusion Feedback</div></div>
+                    <p class="section-sub" style="margin-bottom:12px;">How the patient tolerated each unit, recorded whether or not a reaction occurred.</p>
+                    ${rows.map(f => `
+                        <div class="med-card">
+                            <div class="med-card-head">
+                                <div class="med-card-title">${f.reaction_occurred ? '🚨 Reaction: ' + escapeHtml(f.reaction_type || 'Unspecified') : '✔ No reaction'}</div>
+                                <span class="badge ${f.reaction_occurred ? 'badge-rose' : 'badge-green'}">${f.reaction_occurred ? 'Reaction' : 'Tolerated well'}</span>
+                            </div>
+                            ${f.outcome ? `<div class="med-card-meta">Outcome: ${escapeHtml(f.outcome)}</div>` : ''}
+                            ${f.feedback_notes ? `<div class="med-card-meta">${escapeHtml(f.feedback_notes)}</div>` : ''}
+                            <div class="med-card-meta" style="font-size:11px;">Reported by ${escapeHtml(f.reported_by)} at ${new Date(f.reported_at).toLocaleString()}</div>
+                        </div>
+                    `).join('') || '<p class="empty-hint">No feedback recorded yet.</p>'}
+                    <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Blood product unit (optional)</label><select id="tf-blood-product" class="form-select"><option value="">— not linked to a specific unit —</option>${currentBloodProducts.map(b => `<option value="${b.id}">${escapeHtml(b.product_type)} · Unit ${escapeHtml(b.unit_id)}</option>`).join('')}</select></div>
+                        <div class="form-group"><label class="form-label">Reaction type (if any)</label><select id="tf-reaction-type" class="form-select"><option value="">— none —</option><option>Allergic</option><option>Febrile Non-Hemolytic</option><option>Hemolytic</option><option>TRALI</option><option>TACO</option><option>Other</option></select></div>
+                    </div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="tf-reaction-occurred"/> <label for="tf-reaction-occurred">A reaction occurred</label></div>
+                    <div class="form-group"><label class="form-label">Symptoms</label><textarea id="tf-symptoms" class="form-textarea"></textarea></div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Vitals</label><input type="text" id="tf-vitals" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Action taken</label><input type="text" id="tf-action" class="form-input" /></div>
+                    </div>
+                    <div class="form-group"><label class="form-label">Overall outcome</label><input type="text" id="tf-outcome" class="form-input" placeholder="e.g. Transfusion completed, patient stable" /></div>
+                    <div class="form-group"><label class="form-label">Additional notes</label><textarea id="tf-notes" class="form-textarea"></textarea></div>
+                    <button class="btn-navy" onclick="submitTransfusionFeedback()">Record Feedback</button>
+                `;
+            } catch (err) { card.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function submitTransfusionFeedback() {
+            try {
+                const bpVal = document.getElementById('tf-blood-product').value;
+                await Api.post(`${CCA_API}/treatment/transfusion-feedback`, {
+                    patient_id: currentPatientId, order_id: currentOrderId,
+                    blood_product_id: bpVal ? parseInt(bpVal, 10) : null,
+                    reaction_occurred: document.getElementById('tf-reaction-occurred').checked,
+                    reaction_type: document.getElementById('tf-reaction-type').value || null,
+                    symptoms: document.getElementById('tf-symptoms').value || null,
+                    vitals: { free_text: document.getElementById('tf-vitals').value || null },
+                    action_taken: document.getElementById('tf-action').value || null,
+                    outcome: document.getElementById('tf-outcome').value || null,
+                    feedback_notes: document.getElementById('tf-notes').value || null,
+                });
+                toast('Transfusion feedback recorded', 'success');
+                loadTransfusionFeedback();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
@@ -948,7 +1116,7 @@
                             <div class="form-group"><label class="form-label">Final symptoms</label><input type="text" id="comp-symptoms" class="form-input" /></div>
                         </div>
                         <div class="form-grid-2">
-                            <div class="form-group"><label class="form-label">Disposition</label><input type="text" id="comp-disposition" class="form-input" placeholder="e.g. Stable, tolerated infusion well" /></div>
+                            <div class="form-group"><label class="form-label">Disposition</label><select id="comp-disposition" class="form-select"><option value="">— not specified —</option><option>Completed</option><option>Partially Completed</option><option>Not Completed</option><option>Discontinued</option></select></div>
                             <div class="form-group"><label class="form-label">Access status</label><select id="comp-access" class="form-select"><option>Flushed</option><option>Removed</option><option>Locked</option><option>Left in situ</option></select></div>
                         </div>
                         <div class="form-group"><label class="form-label">Patient education / red flags given</label><textarea id="comp-education" class="form-textarea" placeholder="e.g. Report fever, breathing difficulty, rash, or worsening symptoms"></textarea></div>

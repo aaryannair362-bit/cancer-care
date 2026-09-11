@@ -128,6 +128,12 @@ ADDITIVE_COLUMNS = [
     # or thresholded against them.
     ("cca_infusion_monitoring_observations", "pain_score", "INTEGER"),
     ("cca_infusion_monitoring_observations", "vip_score", "INTEGER"),
+    # Front-desk-declared document type (the Documents & Consent dropdown selection) -- present
+    # on the model but was never persisted anywhere; see CCADocument.document_type's docstring.
+    ("cca_documents", "document_type", "VARCHAR(100)"),
+    # Precise per-drug reaction attribution (Gap Analysis PDF item 11) -- see
+    # InfusionReactionEvent.administration_id's docstring.
+    ("cca_infusion_reaction_events", "administration_id", "INTEGER"),
 ]
 
 

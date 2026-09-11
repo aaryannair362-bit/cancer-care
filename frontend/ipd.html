@@ -227,19 +227,15 @@
             <h3 style="font-size:13px;color:#667169;margin-bottom:6px;text-transform:uppercase;">💊 Currently Active Medications</h3>
             <div id="round-active-meds" style="font-size:13px;"></div>
         </div>
-        <div style="margin-bottom:16px;">
-            <label style="font-weight:600;display:block;margin-bottom:4px;">🎤 Speak or type today's round notes</label>
-            <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
-                <button id="round-start-btn" class="btn-primary">🎤 Start</button>
-                <button id="round-stop-btn" class="btn-secondary" style="display:none;">⏹ Stop</button>
-                <span id="round-mic-status" style="font-size:12px;color:#667169;">Idle</span>
+        <div id="round-status" style="font-size:13px;color:#2F6F52;min-height:20px;margin-bottom:6px;"></div>
+        <div id="round-draft" style="margin-top:8px;">
+            <div class="form-group" style="display:flex; align-items:center; gap:8px; background:#FBFAF7; border:1px solid #E6E7E2; border-radius:6px; padding:8px 10px;">
+                <input type="checkbox" id="round-consultant-review" style="width:auto;" />
+                <label for="round-consultant-review" style="font-weight:600; margin:0;">This is a consultant review (not a routine clinician round)</label>
             </div>
-            <textarea id="round-transcript" rows="4" placeholder="Speak or type the round conversation..." style="width:100%;padding:8px;background:#FBFAF7;border:1px solid #E6E7E2;border-radius:6px;color:#1C2621;resize:vertical;"></textarea>
-            <div id="round-status" style="font-size:13px;color:#2F6F52;min-height:20px;margin-top:6px;"></div>
-        </div>
-        <div id="round-draft" style="display:none; margin-top:16px; border-top:1px solid #E6E7E2; padding-top:16px;">
             <div class="form-group"><label>Chief Complaint / Findings</label><textarea id="round-chief-complaint"></textarea></div>
             <div class="form-group"><label>HPI / Progress Note</label><textarea id="round-hpi"></textarea></div>
+            <div class="form-group"><label>Objective Findings (examination)</label><textarea id="round-objective"></textarea></div>
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
                 <div class="form-group"><label>Diagnosis</label><input id="round-diagnosis" /></div>
                 <div class="form-group"><label>Differential</label><input id="round-differential" /></div>
@@ -272,7 +268,7 @@
         </div>
         <div class="modal-footer">
             <button class="btn-secondary" onclick="closeModal('ward-round-modal')">Cancel</button>
-            <button class="btn-primary" id="round-finalize-btn" style="display:none; background:linear-gradient(135deg, #2F6F52, #234E39);">✅ Finalize &amp; Save</button>
+            <button class="btn-primary" id="round-finalize-btn" style="background:linear-gradient(135deg, #2F6F52, #234E39);">✅ Save Ward Round</button>
         </div>
     </div>
 </div>
@@ -496,6 +492,9 @@ async function showPatientDetail(patientId) {
             `).join('') || '<p style="color:#93998F;">No vitals recorded.</p>'}
         </div>
         <div id="tasks-tab" class="tab-content" style="display:none;">
+            ${(currentUser.role === 'Nurse' || currentUser.role === 'HeadNurse') ? `
+                <button class="btn-primary" style="margin-bottom:10px;" onclick="raiseLabRequest(${patient.id})">🧪 Raise Lab Request</button>
+            ` : ''}
             ${data.tasks.map(t => `
                 <div style="background:#F3F2EE;padding:8px;border-radius:6px;margin-bottom:6px;${t.is_overdue ? 'border-left:3px solid #C1694F;' : ''}">
                     <div>${taskTypeBadge(t)} <strong>${t.description}</strong> - ${t.status} ${t.is_overdue ? '<span style="color:#C1694F;">⏰ Overdue</span>' : ''}</div>
@@ -512,21 +511,35 @@ async function showPatientDetail(patientId) {
             <h3 style="font-size:13px;color:#667169;margin-bottom:6px;text-transform:uppercase;">💊 Currently Active${activeMedsData.admission_day ? ` (Day ${activeMedsData.admission_day})` : ''}</h3>
             <div style="margin-bottom:16px;">
                 ${(activeMedsData.active_medications || []).map(m => `
-                    <div style="background:#F3F2EE;padding:6px 10px;border-radius:6px;margin-bottom:4px;font-size:13px;">${m.drugName || 'Unknown'} - ${m.dose || 'N/A'} - ${m.frequency || 'N/A'} - ${m.route || 'N/A'}</div>
+                    <div style="background:#F3F2EE;padding:6px 10px;border-radius:6px;margin-bottom:4px;font-size:13px; display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                        <span>${m.drugName || 'Unknown'} - ${m.dose || 'N/A'} - ${m.frequency || 'N/A'} - ${m.route || 'N/A'}</span>
+                        ${(currentUser.role === 'Nurse' || currentUser.role === 'HeadNurse') ? `<button class="btn-secondary" style="font-size:11px; padding:4px 8px; white-space:nowrap;" onclick="recordMedicationAdministration(${patient.id}, '${(m.drugName || '').replace(/'/g, "\\'")}', '${(m.dose || '').replace(/'/g, "\\'")}', '${(m.route || '').replace(/'/g, "\\'")}')">✓ Record</button>` : ''}
+                    </div>
                 `).join('') || '<p style="color:#93998F;">No active medications on record.</p>'}
             </div>
+            <div id="mar-history-${patient.id}" style="margin-bottom:16px; font-size:12px;"></div>
             <h3 style="font-size:13px;color:#667169;margin-bottom:6px;text-transform:uppercase;">📋 Consultation History</h3>
-            ${data.consultations.map(c => `
-                <div style="background:#F3F2EE;padding:8px;border-radius:6px;margin-bottom:6px;">
+            ${data.consultations.map(c => {
+                // Keep Clinician Round and Consultant Review visually distinct (Oncology
+                // Review Results PDF item 17: a consultant note must never read as just
+                // another routine clinician round) -- Nurse Daily Notes already live in their
+                // own separate tab (#nursing-tab), not mixed into this list at all.
+                const noteTypeLabel = c.visit_type === 'IPD_CONSULTANT' ? '👨‍⚕️ Consultant Review'
+                    : c.visit_type === 'IPD_ROUND' ? '🩺 Clinician Round' : '📋 Consultation';
+                const noteTypeColor = c.visit_type === 'IPD_CONSULTANT' ? '#7C3AED' : '#2F6F52';
+                return `
+                <div style="background:#F3F2EE;padding:8px;border-radius:6px;margin-bottom:6px; border-left:3px solid ${noteTypeColor};">
+                    <div><span style="color:${noteTypeColor}; font-weight:700; font-size:11.5px; text-transform:uppercase;">${noteTypeLabel}</span></div>
                     <div><strong>${c.case_id}</strong> - ${new Date(c.created_at).toLocaleString()}</div>
                     <div><strong>Chief Complaint:</strong> ${c.chief_complaint || 'N/A'}</div>
                     <div><strong>HPI:</strong> ${c.hpi || 'N/A'}</div>
+                    <div><strong>Objective:</strong> ${c.objective_findings || 'N/A'}</div>
                     <div><strong>Diagnosis:</strong> ${c.primary_diagnosis || 'N/A'}</div>
                     <div><strong>Medications:</strong> ${c.medications?.map(m => m.drugName + ' ' + m.dose).join(', ') || 'None'}</div>
                     <div><strong>Advice:</strong> ${c.advice || 'N/A'}</div>
-                    <details><summary>Full Transcript</summary><pre style="font-size:12px;white-space:pre-wrap;">${c.raw_transcript || ''}</pre></details>
+                    ${c.raw_transcript ? `<details><summary>Full Transcript</summary><pre style="font-size:12px;white-space:pre-wrap;">${c.raw_transcript}</pre></details>` : ''}
                 </div>
-            `).join('') || '<p style="color:#93998F;">No consultation history.</p>'}
+            `; }).join('') || '<p style="color:#93998F;">No consultation history.</p>'}
         </div>
         <div id="nursing-tab" class="tab-content" style="display:none;">
             ${data.nursing_notes.map(n => `
@@ -554,6 +567,7 @@ async function showPatientDetail(patientId) {
     });
     document.getElementById('patient-detail-modal').style.display = 'flex';
     loadDischargeSummary(patient.id);
+    loadMarHistory(patient.id); // shared in frontend/js/ipd-shared.js
 }
 
 // ---- Discharge Summary ----
@@ -1102,10 +1116,6 @@ async function updateTask(taskId, status) {
 
 // ---- Ward Round (Doctor) ----
 let roundPatientId = null;
-let roundConsultationId = null;
-let roundVoiceRecorder = null;
-let roundConsulting = false;
-let roundUsingManualFallback = false;
 
 function renderActiveMeds(meds) {
     const container = document.getElementById('round-active-meds');
@@ -1125,7 +1135,6 @@ function renderActiveMeds(meds) {
 
 async function openWardRound(patientId) {
     roundPatientId = patientId;
-    roundConsultationId = null;
     const res = await apiRequest(`/patients/${patientId}/details`);
     if (!res.ok) { alert('Could not load patient'); return; }
     const data = await res.json();
@@ -1141,109 +1150,26 @@ async function openWardRound(patientId) {
         document.getElementById('round-day').textContent = medsData.admission_day ? `Day ${medsData.admission_day}` : 'N/A';
     }
 
-    document.getElementById('round-transcript').value = '';
     document.getElementById('round-status').textContent = '';
-    document.getElementById('round-draft').style.display = 'none';
-    document.getElementById('round-finalize-btn').style.display = 'none';
-    document.getElementById('round-start-btn').style.display = 'inline-block';
-    document.getElementById('round-stop-btn').style.display = 'none';
-    document.getElementById('round-mic-status').textContent = 'Idle';
+    document.getElementById('round-consultant-review').checked = false;
+    document.getElementById('round-chief-complaint').value = '';
+    document.getElementById('round-hpi').value = '';
+    document.getElementById('round-objective').value = '';
+    document.getElementById('round-diagnosis').value = '';
+    document.getElementById('round-differential').value = '';
+    document.getElementById('round-advice').value = '';
+    document.getElementById('round-medications-list').innerHTML = '';
+    document.getElementById('round-lab-list').innerHTML = '';
+    document.getElementById('round-interaction-section').style.display = 'none';
     document.getElementById('ward-round-modal').style.display = 'flex';
 }
 
-document.getElementById('round-start-btn').addEventListener('click', async () => {
-    const transcriptEl = document.getElementById('round-transcript');
-    const statusEl = document.getElementById('round-mic-status');
-    const startBtn = document.getElementById('round-start-btn');
-    const stopBtn = document.getElementById('round-stop-btn');
-    roundUsingManualFallback = false;
-    roundVoiceRecorder = createVoiceRecorder({ apiBase: API_BASE, getAuthToken: () => accessToken });
-    if (!roundVoiceRecorder.isSupported()) {
-        roundUsingManualFallback = true;
-        statusEl.textContent = 'Not supported — type manually';
-        roundConsulting = true;
-        startBtn.style.display = 'none';
-        stopBtn.style.display = 'inline-block';
-        transcriptEl.disabled = false;
-        transcriptEl.focus();
-        return;
-    }
-    try {
-        await roundVoiceRecorder.start();
-        roundConsulting = true;
-        startBtn.style.display = 'none';
-        stopBtn.style.display = 'inline-block';
-        transcriptEl.value = '';
-        statusEl.textContent = 'Recording...';
-    } catch (err) {
-        roundUsingManualFallback = true;
-        statusEl.textContent = 'Mic blocked — type manually';
-        roundConsulting = true;
-        startBtn.style.display = 'none';
-        stopBtn.style.display = 'inline-block';
-        transcriptEl.disabled = false;
-    }
-});
-
-document.getElementById('round-stop-btn').addEventListener('click', async () => {
-    roundConsulting = false;
-    document.getElementById('round-stop-btn').style.display = 'none';
-    document.getElementById('round-start-btn').style.display = 'inline-block';
-    const transcriptEl = document.getElementById('round-transcript');
-    const statusEl = document.getElementById('round-mic-status');
-
-    let text = '';
-    if (roundUsingManualFallback) {
-        statusEl.textContent = 'Idle';
-        text = transcriptEl.value.trim();
-    } else {
-        statusEl.textContent = 'Transcribing...';
-        try {
-            text = (await roundVoiceRecorder.stop()).trim();
-            transcriptEl.value = text;
-            statusEl.textContent = 'Idle';
-        } catch (err) {
-            statusEl.textContent = 'Transcription failed — type manually';
-            transcriptEl.disabled = false;
-            transcriptEl.focus();
-            return;
-        }
-    }
-
-    if (text.length >= 10) {
-        processWardRound(text);
-    } else {
-        document.getElementById('round-status').textContent = '⚠️ Transcript too short (minimum 10 characters).';
-    }
-});
-
-async function processWardRound(transcript) {
-    document.getElementById('round-status').textContent = '🔄 Processing round...';
-    const res = await apiRequest('/ipd/rounds', {
-        method: 'POST',
-        body: JSON.stringify({ patient_id: roundPatientId, transcript })
-    });
-    const data = await res.json();
-    if (!res.ok) {
-        document.getElementById('round-status').textContent = '❌ Error: ' + (data.detail || 'Failed');
-        return;
-    }
-    roundConsultationId = data.id;
-    document.getElementById('round-chief-complaint').value = data.chiefComplaint || '';
-    document.getElementById('round-hpi').value = data.hpi || '';
-    document.getElementById('round-diagnosis').value = data.primaryDiagnosis || '';
-    document.getElementById('round-differential').value = data.differentialDiagnosis || '';
-    document.getElementById('round-advice').value = data.advice || '';
-    renderRoundMeds(data.medications || []);
-    renderRoundLabs(data.labTests || []);
-    if (data.active_medications) renderActiveMeds(data.active_medications);
-    if (data.admission_day) document.getElementById('round-day').textContent = `Day ${data.admission_day}`;
-    document.getElementById('round-draft').style.display = 'block';
-    document.getElementById('round-finalize-btn').style.display = 'inline-block';
-    const taskNote = data.tasks_created ? ` (${data.tasks_created} task${data.tasks_created === 1 ? '' : 's'} sent to nursing)` : '';
-    document.getElementById('round-status').textContent = `✅ Round recorded.${taskNote} Review and Finalize & Save.`;
-    renderRoundInteractions(data.interaction_warnings || []);
-}
+// Ward Round is a plain structured-form entry, matching backend/app/main.py's
+// create_ipd_round (POST /api/ipd/rounds) -- deliberately no voice/AI drafting for IPD (see
+// that endpoint's own docstring and CHANGELOG.md: "OPD keeps voice/AI drafting, IPD does
+// not," a tested product decision, not an oversight). The doctor fills these fields directly
+// and Save persists them in one call -- no separate draft/finalize step is needed here since
+// there's no AI output to review first.
 
 function renderRoundMeds(meds) {
     const list = document.getElementById('round-medications-list');
@@ -1349,21 +1275,30 @@ function renderRoundInteractions(interactions) {
 }
 
 document.getElementById('round-finalize-btn').addEventListener('click', async () => {
-    if (!roundConsultationId) return;
+    if (!roundPatientId) return;
+    const chiefComplaint = document.getElementById('round-chief-complaint').value.trim();
+    if (!chiefComplaint) {
+        document.getElementById('round-status').textContent = '⚠️ Chief Complaint / Findings is required.';
+        return;
+    }
     const discontinued = Array.from(document.querySelectorAll('.round-discontinue-cb:checked'))
         .map(cb => ({ drugName: cb.dataset.drug, discontinued: true }));
     const medications = [...getRoundMedications(), ...discontinued];
     const payload = {
-        chiefComplaint: document.getElementById('round-chief-complaint').value,
+        patient_id: roundPatientId,
+        chief_complaint: chiefComplaint,
         hpi: document.getElementById('round-hpi').value,
-        primaryDiagnosis: document.getElementById('round-diagnosis').value,
-        differentialDiagnosis: document.getElementById('round-differential').value,
+        objective_findings: document.getElementById('round-objective').value,
+        primary_diagnosis: document.getElementById('round-diagnosis').value,
+        differential_diagnosis: document.getElementById('round-differential').value,
         advice: document.getElementById('round-advice').value,
         medications,
-        labTests: getRoundLabs(),
+        lab_tests: getRoundLabs(),
+        is_consultant_review: document.getElementById('round-consultant-review').checked,
     };
-    const res = await apiRequest(`/consultations/${roundConsultationId}/finalize`, {
-        method: 'PATCH',
+    document.getElementById('round-status').textContent = 'Saving…';
+    const res = await apiRequest('/ipd/rounds', {
+        method: 'POST',
         body: JSON.stringify(payload)
     });
     const data = await res.json();
@@ -1372,7 +1307,7 @@ document.getElementById('round-finalize-btn').addEventListener('click', async ()
         return;
     }
     const taskNote = data.tasks_created ? ` — ${data.tasks_created} task${data.tasks_created === 1 ? '' : 's'} sent to nursing staff.` : '';
-    document.getElementById('round-status').textContent = `✅ Finalized and saved.${taskNote}`;
+    document.getElementById('round-status').textContent = `✅ Ward round saved.${taskNote}`;
     renderRoundInteractions(data.interaction_warnings || []);
     loadDashboard();
     if (currentPatientId === roundPatientId) showPatientDetail(roundPatientId);

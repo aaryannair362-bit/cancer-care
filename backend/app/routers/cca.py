@@ -7,7 +7,9 @@ import hashlib
 import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import (
+    APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile, status,
+)
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
@@ -25,9 +27,11 @@ from ..config import settings
 from ..ocr_service import extract_document
 from ..scribe import scribe
 from .. import drug_matcher
+from ..document_pages import process_document_pages
+from ..models_cca_oncology_ext import CCARadiationPhase, RadiationFraction, RadiationPrescription
 from ..models_cca import (
     CCAPatient, CCAConsent, CCAQueueEvent, CCAEncounter, CCAIntakeAssessment,
-    CCADocument, ClinicalFact, CCAContradiction,
+    CCADocument, CCADocumentPage, ClinicalFact, CCAContradiction,
     CCABiomarkerResult, CCAOrder, CCAResult, StagingRecord, StagingEvidence,
     GuidelineRegistry, TreatmentPlanGuidelineLink,
     ClinicalBrief, MDTCase, MDTDecision, CarePlan,
@@ -37,6 +41,7 @@ from ..models_cca import (
     PreTreatmentSafetyCheck, VascularAccessAssessment, PharmacyReadiness,
     InfusionMedicationAdministration, InfusionAdministrationEvent, InfusionMonitoringObservation,
     TreatmentHoldEvent, InfusionReactionEvent, ExtravasationEvent, TreatmentDayCompletion,
+    BloodProductAdministration, TransfusionFeedback,
 )
 from ..cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
@@ -720,6 +725,33 @@ def get_case_summary(
     patient = _get_org_patient(db, patient_id, org_id)
 
     docs = db.query(CCADocument).filter(CCADocument.patient_id == patient_id).order_by(CCADocument.uploaded_at.desc()).all()
+    # Scan/imaging pages (X-ray/CT/MRI/ultrasound photographs) flagged by the per-page hybrid
+    # classifier -- populated asynchronously after upload (document_pages.py's background task),
+    # so a just-uploaded document's scan pages may not appear here for a few moments yet.
+    scan_pages = db.query(CCADocumentPage).join(CCADocument).filter(
+        CCADocument.patient_id == patient_id, CCADocumentPage.page_type == "SCAN_IMAGING"
+    ).order_by(CCADocumentPage.created_at.desc()).all()
+    docs_by_id = {d.id: d for d in docs}
+    # Radiation therapy summary (Oncology Review Results PDF item 5) -- pulled straight from
+    # the recorded course/phase/fraction records, same data source as the NEXUS brief's own
+    # radiation section, so it never needs separate manual re-entry here.
+    radiation_courses = db.query(RadiationPrescription).filter(RadiationPrescription.patient_id == patient_id).all()
+    radiation_out = []
+    for course in radiation_courses:
+        phases = db.query(CCARadiationPhase).filter(CCARadiationPhase.prescription_id == course.id).order_by(CCARadiationPhase.phase_number).all()
+        phases_out = []
+        for phase in phases:
+            delivered = db.query(RadiationFraction).filter(RadiationFraction.phase_id == phase.id, RadiationFraction.status == "delivered").count()
+            phases_out.append({
+                "id": phase.id, "phase_number": phase.phase_number, "label": phase.label,
+                "treatment_site": phase.treatment_site, "total_prescribed_dose_gy": phase.total_prescribed_dose_gy,
+                "number_of_fractions": phase.number_of_fractions, "delivered_fractions": delivered,
+                "rt_sub_status": phase.rt_sub_status,
+            })
+        radiation_out.append({
+            "id": course.id, "diagnosis": course.diagnosis, "technique": course.technique,
+            "special_instructions": course.special_instructions, "phases": phases_out,
+        })
     facts = db.query(ClinicalFact).filter(
         ClinicalFact.patient_id == patient_id, ClinicalFact.status.in_(["VERIFIED", "PROPOSED"])
     ).order_by(ClinicalFact.created_at.desc()).all()
@@ -809,7 +841,8 @@ def get_case_summary(
         },
         "documents": [
             {
-                "id": d.id, "filename": d.filename, "classification": d.classification_class,
+                "id": d.id, "filename": d.filename, "document_type": d.document_type,
+                "classification": d.classification_class,
                 "status": d.status, "uploaded_by": d.uploaded_by,
                 "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
                 "excerpt": (d.ocr_text or "")[:400],
@@ -818,6 +851,24 @@ def get_case_summary(
             }
             for d in docs
         ],
+        "scans": [
+            {
+                "id": p.id, "document_id": p.document_id,
+                "document_filename": docs_by_id[p.document_id].filename if p.document_id in docs_by_id else None,
+                "page_number": p.page_number,
+                "uploaded_at": p.created_at.isoformat() if p.created_at else None,
+                "image_url": (
+                    f"/api/cca/patients/{patient_id}/documents/{p.document_id}/pages/{p.page_number}/image"
+                    if p.image_content else None
+                ),
+                "file_url": (
+                    f"/api/cca/patients/{patient_id}/documents/{p.document_id}/file"
+                    if p.document_id in docs_by_id and docs_by_id[p.document_id].file_content else None
+                ),
+            }
+            for p in scan_pages
+        ],
+        "radiation": radiation_out,
         "clinical_facts": facts_by_type,
         "encounters": [
             {
@@ -871,7 +922,9 @@ def _can_upload_cca_document(user: dict) -> bool:
 
 @router.post("/documents", status_code=201)
 async def upload_document(
+    background_tasks: BackgroundTasks,
     patient_id: int = Query(...), file: UploadFile = File(...),
+    document_type: Optional[str] = Form(None),
     db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
 ):
     """
@@ -928,9 +981,9 @@ async def upload_document(
 
     doc = CCADocument(
         patient_id=patient_id, filename=filename, mime_type=content_type, page_count=page_count,
-        file_hash=digest, file_content=content, classification_class=doc_class,
-        classification_confidence=confidence, ocr_text=ocr_text, uploaded_by=actor,
-        status="OCR_FAILED" if ocr_failed_reason else "EXTRACTED",
+        file_hash=digest, file_content=content, document_type=document_type,
+        classification_class=doc_class, classification_confidence=confidence, ocr_text=ocr_text,
+        uploaded_by=actor, status="OCR_FAILED" if ocr_failed_reason else "EXTRACTED",
     )
     db.add(doc)
     db.flush()
@@ -975,6 +1028,12 @@ async def upload_document(
     db.add(j_ev)
     db.commit()
     db.refresh(doc)
+
+    if not ocr_failed_reason:
+        # True per-page classification (Patient History's "Scans" section, page-attributed
+        # facts) runs after the response is sent -- see document_pages.py's module docstring
+        # for why this can't happen inline within the upload request.
+        background_tasks.add_task(process_document_pages, doc.id, content, content_type, ocr_result)
 
     return {
         "status": "success",
@@ -1040,6 +1099,28 @@ def view_cca_document(
             "Cache-Control": "private, no-store",
             "X-Content-Type-Options": "nosniff",
         },
+    )
+
+
+@router.get("/patients/{patient_id}/documents/{document_id}/pages/{page_number}/image")
+def view_cca_document_page_image(
+    patient_id: int, document_id: int, page_number: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Stream a single scan/imaging page's extracted image -- populated asynchronously by
+    document_pages.py's background task, so this can 404 for a few moments after upload even
+    for a document that will eventually have scan pages. Mirrors view_cca_document's auth/
+    caching-header pattern for the whole-file equivalent above."""
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    page = db.query(CCADocumentPage).join(CCADocument).filter(
+        CCADocumentPage.document_id == document_id, CCADocumentPage.page_number == page_number,
+        CCADocument.patient_id == patient_id,
+    ).first()
+    if not page or not page.image_content:
+        raise HTTPException(404, "No image stored for this page")
+    return Response(
+        page.image_content, media_type=page.image_mime_type or "application/octet-stream",
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
     )
 
 
@@ -4371,7 +4452,8 @@ async def resume_hold(
 def _reaction_out(r: InfusionReactionEvent) -> dict:
     return {
         "id": r.id, "patient_id": r.patient_id, "treatment_order_id": r.treatment_order_id,
-        "onset_at": r.onset_at.isoformat(), "medication_running": r.medication_running,
+        "onset_at": r.onset_at.isoformat(), "administration_id": r.administration_id,
+        "medication_running": r.medication_running,
         "symptoms": r.symptoms, "vitals": r.vitals, "infusion_action": r.infusion_action,
         "informed_person": r.informed_person, "interventions": r.interventions,
         "patient_response": r.patient_response, "physician_disposition": r.physician_disposition,
@@ -4412,8 +4494,18 @@ async def record_reaction(
         _get_order_for_workspace(db, order_id, patient_id, _org_id(current_user))
     actor = _actor(current_user)
 
+    administration_id = body.get("administration_id")
+    if administration_id:
+        admin_row = db.query(InfusionMedicationAdministration).filter(
+            InfusionMedicationAdministration.id == administration_id,
+            InfusionMedicationAdministration.patient_id == patient_id,
+        ).first()
+        if not admin_row or (order_id and admin_row.treatment_order_id != order_id):
+            raise HTTPException(422, "administration_id does not belong to this treatment order")
+
     reaction = InfusionReactionEvent(
-        patient_id=patient_id, treatment_order_id=order_id, medication_running=body.get("medication_running"),
+        patient_id=patient_id, treatment_order_id=order_id, administration_id=administration_id,
+        medication_running=body.get("medication_running"),
         symptoms=symptoms, vitals=body.get("vitals"), infusion_action=body.get("infusion_action"),
         informed_person=body.get("informed_person"), interventions=body.get("interventions"),
         patient_response=body.get("patient_response"), physician_disposition=body.get("physician_disposition"),
@@ -4519,6 +4611,13 @@ def get_completion(
     return {"completion": _completion_out(row) if row else None}
 
 
+# Overall Chemotherapy/Day-Care Completion status (Gap Analysis PDF item 12) -- a fixed,
+# nurse-chosen set, never auto-computed from the per-drug status rollup (this codebase never
+# derives a clinical judgment from raw data, same reasoning as physician_disposition on
+# InfusionReactionEvent).
+_COMPLETION_DISPOSITIONS = ("Completed", "Partially Completed", "Not Completed", "Discontinued")
+
+
 @router.post("/treatment/completion")
 async def record_completion(
     request: Request, db: Session = Depends(get_cca_db),
@@ -4537,6 +4636,10 @@ async def record_completion(
         raise HTTPException(422, "order_id is required")
     _get_order_for_workspace(db, order_id, patient_id, _org_id(current_user))
 
+    disposition = body.get("disposition")
+    if disposition and disposition not in _COMPLETION_DISPOSITIONS:
+        raise HTTPException(422, f"disposition must be one of {', '.join(_COMPLETION_DISPOSITIONS)}")
+
     if db.query(TreatmentDayCompletion).filter(TreatmentDayCompletion.treatment_order_id == order_id).first():
         raise HTTPException(409, "This treatment order's nursing record is already completed and locked")
 
@@ -4553,7 +4656,7 @@ async def record_completion(
     next_date = body.get("next_treatment_date")
     completion = TreatmentDayCompletion(
         patient_id=patient_id, treatment_order_id=order_id, final_vitals=body.get("final_vitals"),
-        final_symptoms=body.get("final_symptoms"), disposition=body.get("disposition"),
+        final_symptoms=body.get("final_symptoms"), disposition=disposition,
         access_status=body.get("access_status"), patient_education_notes=body.get("patient_education_notes"),
         red_flags_given=bool(body.get("red_flags_given", False)),
         next_treatment_date=datetime.strptime(next_date, "%Y-%m-%d").date() if next_date else None,
@@ -4570,6 +4673,201 @@ async def record_completion(
     db.commit()
     db.refresh(completion)
     return {"status": "success", "completion": _completion_out(completion)}
+
+
+# ---------------------------------------------------------
+# Blood Bank/Transfusion (Gap Analysis PDF items 28-29): Blood Product administration and
+# Post-transfusion Feedback. Reuses the Infusion Nurse's own workspace/role -- in this
+# hospital's workflow, blood product transfusion during an oncology day-care visit is
+# administered by the same nurse who administers chemo, the same way vascular access and
+# monitoring are shared across both.
+# ---------------------------------------------------------
+
+def _blood_product_out(b: BloodProductAdministration) -> dict:
+    return {
+        "id": b.id, "patient_id": b.patient_id, "treatment_order_id": b.treatment_order_id,
+        "product_type": b.product_type, "unit_id": b.unit_id, "blood_group": b.blood_group,
+        "crossmatch_confirmed": b.crossmatch_confirmed, "crossmatch_reference": b.crossmatch_reference,
+        "consent_confirmed": b.consent_confirmed, "second_verifier_name": b.second_verifier_name,
+        "volume": b.volume, "rate": b.rate, "status": b.status,
+        "pre_transfusion_vitals": b.pre_transfusion_vitals,
+        "start_time": b.start_time.isoformat() if b.start_time else None,
+        "end_time": b.end_time.isoformat() if b.end_time else None,
+        "administered_by": b.administered_by,
+        "administered_at": b.administered_at.isoformat() if b.administered_at else None,
+    }
+
+
+@router.get("/treatment/{order_id}/blood-products")
+def list_blood_products(
+    order_id: int, patient_id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    _require_clinical_or_nursing_role(current_user)
+    _get_order_for_workspace(db, order_id, patient_id, _org_id(current_user))
+    rows = db.query(BloodProductAdministration).filter(
+        BloodProductAdministration.treatment_order_id == order_id
+    ).order_by(BloodProductAdministration.id.asc()).all()
+    return {"results": [_blood_product_out(b) for b in rows]}
+
+
+@router.post("/treatment/blood-products")
+async def add_blood_product(
+    request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Documents a unit already crossmatched/authorized by the blood bank -- crossmatch_confirmed
+    and consent_confirmed are the nurse's own verification checks, never computed. See
+    BloodProductAdministration's docstring."""
+    _require_clinical_or_nursing_role(current_user)
+    body = await request.json()
+    patient_id = _require_patient_id(body)
+    order_id = body.get("order_id")
+    if not order_id:
+        raise HTTPException(422, "order_id is required")
+    _get_order_for_workspace(db, order_id, patient_id, _org_id(current_user))
+    product_type = (body.get("product_type") or "").strip()
+    unit_id = (body.get("unit_id") or "").strip()
+    if not product_type or not unit_id:
+        raise HTTPException(422, "product_type and unit_id are required")
+
+    record = BloodProductAdministration(
+        patient_id=patient_id, treatment_order_id=order_id, product_type=product_type, unit_id=unit_id,
+        blood_group=body.get("blood_group"), crossmatch_confirmed=bool(body.get("crossmatch_confirmed", False)),
+        crossmatch_reference=body.get("crossmatch_reference"), consent_confirmed=bool(body.get("consent_confirmed", False)),
+        second_verifier_name=body.get("second_verifier_name"), volume=body.get("volume"), rate=body.get("rate"),
+        pre_transfusion_vitals=body.get("pre_transfusion_vitals"), created_by=_actor(current_user),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "blood_product": _blood_product_out(record)}
+
+
+# Workflow-sequencing only (which button states make sense next) -- not a clinical rule. Mirrors
+# _MEDICATION_TRANSITIONS exactly, minus OMIT (a crossmatched unit already at the bedside is
+# either given or stopped, never "omitted" the way an optional premedication line can be).
+_BLOOD_PRODUCT_TRANSITIONS = {
+    "START": ({"Pending", "Stopped"}, "InProgress"),
+    "PAUSE": ({"InProgress"}, "Paused"),
+    "RESUME": ({"Paused"}, "InProgress"),
+    "STOP": ({"InProgress", "Paused"}, "Stopped"),
+    "COMPLETE": ({"InProgress", "Paused"}, "Completed"),
+}
+_BLOOD_PRODUCT_EVENTS_REQUIRING_REASON = {"STOP"}
+
+
+@router.post("/treatment/blood-products/{administration_id}/event")
+async def record_blood_product_event(
+    administration_id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    _require_clinical_or_nursing_role(current_user)
+    org_id = _org_id(current_user)
+    record = db.query(BloodProductAdministration).filter(BloodProductAdministration.id == administration_id).first()
+    if not record:
+        raise HTTPException(404, "Blood product administration record not found")
+    _get_org_patient(db, record.patient_id, org_id)
+
+    body = await request.json()
+    event_type = body.get("event_type")
+    if event_type not in _BLOOD_PRODUCT_TRANSITIONS:
+        raise HTTPException(422, f"event_type must be one of {sorted(_BLOOD_PRODUCT_TRANSITIONS)}")
+    allowed_from, next_status = _BLOOD_PRODUCT_TRANSITIONS[event_type]
+    if record.status not in allowed_from:
+        raise HTTPException(409, f"Cannot {event_type} a blood product administration in {record.status} status")
+
+    reason = body.get("notes")
+    if event_type in _BLOOD_PRODUCT_EVENTS_REQUIRING_REASON and not reason:
+        raise HTTPException(422, f"{event_type} requires a documented reason")
+
+    actor = _actor(current_user)
+    now = datetime.utcnow()
+    record.status = next_status
+    if event_type == "START" and not record.start_time:
+        record.start_time = now
+    if event_type in ("COMPLETE", "STOP"):
+        record.end_time = now
+        record.administered_by = actor
+        record.administered_at = now
+
+    db.flush()
+    if event_type in ("COMPLETE", "STOP"):
+        publish(
+            db, "BLOOD_PRODUCT_" + event_type, patient_id=record.patient_id, actor=actor, role=current_user.get("role"),
+            title=f"{record.product_type} unit {record.unit_id}: {next_status}", category="TREATMENT",
+            description=f"{actor} recorded {record.product_type} unit {record.unit_id} as {next_status}." + (f" Reason: {reason}" if reason else ""),
+            treatment_order_id=record.treatment_order_id,
+        )
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "blood_product": _blood_product_out(record)}
+
+
+def _transfusion_feedback_out(f: TransfusionFeedback) -> dict:
+    return {
+        "id": f.id, "patient_id": f.patient_id, "treatment_order_id": f.treatment_order_id,
+        "blood_product_id": f.blood_product_id, "reaction_occurred": f.reaction_occurred,
+        "reaction_type": f.reaction_type, "symptoms": f.symptoms, "vitals": f.vitals,
+        "action_taken": f.action_taken, "outcome": f.outcome, "feedback_notes": f.feedback_notes,
+        "reported_by": f.reported_by, "reported_at": f.reported_at.isoformat(),
+    }
+
+
+@router.get("/treatment/{order_id}/transfusion-feedback")
+def list_transfusion_feedback(
+    order_id: int, patient_id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    _require_clinical_or_nursing_role(current_user)
+    _get_order_for_workspace(db, order_id, patient_id, _org_id(current_user))
+    rows = db.query(TransfusionFeedback).filter(
+        TransfusionFeedback.treatment_order_id == order_id
+    ).order_by(TransfusionFeedback.reported_at.desc()).all()
+    return {"results": [_transfusion_feedback_out(f) for f in rows]}
+
+
+@router.post("/treatment/transfusion-feedback")
+async def record_transfusion_feedback(
+    request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Post-transfusion Feedback (gap PDF item 29) -- the closing outcome documentation for a
+    unit, whether or not a reaction occurred. See TransfusionFeedback's docstring."""
+    _require_clinical_or_nursing_role(current_user)
+    body = await request.json()
+    patient_id = _require_patient_id(body)
+    order_id = body.get("order_id")
+    if not order_id:
+        raise HTTPException(422, "order_id is required")
+    _get_order_for_workspace(db, order_id, patient_id, _org_id(current_user))
+
+    blood_product_id = body.get("blood_product_id")
+    if blood_product_id:
+        product_row = db.query(BloodProductAdministration).filter(
+            BloodProductAdministration.id == blood_product_id, BloodProductAdministration.patient_id == patient_id,
+        ).first()
+        if not product_row or product_row.treatment_order_id != order_id:
+            raise HTTPException(422, "blood_product_id does not belong to this treatment order")
+
+    actor = _actor(current_user)
+    feedback = TransfusionFeedback(
+        patient_id=patient_id, treatment_order_id=order_id, blood_product_id=blood_product_id,
+        reaction_occurred=bool(body.get("reaction_occurred", False)), reaction_type=body.get("reaction_type"),
+        symptoms=body.get("symptoms"), vitals=body.get("vitals"), action_taken=body.get("action_taken"),
+        outcome=body.get("outcome"), feedback_notes=body.get("feedback_notes"), reported_by=actor,
+    )
+    db.add(feedback)
+    db.flush()
+    publish(
+        db, "TRANSFUSION_FEEDBACK_RECORDED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title="Post-transfusion feedback recorded", category="TREATMENT",
+        description=f"{actor} recorded post-transfusion feedback" + (f" (reaction: {feedback.reaction_type})" if feedback.reaction_occurred else " (no reaction)."),
+        treatment_order_id=order_id,
+    )
+    db.commit()
+    db.refresh(feedback)
+    return {"status": "success", "feedback": _transfusion_feedback_out(feedback)}
 
 
 # ---------------------------------------------------------

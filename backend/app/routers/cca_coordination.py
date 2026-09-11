@@ -31,6 +31,7 @@ from ..models_cca import (
     CCAPatient, MDTCase, MDTDecision, MDTParticipant, CCAExternalAccess, CCAExternalOpinion,
     CCAFinancialCase, CCACoordinationCase, CCAIntakeAssessment, CCAEncounter, CCAOrder,
     CarePlan, StagingRecord, CCAJourneyEvent, TreatmentPlan, CarePlanTask, DomainEvent,
+    CCAAppointmentCoordination,
 )
 from ..events import publish
 from ..cca_product_decisions import EXTERNAL_SPECIALIST_CAN_SIGN_RECOMMENDATIONS
@@ -799,6 +800,125 @@ async def record_no_show(case_id: int, request: Request, db: Session = Depends(g
     )
     db.commit()
     return {"status": "success", "case": _coordination_out(case)}
+
+
+_APPOINTMENT_STATUSES = ("Scheduled", "Confirmed", "Completed", "Missed", "Rescheduled", "Cancelled")
+
+
+def _appointment_out(a: CCAAppointmentCoordination) -> dict:
+    return {
+        "id": a.id, "patient_id": a.patient_id, "coordination_case_id": a.coordination_case_id,
+        "department": a.department, "purpose": a.purpose, "scheduled_at": a.scheduled_at.isoformat(),
+        "location": a.location, "status": a.status, "transport_arranged": a.transport_arranged,
+        "reminder_sent": a.reminder_sent, "notes": a.notes, "created_by": a.created_by,
+    }
+
+
+@router.get("/coordination/appointments")
+def list_coordination_appointments(
+    patient_id: Optional[int] = None, upcoming_only: bool = False,
+    db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user),
+):
+    """Hospital-wide Appointment Coordination (Gap Analysis PDF item 23). Without patient_id,
+    this is the Patient Liaison's own cross-department worklist -- every appointment they're
+    coordinating across the organization's oncology caseload, not one patient at a time."""
+    org_id = _org_id(current_user)
+    query = db.query(CCAAppointmentCoordination).join(
+        CCAPatient, CCAAppointmentCoordination.patient_id == CCAPatient.id
+    ).filter(CCAPatient.organization_id == org_id)
+    if patient_id is not None:
+        query = query.filter(CCAAppointmentCoordination.patient_id == patient_id)
+    if upcoming_only:
+        query = query.filter(
+            CCAAppointmentCoordination.scheduled_at >= datetime.utcnow(),
+            CCAAppointmentCoordination.status.in_(("Scheduled", "Confirmed", "Rescheduled")),
+        )
+    rows = query.order_by(CCAAppointmentCoordination.scheduled_at.asc()).all()
+    patients_by_id = {p.id: p for p in db.query(CCAPatient).filter(
+        CCAPatient.id.in_([a.patient_id for a in rows])
+    ).all()} if rows else {}
+    return {"results": [
+        {**_appointment_out(a), "patient_name": patients_by_id[a.patient_id].name, "patient_mrn": patients_by_id[a.patient_id].mrn}
+        for a in rows
+    ]}
+
+
+@router.post("/coordination/appointments", status_code=201)
+async def create_coordination_appointment(request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not (is_cca_patient_liaison(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Patient Liaison or Admin may coordinate an appointment")
+    org_id = _org_id(current_user)
+    body = await request.json()
+    patient_id = body.get("patient_id")
+    if not patient_id:
+        raise HTTPException(422, "patient_id is required")
+    _get_org_patient(db, patient_id, org_id)
+    department = (body.get("department") or "").strip()
+    scheduled_at = body.get("scheduled_at")
+    if not department or not scheduled_at:
+        raise HTTPException(422, "department and scheduled_at are required")
+    coordination_case_id = body.get("coordination_case_id")
+    if coordination_case_id:
+        _get_org_coordination_case(db, coordination_case_id, org_id)
+
+    actor = _actor(current_user)
+    appointment = CCAAppointmentCoordination(
+        patient_id=patient_id, coordination_case_id=coordination_case_id, department=department,
+        purpose=body.get("purpose"), scheduled_at=datetime.fromisoformat(scheduled_at),
+        location=body.get("location"), transport_arranged=bool(body.get("transport_arranged", False)),
+        notes=body.get("notes"), created_by=actor,
+    )
+    db.add(appointment)
+    db.flush()
+    publish(
+        db, "COORDINATION_APPOINTMENT_SCHEDULED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Appointment coordinated: {department}", category="COORDINATION",
+        description=f"{actor} coordinated a {department} appointment for {appointment.scheduled_at.isoformat()}.",
+    )
+    db.commit()
+    db.refresh(appointment)
+    return {"status": "success", "appointment": _appointment_out(appointment)}
+
+
+@router.patch("/coordination/appointments/{appointment_id}")
+async def update_coordination_appointment(appointment_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not (is_cca_patient_liaison(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Patient Liaison or Admin may update a coordinated appointment")
+    org_id = _org_id(current_user)
+    appointment = db.query(CCAAppointmentCoordination).filter(CCAAppointmentCoordination.id == appointment_id).first()
+    if not appointment:
+        raise HTTPException(404, "Appointment not found")
+    _check_patient_in_org(db, appointment.patient_id, org_id)
+
+    body = await request.json()
+    if "status" in body:
+        if body["status"] not in _APPOINTMENT_STATUSES:
+            raise HTTPException(422, f"status must be one of {', '.join(_APPOINTMENT_STATUSES)}")
+        appointment.status = body["status"]
+    if "scheduled_at" in body and body["scheduled_at"]:
+        appointment.scheduled_at = datetime.fromisoformat(body["scheduled_at"])
+    if "location" in body:
+        appointment.location = body["location"]
+    if "transport_arranged" in body:
+        appointment.transport_arranged = bool(body["transport_arranged"])
+    if "reminder_sent" in body:
+        appointment.reminder_sent = bool(body["reminder_sent"])
+    if "notes" in body:
+        appointment.notes = body["notes"]
+
+    actor = _actor(current_user)
+    if body.get("status") == "Missed":
+        # Same PATIENT_NO_SHOW event the standalone no-show endpoint already publishes --
+        # a missed coordinated appointment is exactly that same architecture-doc event.
+        publish(
+            db, "PATIENT_NO_SHOW", patient_id=appointment.patient_id, actor=actor, role=current_user.get("role"),
+            title="Patient no-show recorded", category="COORDINATION",
+            description=f"{actor} recorded a no-show for the {appointment.department} appointment.",
+            coordination_case_id=appointment.coordination_case_id,
+        )
+    db.commit()
+    db.refresh(appointment)
+    return {"status": "success", "appointment": _appointment_out(appointment)}
 
 
 @router.patch("/coordination/cases/{case_id}/next-action")

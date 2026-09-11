@@ -941,7 +941,13 @@ document.getElementById('stop-consult-btn').addEventListener('click', async () =
         try {
             finalText = (await voiceRecorder.stop()).trim();
             transcriptInput.value = finalText;
-            setMicStatus('idle', 'Idle');
+            if (voiceRecorder.wasInterrupted()) {
+                setMicStatus('idle', 'Interrupted');
+                analysisStatus.className = 'error';
+                analysisStatus.textContent = '⚠️ Recording was interrupted before you clicked Stop — the transcript may be incomplete. Review it carefully.';
+            } else {
+                setMicStatus('idle', 'Idle');
+            }
         } catch (err) {
             console.error('Transcription failed:', err);
             setMicStatus('idle', 'Transcription failed');

@@ -27,6 +27,10 @@
 //   await recorder.start();            // throws if mic permission denied
 //   const transcript = await recorder.stop();   // throws if upload/transcription fails
 //   recorder.getLevel();               // 0-1 live mic input level while recording, see below
+//   recorder.wasInterrupted();         // true if stop() resolved after a mid-recording error
+//                                       // (device disconnect, encoder failure) rather than a
+//                                       // normal doctor-initiated stop -- check after stop()
+//                                       // resolves and warn that the transcript may be short.
 
 function createVoiceRecorder({ apiBase, getAuthToken, provider }) {
     // `provider` is accepted (callers fetch it from GET {apiBase}/transcription-provider) but
@@ -42,6 +46,18 @@ function createVoiceRecorder({ apiBase, getAuthToken, provider }) {
     // accuracy-preference order.
     const MIME_CANDIDATES = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
 
+    // Without this, MediaRecorder picks its own default bitrate for audio-only capture (~128
+    // kbps on Chrome) -- verified live: a genuine 30-minute recording at that default bitrate
+    // exceeded main.py's MAX_AUDIO_UPLOAD_BYTES (25MB) and the upload failed outright with 413
+    // "Audio file too large", losing the whole recording (no partial save, no retry) despite the
+    // recording itself having succeeded -- exactly the class of long-recording failure this
+    // whole pipeline exists to avoid. 24 kbps mono Opus is comfortably clear for speech/STT
+    // purposes (nowhere near music-quality bitrates) and keeps even a full 2-hour recording
+    // (Sarvam Batch STT's own ceiling, see sarvam_batch_transcriber.py) to ~21.6MB, safely under
+    // the 25MB cap with headroom for encoder variance -- so the cap itself doesn't need raising,
+    // the bitrate just needed to actually be bounded.
+    const AUDIO_BITS_PER_SECOND = 24000;
+
     let stream = null;
     let audioCtx = null;
     let analyser = null;
@@ -50,6 +66,12 @@ function createVoiceRecorder({ apiBase, getAuthToken, provider }) {
 
     let mediaRecorder = null;
     let chunks = [];
+    // Set when the recorder errors out or stops on its own AFTER recording has actually
+    // started (device disconnect, encoder failure, OS-level interruption) -- as opposed to a
+    // normal doctor-initiated stop(). Checked by wasInterrupted() after stop() resolves, so a
+    // caller can warn that the returned transcript may be shorter than the real conversation,
+    // instead of silently presenting a partial recording as if it were complete.
+    let recordingInterrupted = false;
 
     function isSupported() {
         return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
@@ -120,7 +142,10 @@ function createVoiceRecorder({ apiBase, getAuthToken, provider }) {
 
     async function _startRecording() {
         chunks = [];
-        mediaRecorder = sessionMimeType ? new MediaRecorder(stream, { mimeType: sessionMimeType }) : new MediaRecorder(stream);
+        recordingInterrupted = false;
+        const recorderOptions = { audioBitsPerSecond: AUDIO_BITS_PER_SECOND };
+        if (sessionMimeType) recorderOptions.mimeType = sessionMimeType;
+        mediaRecorder = new MediaRecorder(stream, recorderOptions);
         mediaRecorder.ondataavailable = (e) => {
             if (e.data && e.data.size > 0) chunks.push(e.data);
         };
@@ -130,6 +155,13 @@ function createVoiceRecorder({ apiBase, getAuthToken, provider }) {
         });
         mediaRecorder.start();
         await started;
+        // The `onerror` above only ever settles the one-time `started` promise -- reassigning
+        // it here matters because a promise can only settle once: an error AFTER this point
+        // (device disconnect, encoder failure mid-recording) would call that same `reject` into
+        // an already-resolved promise, which is a silent no-op. Previously that meant a
+        // mid-recording failure produced a shorter-than-real transcript with zero indication
+        // anything had gone wrong. Flag it instead so stop()/wasInterrupted() can tell the caller.
+        mediaRecorder.onerror = () => { recordingInterrupted = true; };
     }
 
     function _stopRecording() {
@@ -140,7 +172,7 @@ function createVoiceRecorder({ apiBase, getAuthToken, provider }) {
             }
             const recorder = mediaRecorder;
             mediaRecorder = null;
-            recorder.onstop = async () => {
+            const finish = async () => {
                 if (stream) {
                     stream.getTracks().forEach((t) => t.stop());
                     stream = null;
@@ -158,6 +190,17 @@ function createVoiceRecorder({ apiBase, getAuthToken, provider }) {
                     reject(err);
                 }
             };
+            if (recorder.state === 'inactive') {
+                // Already stopped on its own (a mid-recording error stops the recorder before
+                // the doctor ever clicks Stop) -- recorder.stop() would throw InvalidStateError
+                // here instead of firing onstop. Whatever chunks were captured before the error
+                // are still real audio; finish with those rather than losing the recording
+                // entirely.
+                recordingInterrupted = true;
+                finish();
+                return;
+            }
+            recorder.onstop = finish;
             recorder.stop();
         });
     }
@@ -170,14 +213,40 @@ function createVoiceRecorder({ apiBase, getAuthToken, provider }) {
             const ext = extForMimeType(blob.type);
             form.append('audio', blob, `chunk_${i}.${ext}`);
         });
-        const headers = {};
-        const token = getAuthToken && getAuthToken();
-        if (token) headers['Authorization'] = `Bearer ${token}`;
-        // Deliberately NOT going through this page's JSON apiRequest() helper -- it hardcodes
-        // 'Content-Type: application/json' as a header default, which is incompatible with
-        // FormData (the browser must set the multipart boundary itself, which only happens
-        // when no Content-Type is set at all).
-        const res = await fetch(`${apiBase}/transcribe-audio`, { method: 'POST', headers, body: form });
+
+        // Deliberately NOT going through this page's JSON apiRequest()/Api.upload() helpers --
+        // they hardcode 'Content-Type: application/json' as a header default (apiRequest) or
+        // otherwise don't fit here cleanly, which is incompatible with FormData (the browser
+        // must set the multipart boundary itself, which only happens when no Content-Type is
+        // set at all). FormData is safe to resend unchanged on a retry -- fetch reads it when
+        // building the request, it isn't consumed/mutated by being sent once.
+        const doUpload = () => {
+            const headers = {};
+            const token = getAuthToken && getAuthToken();
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+            return fetch(`${apiBase}/transcribe-audio`, { method: 'POST', headers, body: form });
+        };
+
+        let res = await doUpload();
+        // The access token is short-lived by design (15 min server-side) -- a recording that
+        // runs longer than that (exactly the long-consultation case this whole pipeline exists
+        // for) would otherwise ALWAYS fail here with 401 right as the doctor stops recording,
+        // losing the entire transcript despite the recording itself having succeeded. Verified
+        // live: a 20-minute recording's upload hit exactly this. Every other authenticated call
+        // in this app (Api.get/post/upload, frontend/js/api.js) already retries once after a
+        // token refresh on 401 -- this mirrors that same pattern (reusing api.js's shared
+        // _refreshAccessToken(), a plain global function since both files load as classic
+        // scripts in the same page) rather than inventing a second one.
+        if (res.status === 401 && typeof _refreshAccessToken === 'function' && typeof Auth !== 'undefined' && Auth.getRefreshToken && Auth.getRefreshToken()) {
+            try {
+                await _refreshAccessToken();
+                res = await doUpload();
+            } catch (err) {
+                // Refresh itself failed (refresh token also expired/invalid) -- fall through to
+                // the normal error handling below, which surfaces the (still-401) response.
+            }
+        }
+
         if (!res.ok) {
             const data = await res.json().catch(() => ({}));
             throw new Error(data.detail || `Transcription failed (${res.status})`);
@@ -209,5 +278,13 @@ function createVoiceRecorder({ apiBase, getAuthToken, provider }) {
         return _stopRecording();
     }
 
-    return { start, stop, isSupported, getLevel };
+    // True if the recording ended early on its own (device disconnect, encoder failure) rather
+    // than because the caller invoked stop() on a still-healthy recording. Meaningful only
+    // after stop() has resolved -- callers that care should warn the transcript may be
+    // incomplete rather than presenting it as a normal, complete recording.
+    function wasInterrupted() {
+        return recordingInterrupted;
+    }
+
+    return { start, stop, isSupported, getLevel, wasInterrupted };
 }

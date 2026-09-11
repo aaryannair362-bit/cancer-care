@@ -17,6 +17,7 @@ from .models_cca import (
     ClinicalBrief, MDTCase, MDTDecision, CCAIntakeAssessment, CCADocument,
     CCAOrder, CCAResult
 )
+from .models_cca_oncology_ext import CCARadiationPhase, RadiationFraction, RadiationPrescription
 from .scribe import scribe
 
 
@@ -238,7 +239,7 @@ def _must_not_miss_items(staging: Dict, contradictions: List, unverified_facts: 
 
 def synthesize_nexus_brief(db: Session, patient_id: int) -> Dict:
     """
-    Synthesizes the 13-section NEXUS Clinical Brief purely from verified facts.
+    Synthesizes the 15-section NEXUS Clinical Brief purely from verified facts.
     Never invents diagnoses or recommends unauthorized treatments.
     """
     patient = db.query(CCAPatient).filter(CCAPatient.id == patient_id).first()
@@ -272,6 +273,28 @@ def synthesize_nexus_brief(db: Session, patient_id: int) -> Dict:
     lab_results = [f for f in verified_facts if f.fact_type == "LAB_RESULT"]
 
     mdt_cases = db.query(MDTCase).filter(MDTCase.patient_id == patient_id).order_by(MDTCase.id.desc()).all()
+
+    # Radiation therapy (Oncology Review Results PDF item 5): pulled straight from the
+    # already-recorded course/phase/fraction records so a summary never requires re-typing
+    # site/dose/fractions/completion that a Radiation Oncologist/Technologist already
+    # entered through the Radiation Plan workflow.
+    radiation_courses = db.query(RadiationPrescription).filter(RadiationPrescription.patient_id == patient_id).all()
+    radiation_summary_parts: List[str] = []
+    for course in radiation_courses:
+        phases = db.query(CCARadiationPhase).filter(
+            CCARadiationPhase.prescription_id == course.id
+        ).order_by(CCARadiationPhase.phase_number).all()
+        for phase in phases:
+            delivered = db.query(RadiationFraction).filter(
+                RadiationFraction.phase_id == phase.id, RadiationFraction.status == "delivered"
+            ).count()
+            radiation_summary_parts.append(
+                f"Phase {phase.phase_number} ({phase.label}, {phase.treatment_site}"
+                f"{' ' + phase.laterality if phase.laterality else ''}): "
+                f"{phase.total_prescribed_dose_gy} Gy / {phase.number_of_fractions} fractions "
+                f"({phase.dose_per_fraction_gy} Gy/#) -- {delivered}/{phase.number_of_fractions} delivered, "
+                f"status: {phase.rt_sub_status.replace('_', ' ')}."
+            )
 
     uncertainty_reasons = []
     if staging["state"] != "CLINICIAN_CONFIRMED":
@@ -381,6 +404,10 @@ def synthesize_nexus_brief(db: Session, patient_id: int) -> Dict:
         "14_must_not_miss": {
             "title": "Must-Not-Miss Considerations",
             "content": " ".join(_must_not_miss_items(staging, contradictions, unverified_facts, biomarkers, diagnosis)) or "No unresolved must-not-miss considerations identified from the current verified record."
+        },
+        "15_radiation_therapy": {
+            "title": "Radiation Therapy Summary",
+            "content": " ".join(radiation_summary_parts) if radiation_summary_parts else "No radiation therapy on record."
         }
     }
     
@@ -501,6 +528,11 @@ _DOCUMENT_CLASS_KEYWORDS = {
     "LAB": ["hemoglobin", "haemoglobin", "creatinine", "leukocyte count", "platelet count", "biochemistry", "clinical pathology laboratory"],
     "REFERRAL": ["referral", "referring", "kindly evaluate", "please review and manage"],
     "CONSULT_NOTE": ["performance status", "outpatient clinical assessment", "clinical assessment", "history:"],
+    # Added for per-page classification (classify_and_extract_page below) -- a mixed case-file
+    # bundle can have a medication-order page alongside a case-history page, which whole-document
+    # classification never needed to distinguish before pages were classified individually.
+    "PRESCRIPTION": ["rx:", "sig:", " od ", " bd ", " tds ", " hs ", "prescribed medication", "take 1 tablet", "dispense"],
+    "INSURANCE": ["policy number", "sum insured", "tpa ", "mediclaim", "policy holder", "insurance company"],
 }
 
 
@@ -591,3 +623,109 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
             "confidence": confidence if isinstance(confidence, (int, float)) and 0 <= confidence <= 1 else 0.75,
         })
     return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Per-page classification (CCADocumentPage.page_type) -- see models_cca.py's CCADocumentPage
+# docstring and routers/document_pages.py's background task that calls this once per page.
+# ---------------------------------------------------------------------------
+
+PAGE_TYPES = (
+    "CASE_DETAILS", "PRESCRIPTION", "LAB_REPORT", "SCAN_IMAGING", "PATHOLOGY_REPORT",
+    "INSURANCE", "OTHER", "UNCLASSIFIED",
+)
+
+# Maps classify_document()'s whole-document buckets onto the (slightly broader) per-page
+# vocabulary above, so the same free keyword classifier serves both without duplicating it.
+_DOC_CLASS_TO_PAGE_TYPE = {
+    "HISTOPATHOLOGY": "PATHOLOGY_REPORT",
+    "PATHOLOGY": "PATHOLOGY_REPORT",
+    "IMAGING": "SCAN_IMAGING",  # a text-heavy radiology REPORT describing a scan, not the scan photo itself
+    "LAB": "LAB_REPORT",
+    "REFERRAL": "CASE_DETAILS",
+    "CONSULT_NOTE": "CASE_DETAILS",
+    "PRESCRIPTION": "PRESCRIPTION",
+    "INSURANCE": "INSURANCE",
+    "UNCLASSIFIED": "UNCLASSIFIED",
+}
+
+
+def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
+    """
+    Hybrid per-page classifier: free heuristic first, LLM only when it's actually needed.
+
+    1. A page ocr_service.extract_document_pages() already flagged image-heavy (an X-ray/MRI/CT
+       scan photograph with little or no extractable text) is SCAN_IMAGING by construction --
+       nothing to classify, no LLM call.
+    2. Otherwise, run the existing deterministic keyword classifier (classify_document(),
+       extended above with PRESCRIPTION/INSURANCE buckets) -- free, instant. A confident,
+       non-UNCLASSIFIED match is used directly.
+    3. Only when that's inconclusive: one Groq call combining page-type classification with
+       fact extraction (same FACT_TYPES/PROPOSED-only contract as extract_clinical_facts) into
+       a single JSON response -- one LLM round trip per ambiguous page instead of two.
+
+    Returns {"page_type": <one of PAGE_TYPES>, "confidence": float, "facts": List[Dict]} (facts
+    is empty unless step 3 ran). Never raises -- degrades to UNCLASSIFIED/0.0/[] on any failure,
+    matching extract_clinical_facts's "AI enrichment failing must never fail the document"
+    contract; this is best-effort enrichment, not something a document's existence depends on.
+    """
+    if is_image_heavy:
+        return {"page_type": "SCAN_IMAGING", "confidence": 0.9, "facts": []}
+
+    if not text or not text.strip():
+        return {"page_type": "UNCLASSIFIED", "confidence": 0.0, "facts": []}
+
+    doc_cls, confidence = classify_document(text)
+    if doc_cls != "UNCLASSIFIED":
+        return {"page_type": _DOC_CLASS_TO_PAGE_TYPE.get(doc_cls, "OTHER"), "confidence": confidence, "facts": []}
+
+    system = (
+        "You are a clinical document page classifier and fact-extraction assistant for an "
+        "oncology chart. Classify this single page into exactly one of: " + "|".join(PAGE_TYPES) +
+        " (CASE_DETAILS = referral/consult/case-history notes; PRESCRIPTION = a medication "
+        "order; LAB_REPORT = lab/blood-work results; PATHOLOGY_REPORT = biopsy/histopathology/"
+        "IHC; SCAN_IMAGING = a radiology report describing an X-ray/CT/MRI/ultrasound; "
+        "INSURANCE = an insurance/policy document; OTHER = none of the above but still "
+        "relevant; UNCLASSIFIED = cannot tell). Then extract ONLY facts explicitly and "
+        "literally stated in the text -- never infer, estimate, or guess a value that is not "
+        'written down. Return strict JSON of the shape {"page_type": "<one of the types '
+        'above>", "confidence": <0.0-1.0>, "facts": [{"fact_type": "<one of ' +
+        "|".join(FACT_TYPES) + '>", "value": "<short structured value>", "verbatim": "<exact '
+        'quoted source text, at most roughly 15 words>", "confidence": <0.0-1.0>}]}. If no '
+        'facts are found, return an empty "facts" array. Never include markdown or commentary '
+        "outside the JSON object."
+    )
+    prompt = f"Classify and extract clinical facts from this page:\n\n{text[:6000]}"
+
+    try:
+        result = scribe._generate_json(prompt, system=system, max_tokens=4000)
+    except Exception:
+        return {"page_type": "UNCLASSIFIED", "confidence": 0.0, "facts": []}
+    if not isinstance(result, dict):
+        return {"page_type": "UNCLASSIFIED", "confidence": 0.0, "facts": []}
+
+    page_type = result.get("page_type")
+    if page_type not in PAGE_TYPES:
+        page_type = "UNCLASSIFIED"
+    page_confidence = result.get("confidence")
+    page_confidence = page_confidence if isinstance(page_confidence, (int, float)) and 0 <= page_confidence <= 1 else 0.5
+
+    raw_facts = result.get("facts")
+    facts: List[Dict] = []
+    if isinstance(raw_facts, list):
+        for f in raw_facts:
+            if not isinstance(f, dict):
+                continue
+            fact_type = f.get("fact_type")
+            value = f.get("value")
+            if fact_type not in FACT_TYPES or not value:
+                continue
+            fact_confidence = f.get("confidence")
+            facts.append({
+                "fact_type": fact_type,
+                "value": str(value)[:500],
+                "verbatim": str(f.get("verbatim") or "")[:1000],
+                "confidence": fact_confidence if isinstance(fact_confidence, (int, float)) and 0 <= fact_confidence <= 1 else 0.75,
+            })
+
+    return {"page_type": page_type, "confidence": page_confidence, "facts": facts}

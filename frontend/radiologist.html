@@ -60,6 +60,7 @@
         .worklist-row { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; margin-bottom: 10px; display: grid; grid-template-columns: 1.3fr 1fr 1fr 0.8fr auto; gap: 14px; align-items: center; }
         .wl-label { font-size: 11px; color: var(--ink-500); text-transform: uppercase; margin-bottom: 2px; }
         .wl-value { font-size: 13.5px; font-weight: 700; color: var(--ink-900); }
+        .special-instructions { background: var(--amber-badge-bg); color: var(--amber-badge-text); padding: 8px 12px; border-radius: var(--radius-sm); font-size: 12.5px; font-weight: 600; margin-bottom: 10px; }
         .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
         .form-group { display: flex; flex-direction: column; gap: 6px; }
         .form-label { font-size: 12px; font-weight: 600; color: var(--ink-700); }
@@ -118,6 +119,7 @@
             <div class="sidebar-section-title">IMAGING</div>
             <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Patients</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-imaging" onclick="showTab('imaging')"><div class="nav-item-left"><span>🩻</span><span>Imaging Worklist</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-worklist" onclick="showTab('worklist')"><div class="nav-item-left"><span>🎯</span><span>Fraction Delivery</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-history" onclick="showTab('history')"><div class="nav-item-left"><span>🗂️</span><span>Patient History</span></div><span class="nav-chevron">›</span></a>
             <div class="sidebar-section-title">COORDINATION</div>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
@@ -138,6 +140,12 @@
                 <h1 class="page-title">Imaging Worklist</h1>
                 <p class="page-subtitle">Radiology orders across the census — schedule, track preparation, and draft/finalize reports.</p>
                 <div id="imaging-content"><!-- Populated via JS: loadImagingWorklist() --></div>
+            </div>
+
+            <div id="view-worklist" class="view-panel">
+                <h1 class="page-title">Fraction Delivery Worklist</h1>
+                <p class="page-subtitle">Phases ready for or currently on treatment. Each phase's Special Instructions are shown here throughout delivery (Oncology Review Results PDF item 21). Radiation Technologist duties are covered by the Radiologist login in this hospital's role structure.</p>
+                <div id="worklist-content"><!-- Populated via JS: loadTechWorklist() --></div>
             </div>
 
             <div id="view-history" class="view-panel">
@@ -209,7 +217,6 @@
 
     <script src="/static/js/api.js"></script>
     <script src="/static/js/cca-summary.js"></script>
-    <script src="/static/js/voice-capture.js"></script>
     <script>
         const ccaUser = Auth.requirePage(['CCARadiologist', 'Doctor', 'Admin']);
         const CCA_API = '/cca';
@@ -222,6 +229,7 @@
             document.getElementById(`nav-${tab}`).classList.add('active');
             if (tab === 'patients') loadPatientQueue();
             if (tab === 'imaging') loadImagingWorklist();
+            if (tab === 'worklist') loadTechWorklist();
             if (tab === 'history') renderCaseSummaryPanel('history-content', currentPatientId);
             if (tab === 'mdt') loadMdtCases();
             if (tab === 'nexus') loadNexusBanner();
@@ -309,87 +317,21 @@
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
         }
 
-        let scribeVoiceRecorder = null;
-        let scribeTranscriptionProvider = 'whisper';
-        let lastScribeMedications = [];
-
-        async function initScribeRecorder() {
-            if (typeof createVoiceRecorder !== 'function') return;
-            try {
-                const provider = await Api.get('/transcription-provider');
-                scribeTranscriptionProvider = provider.provider === 'sarvam' ? 'sarvam' : 'whisper';
-            } catch (err) { scribeTranscriptionProvider = 'whisper'; }
-            scribeVoiceRecorder = createVoiceRecorder({ apiBase: '/api', getAuthToken: () => Auth.getAccessToken(), provider: scribeTranscriptionProvider });
-        }
-
-        async function startScribeRecording() {
-            const statusEl = document.getElementById('scribe-mic-status');
-            if (!scribeVoiceRecorder) await initScribeRecorder();
-            if (!scribeVoiceRecorder || !scribeVoiceRecorder.isSupported()) {
-                if (statusEl) statusEl.textContent = '❌ Microphone not supported — type transcript manually.';
-                return;
-            }
-            try {
-                await scribeVoiceRecorder.start();
-                document.getElementById('scribe-start-btn').style.display = 'none';
-                document.getElementById('scribe-stop-btn').style.display = 'inline-block';
-                if (statusEl) statusEl.textContent = '🔴 Listening... Click Stop when finished speaking.';
-            } catch (err) {
-                if (statusEl) statusEl.textContent = `❌ ${err.message || 'Mic access denied'}`;
-            }
-        }
-
-        async function stopScribeRecording() {
-            const statusEl = document.getElementById('scribe-mic-status');
-            document.getElementById('scribe-start-btn').style.display = 'inline-block';
-            document.getElementById('scribe-stop-btn').style.display = 'none';
-            if (!scribeVoiceRecorder) return;
-            if (statusEl) statusEl.textContent = 'Transcribing...';
-            try {
-                const transcript = await scribeVoiceRecorder.stop();
-                document.getElementById('scribe-transcript').value = transcript;
-                if (statusEl) statusEl.textContent = transcript ? '✅ Transcribed. Review below, then click Generate AI Draft.' : 'No speech detected — type manually.';
-            } catch (err) {
-                if (statusEl) statusEl.textContent = `⚠️ ${err.message || 'Transcription failed'} — type transcript manually.`;
-            }
-        }
-
-        async function generateAiDraftForRadiology() {
-            const statusEl = document.getElementById('scribe-status');
-            const transcript = document.getElementById('scribe-transcript').value.trim();
-            if (transcript.length < 10) { toast('Transcript is too short to draft from', 'error'); return; }
-            if (statusEl) statusEl.textContent = 'Generating AI draft...';
-            try {
-                const data = await Api.post(`${CCA_API}/scribe-extract`, { transcript });
-                if (document.getElementById('img-findings') && (data.hpi || data.chiefComplaint)) {
-                    const findingsText = [data.chiefComplaint, data.hpi].filter(Boolean).join('\n');
-                    if (findingsText) document.getElementById('img-findings').value = findingsText;
-                }
-                if (document.getElementById('img-impression') && (data.primaryDiagnosis || data.advice)) {
-                    const impressionText = [data.primaryDiagnosis, data.advice].filter(Boolean).join('\n');
-                    if (impressionText) document.getElementById('img-impression').value = impressionText;
-                }
-                renderDetectedMedications(data.medications || []);
-                renderDetectedLabTests(data.labTests || [], data.primaryDiagnosis || '');
-                if (statusEl) statusEl.textContent = '✅ AI draft generated — review Findings, Impression, Medications, and Labs.';
-                toast('AI draft generated', 'success');
-            } catch (err) { if (statusEl) statusEl.textContent = ''; toast(apiErrorMessage(err), 'error'); }
-        }
-
+        let lastImagingMedications = [];
         let lastDetectedLabTests = [];
 
         function renderDetectedMedications(medications) {
-            if (medications) lastScribeMedications = medications;
+            if (medications) lastImagingMedications = medications;
             const container = document.getElementById('order-detected-medications');
             if (!container) return;
 
             let html = '';
-            if (!lastScribeMedications.length) {
-                html = '<p style="color:var(--ink-500); font-size:12.5px; margin:0 0 10px 0;">No medications detected in dictation transcript yet.</p>';
+            if (!lastImagingMedications.length) {
+                html = '<p style="color:var(--ink-500); font-size:12.5px; margin:0 0 10px 0;">No medications added yet.</p>';
             } else {
                 html = '<div style="font-size:12px; color:var(--ink-600); margin-bottom:8px;">Checked prescriptions below will be captured with your report:</div>' +
                     '<div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:10px; margin-bottom:12px;">' +
-                    lastScribeMedications.map((m, i) => {
+                    lastImagingMedications.map((m, i) => {
                         const name = escapeHtml(m.drugName || m.name || 'Medicine');
                         const dose = escapeHtml(m.dosage || m.dose || '');
                         const freq = escapeHtml(m.frequency || '');
@@ -428,7 +370,7 @@
                 instructions: "Manually added by clinician"
             };
 
-            lastScribeMedications.push(newMed);
+            lastImagingMedications.push(newMed);
             renderDetectedMedications();
             toast(`Added "${drugName.trim()}" to prescriptions list`, 'success');
         }
@@ -440,7 +382,7 @@
 
             let html = '';
             if (!lastDetectedLabTests.length) {
-                html = '<p style="color:var(--ink-500); font-size:12.5px; margin:0 0 10px 0;">No lab tests detected in dictation transcript yet.</p>';
+                html = '<p style="color:var(--ink-500); font-size:12.5px; margin:0 0 10px 0;">No lab tests added yet.</p>';
             } else {
                 html = '<div style="font-size:12px; color:var(--ink-600); margin-bottom:8px;">Checked lab tests below will be captured:</div>' +
                     '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:12px;">' +
@@ -483,55 +425,41 @@
                     <button class="btn-outline" onclick="submitImagingSchedule(${orderId})">📅 Schedule</button>
                     <hr style="margin:18px 0; border:none; border-top:1px solid var(--line);" />
 
-                    <!-- AI Scribe Dictation Panel for Radiologist -->
-                    <div style="background:var(--bg-card-subtle); border:1px solid var(--line); border-radius:var(--radius-md); padding:16px; margin-bottom:18px;">
-                        <div class="section-title" style="font-size:14px; margin-bottom:4px;">AI Scribe (Voice Dictation)</div>
-                        <div class="section-sub" style="margin-bottom:10px;">Dictate findings or paste text to auto-populate Findings, Impression, Medications, and Labs.</div>
-                        <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
-                            <button class="btn-navy" id="scribe-start-btn" onclick="startScribeRecording()">🎤 Start Recording</button>
-                            <button class="btn-outline" id="scribe-stop-btn" onclick="stopScribeRecording()" style="display:none;">⏹ Stop &amp; Transcribe</button>
-                            <span id="scribe-mic-status" style="font-size:12px; color:var(--ink-500);"></span>
-                        </div>
-                        <div class="form-group" style="margin-bottom:10px;">
-                            <textarea id="scribe-transcript" class="form-textarea" rows="3" placeholder="Speak using Start Recording, or type/paste dictation transcript here..."></textarea>
-                        </div>
-                        <button class="btn-outline" onclick="generateAiDraftForRadiology()">✨ Generate AI Draft</button>
-                        <div id="scribe-status" style="font-size:12px; margin-top:6px; color:var(--ink-500);"></div>
-                    </div>
-
                     <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Findings</label><textarea id="img-findings" class="form-textarea" rows="3">${escapeHtml(draft ? draft.findings_text || '' : '')}</textarea></div>
                     <div class="form-group" style="margin-bottom:14px;"><label class="form-label">Impression</label><textarea id="img-impression" class="form-textarea" rows="2">${escapeHtml(draft ? draft.impression || '' : '')}</textarea></div>
 
                     <!-- Prescribed Medicines / Prescriptions section -->
                     <div style="background:var(--bg-card-subtle); border:1px solid var(--line); border-radius:var(--radius-md); padding:14px; margin-bottom:14px;">
                         <div style="font-size:13px; font-weight:700; color:var(--ink-900); margin-bottom:4px;">Prescribed Medicines / Prescriptions</div>
-                        <div style="font-size:11.5px; color:var(--ink-500); margin-bottom:8px;">Medications mentioned during dictation/transcript.</div>
-                        <div id="order-detected-medications" style="font-size:12px; color:var(--ink-500);">No medications detected yet. Generate an AI draft to populate.</div>
+                        <div style="font-size:11.5px; color:var(--ink-500); margin-bottom:8px;">Medications relevant to this report.</div>
+                        <div id="order-detected-medications" style="font-size:12px; color:var(--ink-500);"></div>
                     </div>
 
                     <!-- Detected Lab Tests section -->
                     <div style="background:var(--bg-card-subtle); border:1px solid var(--line); border-radius:var(--radius-md); padding:14px; margin-bottom:16px;">
                         <div style="font-size:13px; font-weight:700; color:var(--ink-900); margin-bottom:4px;">Detected Lab Tests / Follow-up Workup</div>
-                        <div style="font-size:11.5px; color:var(--ink-500); margin-bottom:8px;">Follow-up lab tests mentioned during dictation/transcript.</div>
-                        <div id="order-detected-tests" style="font-size:12px; color:var(--ink-500);">No lab tests detected yet. Generate an AI draft to populate.</div>
+                        <div style="font-size:11.5px; color:var(--ink-500); margin-bottom:8px;">Follow-up lab tests relevant to this report.</div>
+                        <div id="order-detected-tests" style="font-size:12px; color:var(--ink-500);"></div>
                     </div>
 
                     <button class="btn-outline" onclick="submitImagingReport(${orderId})">💾 Save Draft</button>
                     ${draft ? `<button class="btn-navy" onclick="submitImagingFinalize(${draft.id})">✍️ Finalize Report</button>` : ''}
                     <div id="imaging-detail-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
                 `;
+                renderDetectedMedications([]);
+                renderDetectedLabTests([], '');
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
         function getSelectedMedications() {
             const checkboxes = document.querySelectorAll('.detected-medication-checkbox');
-            if (!checkboxes.length) return lastScribeMedications;
+            if (!checkboxes.length) return lastImagingMedications;
             const selected = [];
             checkboxes.forEach(cb => {
                 if (cb.checked) {
                     const idx = parseInt(cb.value, 10);
-                    if (lastScribeMedications[idx]) {
-                        selected.push(lastScribeMedications[idx]);
+                    if (lastImagingMedications[idx]) {
+                        selected.push(lastImagingMedications[idx]);
                     }
                 }
             });
@@ -562,6 +490,74 @@
                 await Api.post(`${CCA_API}/imaging/results/${resultId}/finalize`);
                 toast('Report finalized', 'success');
                 loadImagingWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---------------------------------------------------------------
+        // Fraction Delivery Worklist (Radiation Technologist duties, covered by this login --
+        // see Auth.requirePage above and record_radiation_fraction_event's docstring)
+        // ---------------------------------------------------------------
+        async function loadTechWorklist() {
+            const container = document.getElementById('worklist-content');
+            try {
+                const data = await Api.get(`${CCA_API}/radiation-phases/worklist`);
+                const rows = (data.worklist || []).filter(p => ['treatment_ready', 'on_treatment', 'interrupted'].includes(p.rt_sub_status));
+                if (!rows.length) {
+                    container.innerHTML = '<div class="section-card"><p style="font-size:12.5px; color:var(--ink-500);">No phases currently ready for or on treatment.</p></div>';
+                    return;
+                }
+                container.innerHTML = (await Promise.all(rows.map(p => renderTechPhaseCard(p)))).join('');
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function renderTechPhaseCard(p) {
+            let fractions = [];
+            try {
+                const data = await Api.get(`${CCA_API}/radiation-phases/${p.id}/fractions`);
+                fractions = data.fractions || [];
+            } catch (err) { /* fall through with empty list */ }
+            const delivered = fractions.filter(f => f.status === 'delivered').length;
+            const nextFraction = fractions.find(f => f.status === 'scheduled');
+
+            return `
+                <div class="section-card">
+                    <div class="section-head">
+                        <div>
+                            <div class="section-title">${escapeHtml(p.patient_name)} <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(p.patient_mrn)}</span></div>
+                            <div class="section-sub">Phase ${p.phase_number} — ${escapeHtml(p.label)} · ${escapeHtml(p.treatment_site)} · ${delivered} of ${p.number_of_fractions} fractions delivered</div>
+                        </div>
+                        <span class="badge ${p.rt_sub_status === 'interrupted' ? 'badge-rose' : 'badge-green'}">${escapeHtml(p.rt_sub_status.replace(/_/g, ' '))}</span>
+                    </div>
+                    ${p.special_instructions ? `<div class="special-instructions">⚠ Special Instructions: ${escapeHtml(p.special_instructions)}</div>` : ''}
+                    ${nextFraction ? `
+                        <div class="wl-label">Next Fraction</div>
+                        <div class="wl-value" style="margin-bottom:12px;">#${nextFraction.fraction_number} of ${p.number_of_fractions}</div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Delivered dose (Gy)</label><input type="number" step="0.01" id="fx-dose-${nextFraction.id}" class="form-input" value="${p.dose_per_fraction_gy || ''}" /></div>
+                            <div class="form-group"><label class="form-label">Outcome</label>
+                                <select id="fx-status-${nextFraction.id}" class="form-select">
+                                    <option value="delivered">Delivered</option>
+                                    <option value="missed">Missed</option>
+                                    <option value="rescheduled">Rescheduled</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Variance / Toxicity noted (if any)</label><textarea id="fx-variance-${nextFraction.id}" class="form-textarea" rows="2" placeholder="e.g. setup shift corrected, Grade 1 skin erythema"></textarea></div>
+                        <button class="btn-navy" onclick="recordFraction(${nextFraction.id})">Record Fraction</button>
+                    ` : '<p style="font-size:12.5px; color:var(--ink-500);">No fractions currently scheduled for this phase.</p>'}
+                </div>
+            `;
+        }
+
+        async function recordFraction(fractionId) {
+            try {
+                await Api.post(`${CCA_API}/radiation-fractions/${fractionId}/event`, {
+                    status: document.getElementById(`fx-status-${fractionId}`).value,
+                    delivered_dose_gy: Number(document.getElementById(`fx-dose-${fractionId}`).value) || undefined,
+                    variance_or_toxicity: document.getElementById(`fx-variance-${fractionId}`).value || undefined,
+                });
+                toast('Fraction recorded', 'success');
+                loadTechWorklist();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

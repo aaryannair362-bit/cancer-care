@@ -94,6 +94,7 @@
             <div class="sidebar-section-title">COORDINATION</div>
             <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Patients</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-coordination" onclick="showTab('coordination')"><div class="nav-item-left"><span>🧭</span><span>Care Coordination</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-appointments" onclick="showTab('appointments')"><div class="nav-item-left"><span>📅</span><span>Appointments</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-history" onclick="showTab('history')"><div class="nav-item-left"><span>🗂️</span><span>Patient History</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
         </aside>
@@ -114,6 +115,12 @@
                     <button class="btn-navy" onclick="submitCreateCase()">+ Open Coordination Case</button>
                 </div>
                 <div id="coordination-content"><!-- Populated via JS: loadCoordinationQueue() --></div>
+            </div>
+
+            <div id="view-appointments" class="view-panel">
+                <h1 class="page-title">Appointments</h1>
+                <p class="page-subtitle">Hospital-wide appointment coordination — every department appointment being navigated for the current oncology caseload, upcoming first.</p>
+                <div id="appointments-content"><!-- Populated via JS: loadAppointmentsQueue() --></div>
             </div>
 
             <div id="view-history" class="view-panel">
@@ -159,6 +166,7 @@
             document.getElementById(`nav-${tab}`).classList.add('active');
             if (tab === 'patients') loadPatientQueue();
             if (tab === 'coordination') loadCoordinationQueue();
+            if (tab === 'appointments') loadAppointmentsQueue();
             if (tab === 'history') renderCaseSummaryPanel('history-content', currentPatientId);
             if (tab === 'nexus') loadNexusBanner();
         }
@@ -264,8 +272,71 @@
                         <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
                         <div class="form-group"><label class="form-label">Next action</label><input type="text" id="coord-next-${caseId}" class="form-input" value="${escapeHtml(c.next_action || '')}" /></div>
                         <button class="btn-navy" onclick="submitNextAction(${caseId})">💾 Save Next Action</button>
+                        <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
+                        <div class="section-title" style="font-size:14px; margin-bottom:8px;">Appointments</div>
+                        <div id="coord-appointments-${caseId}"></div>
+                        <div class="form-group" style="margin-top:10px;"><label class="form-label">Department</label><input type="text" id="coord-appt-dept-${caseId}" class="form-input" placeholder="e.g. Radiology, Surgery, Lab" /></div>
+                        <div class="form-group"><label class="form-label">Date &amp; time</label><input type="datetime-local" id="coord-appt-when-${caseId}" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Purpose / location</label><input type="text" id="coord-appt-purpose-${caseId}" class="form-input" /></div>
+                        <button class="btn-outline" onclick="submitCoordinationAppointment(${caseId}, ${c.patient_id})">+ Coordinate Appointment</button>
                     </div>
                 `;
+                loadCaseAppointments(caseId, c.patient_id);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadCaseAppointments(caseId, patientId) {
+            const el = document.getElementById(`coord-appointments-${caseId}`);
+            try {
+                const data = await Api.get(`${CCA_API}/coordination/appointments?patient_id=${patientId}`);
+                el.innerHTML = (data.results || []).map(a => `
+                    <div class="barrier-row">${escapeHtml(a.department)} — ${new Date(a.scheduled_at).toLocaleString()} · <strong>${escapeHtml(a.status)}</strong>${a.location ? ' · ' + escapeHtml(a.location) : ''}</div>
+                `).join('') || '<div class="barrier-row">No appointments coordinated yet.</div>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitCoordinationAppointment(caseId, patientId) {
+            const department = document.getElementById(`coord-appt-dept-${caseId}`).value;
+            const when = document.getElementById(`coord-appt-when-${caseId}`).value;
+            if (!department || !when) { toast('Department and date/time are required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/coordination/appointments`, {
+                    patient_id: patientId, coordination_case_id: caseId, department,
+                    scheduled_at: new Date(when).toISOString(),
+                    purpose: document.getElementById(`coord-appt-purpose-${caseId}`).value || null,
+                });
+                toast('Appointment coordinated', 'success');
+                loadCaseAppointments(caseId, patientId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadAppointmentsQueue() {
+            const container = document.getElementById('appointments-content');
+            try {
+                const data = await Api.get(`${CCA_API}/coordination/appointments?upcoming_only=true`);
+                const rows = data.results || [];
+                container.innerHTML = `<div class="section-card"><div class="section-title" style="margin-bottom:14px;">Upcoming Coordinated Appointments</div>` +
+                    (rows.length ? rows.map(a => `
+                        <div class="worklist-row" style="grid-template-columns: 1.2fr 1fr 1fr 0.8fr auto;">
+                            <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(a.patient_name)}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(a.patient_mrn)}</div></div>
+                            <div><div class="wl-label">Department</div><div class="wl-value" style="font-size:13px;">${escapeHtml(a.department)}</div></div>
+                            <div><div class="wl-label">When</div><div class="wl-value" style="font-size:13px;">${new Date(a.scheduled_at).toLocaleString()}</div></div>
+                            <div><span class="badge ${a.status === 'Confirmed' ? 'badge-green' : 'badge-blue'}">${escapeHtml(a.status)}</span></div>
+                            <div style="display:flex; flex-direction:column; gap:4px;">
+                                ${a.status === 'Scheduled' ? `<button class="btn-navy" style="font-size:11px; padding:6px 10px;" onclick="updateAppointmentStatus(${a.id}, 'Confirmed')">Confirm</button>` : ''}
+                                <button class="btn-outline" style="font-size:11px; padding:6px 10px;" onclick="updateAppointmentStatus(${a.id}, 'Completed')">Completed</button>
+                                <button class="btn-outline" style="font-size:11px; padding:6px 10px; color:var(--rose-badge-text);" onclick="updateAppointmentStatus(${a.id}, 'Missed')">Missed</button>
+                            </div>
+                        </div>
+                    `).join('') : '<p style="color:var(--ink-500); font-size:13px;">No upcoming appointments coordinated.</p>') + `</div>`;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function updateAppointmentStatus(appointmentId, status) {
+            try {
+                await Api.patch(`${CCA_API}/coordination/appointments/${appointmentId}`, { status });
+                toast('Appointment updated', 'success');
+                loadAppointmentsQueue();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

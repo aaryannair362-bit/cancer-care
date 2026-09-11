@@ -18,12 +18,18 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
+from ..auth import (
+    get_current_user, is_admin, is_cca_radiation_physicist, is_cca_radiologist,
+    is_cca_surgical_nurse, is_cca_surgical_oncologist, is_cca_medical_oncologist,
+    is_cca_radiation_oncologist, is_cca_palliative_care_specialist,
+)
 from ..models_cca import CCAPatient, DomainEvent, MDTCase
 from ..models_cca import ResponseAssessment, ToxicityEvent, TreatmentPlan
 from ..models_cca_oncology_ext import (
-    OncologyRecordExtension, RadiationFraction, RadiationPrescription, Regimen,
-    RegimenDrugLine, SurgicalPlan, TreatmentPlanPhase,
+    CCARadiationPhase, OncologyRecordExtension, RadiationFraction, RadiationPrescription,
+    Regimen, RegimenDrugLine, SurgicalPlan, TreatmentPlanPhase,
+    SurgicalIntraOpMonitoring, SurgicalOperativeNote, SurgicalSpecimen, SurgicalBloodTransfusion,
+    ClinicalProcedureNote, PalliativeTreatmentOrder,
 )
 from ..events import publish
 from .cca import (
@@ -40,6 +46,16 @@ RT_SUB_STATUS_ORDER = [
     "prescribed", "simulation_pending", "simulation_complete", "contouring", "planning",
     "physics_qa", "physician_approved", "treatment_ready", "on_treatment", "completed",
 ]
+# Which role predicate is authorized to drive a phase INTO each status (i.e. the check runs
+# against the target status, not the current one) -- Oncology Review Results PDF item 20:
+# RT planning (simulation through physics QA) is the Physicist's action; prescribing the
+# phase and giving final treatment approval are the Radiation Oncologist's. Steps not listed
+# (treatment_ready, on_treatment, completed) stay Radiation-Oncologist-gated, matching the
+# original single-gate behavior for the parts of the pipeline that were never the gap here.
+_RT_PHASE_STEP_ROLE = {
+    "simulation_pending": "physicist", "simulation_complete": "physicist", "contouring": "physicist",
+    "planning": "physicist", "physics_qa": "physicist", "physician_approved": "radiation_oncologist",
+}
 SURGICAL_STATUS_ORDER = [
     "recommended", "surgeon_reviewed", "planned", "pre_op_ready", "scheduled", "performed",
     "post_op", "histopathology_available",
@@ -54,6 +70,26 @@ def _get_org_radiation_prescription(db: Session, prescription_id: int, org_id: i
     return rx
 
 
+def _get_org_radiation_phase(db: Session, phase_id: int, org_id: int) -> tuple[CCARadiationPhase, RadiationPrescription]:
+    phase = db.query(CCARadiationPhase).filter(CCARadiationPhase.id == phase_id).first()
+    if not phase:
+        raise HTTPException(404, "Radiation phase not found")
+    rx = _get_org_radiation_prescription(db, phase.prescription_id, org_id)
+    return phase, rx
+
+
+def _require_rt_phase_step_signer(current_user: dict, target_status: str):
+    """See _RT_PHASE_STEP_ROLE above. Admin never bypasses this (matching
+    _require_modality_signer's own rule) -- Admin/Operations cannot author clinical steps,
+    only observe."""
+    who = _RT_PHASE_STEP_ROLE.get(target_status, "radiation_oncologist")
+    if who == "physicist":
+        if not is_cca_radiation_physicist(current_user):
+            raise HTTPException(403, "Only the Radiation Physicist may perform this planning/physics step")
+    else:
+        _require_modality_signer(current_user, "radiation")
+
+
 def _get_org_surgical_plan(db: Session, plan_id: int, org_id: int) -> SurgicalPlan:
     plan = db.query(SurgicalPlan).filter(SurgicalPlan.id == plan_id).first()
     if not plan:
@@ -62,30 +98,51 @@ def _get_org_surgical_plan(db: Session, plan_id: int, org_id: int) -> SurgicalPl
     return plan
 
 
+def _require_surgical_team(current_user: dict):
+    """Gate for the OR documentation items (Gap Analysis PDF items 24-27): the operating
+    Surgical Oncologist or the Surgical Nurse present in theatre -- deliberately narrower than
+    _require_clinical_or_nursing_role (which admits Day Care's Infusion Nurse and general
+    Doctor, neither of whom document an operation)."""
+    if not (is_cca_surgical_oncologist(current_user) or is_cca_surgical_nurse(current_user)):
+        raise HTTPException(403, "Only the Surgical Oncologist or Surgical Nurse may perform this action")
+
+
 def _rt_prescription_out(rx: RadiationPrescription) -> dict:
     return {
         "id": rx.id, "patient_id": rx.patient_id, "mdt_case_id": rx.mdt_case_id,
-        "diagnosis": rx.diagnosis, "treatment_site": rx.treatment_site, "laterality": rx.laterality,
-        "intent": rx.intent, "modality": rx.modality, "technique": rx.technique,
-        "treatment_phase": rx.treatment_phase, "total_prescribed_dose_gy": rx.total_prescribed_dose_gy,
-        "dose_per_fraction_gy": rx.dose_per_fraction_gy, "number_of_fractions": rx.number_of_fractions,
-        "frequency": rx.frequency, "start_date": rx.start_date.isoformat() if rx.start_date else None,
+        "diagnosis": rx.diagnosis, "intent": rx.intent, "modality": rx.modality, "technique": rx.technique,
         "concurrent_systemic_treatment": rx.concurrent_systemic_treatment,
-        "target_volumes": rx.target_volumes, "organs_at_risk": rx.organs_at_risk,
-        "simulation_required": rx.simulation_required, "immobilization": rx.immobilization,
-        "image_guidance_required": rx.image_guidance_required, "bolus": rx.bolus,
         "special_instructions": rx.special_instructions, "dicom_rt_plan_ref": rx.dicom_rt_plan_ref,
-        "rt_sub_status": rx.rt_sub_status, "signer_email": rx.signer_email, "signer_role": rx.signer_role,
+        "signer_email": rx.signer_email, "signer_role": rx.signer_role,
         "signed_at": rx.signed_at.isoformat() if rx.signed_at else None, "created_by": rx.created_by,
+    }
+
+
+def _rt_phase_out(p: CCARadiationPhase) -> dict:
+    return {
+        "id": p.id, "prescription_id": p.prescription_id, "phase_number": p.phase_number, "label": p.label,
+        "treatment_site": p.treatment_site, "laterality": p.laterality,
+        "target_volumes": p.target_volumes, "organs_at_risk": p.organs_at_risk,
+        "total_prescribed_dose_gy": p.total_prescribed_dose_gy, "dose_per_fraction_gy": p.dose_per_fraction_gy,
+        "number_of_fractions": p.number_of_fractions, "frequency": p.frequency,
+        "simulation_required": p.simulation_required, "immobilization": p.immobilization,
+        "image_guidance_required": p.image_guidance_required, "bolus": p.bolus,
+        "rt_sub_status": p.rt_sub_status,
+        "physicist_signer_email": p.physicist_signer_email, "physicist_signer_role": p.physicist_signer_role,
+        "physicist_signed_at": p.physicist_signed_at.isoformat() if p.physicist_signed_at else None,
+        "physician_signer_email": p.physician_signer_email, "physician_signer_role": p.physician_signer_role,
+        "physician_signed_at": p.physician_signed_at.isoformat() if p.physician_signed_at else None,
+        "created_by": p.created_by,
     }
 
 
 def _rt_fraction_out(f: RadiationFraction) -> dict:
     return {
-        "id": f.id, "prescription_id": f.prescription_id, "fraction_number": f.fraction_number,
+        "id": f.id, "phase_id": f.phase_id, "fraction_number": f.fraction_number,
         "scheduled_date": f.scheduled_date.isoformat() if f.scheduled_date else None,
         "status": f.status, "delivered_dose_gy": f.delivered_dose_gy,
         "interruption_reason": f.interruption_reason, "on_treatment_review_note": f.on_treatment_review_note,
+        "variance_or_toxicity": f.variance_or_toxicity,
         "recorded_by": f.recorded_by, "recorded_at": f.recorded_at.isoformat() if f.recorded_at else None,
     }
 
@@ -167,35 +224,31 @@ def get_or_create_demo_patient(db: Session = Depends(get_cca_db), current_user: 
 
 @router.post("/radiation-prescriptions", status_code=201)
 async def create_radiation_prescription(request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
-    _require_clinician(current_user)
+    """Creates the COURSE shell only -- site/dose/fractions are added per-phase via
+    POST /radiation-prescriptions/{id}/phases below (Oncology Review Results PDF item 3:
+    one course may contain more than one dose phase, each with its own target/dose/
+    fractions; a single-phase course is just a course with one phase, no special-casing)."""
+    _require_modality_signer(current_user, "radiation")
     body = await request.json()
     patient_id = body.get("patient_id")
     if patient_id is None:
         raise HTTPException(422, "patient_id is required")
     _get_org_patient(db, patient_id, _org_id(current_user))
-    for field in ("treatment_site", "total_prescribed_dose_gy", "dose_per_fraction_gy", "number_of_fractions"):
-        if body.get(field) in (None, ""):
-            raise HTTPException(422, f"{field} is required")
 
     rx = RadiationPrescription(
         patient_id=patient_id, mdt_case_id=body.get("mdt_case_id"), diagnosis=body.get("diagnosis"),
-        treatment_site=body["treatment_site"], laterality=body.get("laterality"), intent=body.get("intent"),
-        modality=body.get("modality"), technique=body.get("technique"), treatment_phase=body.get("treatment_phase"),
-        total_prescribed_dose_gy=body["total_prescribed_dose_gy"], dose_per_fraction_gy=body["dose_per_fraction_gy"],
-        number_of_fractions=body["number_of_fractions"], frequency=body.get("frequency"),
-        start_date=body.get("start_date"), concurrent_systemic_treatment=bool(body.get("concurrent_systemic_treatment", False)),
-        target_volumes=body.get("target_volumes"), organs_at_risk=body.get("organs_at_risk"),
-        simulation_required=bool(body.get("simulation_required", True)), immobilization=body.get("immobilization"),
-        image_guidance_required=bool(body.get("image_guidance_required", True)), bolus=body.get("bolus"),
+        intent=body.get("intent"), modality=body.get("modality"), technique=body.get("technique"),
+        concurrent_systemic_treatment=bool(body.get("concurrent_systemic_treatment", False)),
         special_instructions=body.get("special_instructions"), dicom_rt_plan_ref=body.get("dicom_rt_plan_ref"),
+        signer_email=current_user.get("email"), signer_role=current_user.get("role"), signed_at=datetime.utcnow(),
         created_by=_actor(current_user),
     )
     db.add(rx)
     db.flush()
     publish(
         db, "RADIATION_PRESCRIPTION_CREATED", patient_id=patient_id, actor=_actor(current_user),
-        role=current_user.get("role"), title="Radiation prescription created", category="TREATMENT",
-        description=f"{_actor(current_user)} prescribed {rx.total_prescribed_dose_gy} Gy / {rx.number_of_fractions} fractions to {rx.treatment_site}.",
+        role=current_user.get("role"), title="Radiation course created", category="TREATMENT",
+        description=f"{_actor(current_user)} started a radiation course for {rx.diagnosis or 'the patient'}.",
         prescription_id=rx.id,
     )
     db.commit()
@@ -210,118 +263,209 @@ def list_radiation_prescriptions(patient_id: int, db: Session = Depends(get_cca_
     return {"radiation_prescriptions": [_rt_prescription_out(r) for r in rows]}
 
 
-@router.post("/radiation-prescriptions/{prescription_id}/transition")
-async def transition_radiation_prescription(prescription_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
-    """Structural sequencing only -- validates the target status is the very next step in
-    RT_SUB_STATUS_ORDER, never a clinical judgment about whether the step is warranted.
-    `interrupted` is a side-state off `on_treatment` (matching dashboard/lib/oncology/
-    types.ts's RT_SUB_STATUSES), not part of the main linear sequence -- a course can be
-    interrupted and resumed without that counting as forward progress through the course."""
+@router.post("/radiation-prescriptions/{prescription_id}/phases", status_code=201)
+async def create_radiation_phase(prescription_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Only the treating Radiation Oncologist prescribes a phase's site/dose/fractions --
+    matches who was authorized to create the (now-removed) course-level dose fields."""
     _require_modality_signer(current_user, "radiation")
     rx = _get_org_radiation_prescription(db, prescription_id, _org_id(current_user))
+    body = await request.json()
+    for field in ("label", "treatment_site", "total_prescribed_dose_gy", "dose_per_fraction_gy", "number_of_fractions"):
+        if body.get(field) in (None, ""):
+            raise HTTPException(422, f"{field} is required")
+    existing_count = db.query(CCARadiationPhase).filter(CCARadiationPhase.prescription_id == rx.id).count()
+
+    phase = CCARadiationPhase(
+        prescription_id=rx.id, phase_number=body.get("phase_number", existing_count + 1), label=body["label"],
+        treatment_site=body["treatment_site"], laterality=body.get("laterality"),
+        target_volumes=body.get("target_volumes"), organs_at_risk=body.get("organs_at_risk"),
+        total_prescribed_dose_gy=body["total_prescribed_dose_gy"], dose_per_fraction_gy=body["dose_per_fraction_gy"],
+        number_of_fractions=body["number_of_fractions"], frequency=body.get("frequency"),
+        simulation_required=bool(body.get("simulation_required", True)), immobilization=body.get("immobilization"),
+        image_guidance_required=bool(body.get("image_guidance_required", True)), bolus=body.get("bolus"),
+        created_by=_actor(current_user),
+    )
+    db.add(phase)
+    db.flush()
+    publish(
+        db, "RADIATION_PHASE_CREATED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Radiation phase prescribed", category="TREATMENT",
+        description=f"{_actor(current_user)} prescribed phase {phase.phase_number} ({phase.label}): "
+                     f"{phase.total_prescribed_dose_gy} Gy / {phase.number_of_fractions} fractions to {phase.treatment_site}.",
+        prescription_id=rx.id, phase_id=phase.id,
+    )
+    db.commit()
+    db.refresh(phase)
+    return {"status": "success", "phase": _rt_phase_out(phase)}
+
+
+@router.get("/radiation-prescriptions/{prescription_id}/phases")
+def list_radiation_phases(prescription_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    rx = _get_org_radiation_prescription(db, prescription_id, _org_id(current_user))
+    rows = db.query(CCARadiationPhase).filter(CCARadiationPhase.prescription_id == rx.id).order_by(CCARadiationPhase.phase_number).all()
+    return {"phases": [_rt_phase_out(p) for p in rows]}
+
+
+@router.get("/radiation-phases/worklist")
+def radiation_phase_worklist(status: str = None, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Cross-patient worklist for the Radiation Physicist (planning/physics-QA-pending
+    phases) and Radiologist -- who also covers Radiation Technologist duties (treatment-ready/
+    on-treatment phases) in this hospital's role structure -- these roles work off "what needs
+    me next" across the whole organization's caseload, not one already-open patient."""
+    org_id = _org_id(current_user)
+    q = (
+        db.query(CCARadiationPhase, RadiationPrescription, CCAPatient)
+        .join(RadiationPrescription, CCARadiationPhase.prescription_id == RadiationPrescription.id)
+        .join(CCAPatient, RadiationPrescription.patient_id == CCAPatient.id)
+        .filter(CCAPatient.organization_id == org_id)
+    )
+    if status:
+        q = q.filter(CCARadiationPhase.rt_sub_status == status)
+    rows = q.order_by(CCARadiationPhase.created_at.desc()).all()
+    return {"worklist": [
+        {
+            **_rt_phase_out(phase), "patient_id": patient.id, "patient_name": patient.name,
+            "patient_mrn": patient.mrn, "special_instructions": rx.special_instructions,
+        }
+        for phase, rx, patient in rows
+    ]}
+
+
+@router.get("/radiation-phases/{phase_id}")
+def get_radiation_phase(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    return {"phase": _rt_phase_out(phase), "prescription": _rt_prescription_out(rx)}
+
+
+@router.post("/radiation-phases/{phase_id}/transition")
+async def transition_radiation_phase(phase_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Structural sequencing only -- validates the target status is the very next step in
+    RT_SUB_STATUS_ORDER, never a clinical judgment about whether the step is warranted.
+    Each step is gated to the role actually authorized to perform it (PDF item 20: planning/
+    physics QA steps are the Radiation Physicist's; prescribing and final approval are the
+    Radiation Oncologist's) -- see _require_rt_phase_step_signer. `interrupted` is a
+    side-state off `on_treatment`, not part of the main linear sequence -- a phase can be
+    interrupted and resumed without that counting as forward progress."""
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
     body = await request.json()
     target = body.get("status")
     if target not in RT_SUB_STATUS_ORDER and target != "interrupted":
         raise HTTPException(422, f"status must be one of {[*RT_SUB_STATUS_ORDER, 'interrupted']}")
 
     if target == "interrupted":
-        if rx.rt_sub_status != "on_treatment":
-            raise HTTPException(409, f"Cannot interrupt from {rx.rt_sub_status}")
-        rx.rt_sub_status = "interrupted"
+        _require_modality_signer(current_user, "radiation")
+        if phase.rt_sub_status != "on_treatment":
+            raise HTTPException(409, f"Cannot interrupt from {phase.rt_sub_status}")
+        phase.rt_sub_status = "interrupted"
         db.commit()
-        db.refresh(rx)
-        return {"status": "success", "radiation_prescription": _rt_prescription_out(rx)}
-    if rx.rt_sub_status == "interrupted":
+        db.refresh(phase)
+        return {"status": "success", "phase": _rt_phase_out(phase)}
+    if phase.rt_sub_status == "interrupted":
+        _require_modality_signer(current_user, "radiation")
         if target != "on_treatment":
-            raise HTTPException(409, "An interrupted course may only resume to on_treatment")
-        rx.rt_sub_status = "on_treatment"
+            raise HTTPException(409, "An interrupted phase may only resume to on_treatment")
+        phase.rt_sub_status = "on_treatment"
         db.commit()
-        db.refresh(rx)
-        return {"status": "success", "radiation_prescription": _rt_prescription_out(rx)}
+        db.refresh(phase)
+        return {"status": "success", "phase": _rt_phase_out(phase)}
 
-    current_index = RT_SUB_STATUS_ORDER.index(rx.rt_sub_status) if rx.rt_sub_status in RT_SUB_STATUS_ORDER else -1
+    _require_rt_phase_step_signer(current_user, target)
+    current_index = RT_SUB_STATUS_ORDER.index(phase.rt_sub_status) if phase.rt_sub_status in RT_SUB_STATUS_ORDER else -1
     target_index = RT_SUB_STATUS_ORDER.index(target)
     if target_index != current_index + 1:
-        raise HTTPException(409, f"Cannot move from {rx.rt_sub_status} directly to {target}")
-    rx.rt_sub_status = target
+        raise HTTPException(409, f"Cannot move from {phase.rt_sub_status} directly to {target}")
+    phase.rt_sub_status = target
+    if target == "physics_qa":
+        phase.physicist_signer_email = current_user.get("email")
+        phase.physicist_signer_role = current_user.get("role")
+        phase.physicist_signed_at = datetime.utcnow()
     if target == "physician_approved":
-        rx.signer_email = current_user.get("email")
-        rx.signer_role = current_user.get("role")
-        rx.signed_at = datetime.utcnow()
+        phase.physician_signer_email = current_user.get("email")
+        phase.physician_signer_role = current_user.get("role")
+        phase.physician_signed_at = datetime.utcnow()
     if target == "treatment_ready":
         # Always exactly `number_of_fractions` rows -- a schedule count that could drift
         # from the prescribed count is precisely the "screens show contradictory values"
         # failure item 26 exists to prevent. Changing the fraction count means amending
-        # the prescription, not overriding the schedule here.
-        for n in range(1, rx.number_of_fractions + 1):
-            db.add(RadiationFraction(prescription_id=rx.id, fraction_number=n, status="scheduled"))
+        # the phase, not overriding the schedule here.
+        for n in range(1, phase.number_of_fractions + 1):
+            db.add(RadiationFraction(phase_id=phase.id, fraction_number=n, status="scheduled"))
     publish(
-        db, "RADIATION_PRESCRIPTION_TRANSITIONED", patient_id=rx.patient_id, actor=_actor(current_user),
-        role=current_user.get("role"), title="Radiation prescription updated", category="TREATMENT",
-        description=f"{_actor(current_user)} moved the radiation prescription to {target}.",
-        prescription_id=rx.id, status=target,
+        db, "RADIATION_PHASE_TRANSITIONED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Radiation phase updated", category="TREATMENT",
+        description=f"{_actor(current_user)} moved phase {phase.phase_number} ({phase.label}) to {target}.",
+        prescription_id=rx.id, phase_id=phase.id, status=target,
     )
     db.commit()
-    db.refresh(rx)
-    return {"status": "success", "radiation_prescription": _rt_prescription_out(rx)}
+    db.refresh(phase)
+    return {"status": "success", "phase": _rt_phase_out(phase)}
 
 
-@router.get("/radiation-prescriptions/{prescription_id}/fractions")
-def list_radiation_fractions(prescription_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
-    rx = _get_org_radiation_prescription(db, prescription_id, _org_id(current_user))
-    rows = db.query(RadiationFraction).filter(RadiationFraction.prescription_id == rx.id).order_by(RadiationFraction.fraction_number).all()
+@router.get("/radiation-phases/{phase_id}/fractions")
+def list_radiation_fractions(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    phase, _rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    rows = db.query(RadiationFraction).filter(RadiationFraction.phase_id == phase.id).order_by(RadiationFraction.fraction_number).all()
     return {"fractions": [_rt_fraction_out(f) for f in rows]}
 
 
 @router.post("/radiation-fractions/{fraction_id}/event")
 async def record_radiation_fraction_event(fraction_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
-    _require_clinical_or_nursing_role(current_user)
+    """Recording an actual delivered/missed/rescheduled fraction is the Radiation
+    Technologist's action (PDF item 20/21) -- previously any clinical/nursing role could do
+    this, which is the actual gap those items describe. Radiation Technologist and Radiologist
+    are the same login in this hospital's role structure (no separate CCARadiationTechnologist
+    role exists), so this gates on CCARadiologist."""
+    if not (is_cca_radiologist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Radiologist may record a fraction delivery event")
     fraction = db.query(RadiationFraction).filter(RadiationFraction.id == fraction_id).first()
     if not fraction:
         raise HTTPException(404, "Radiation fraction not found")
-    rx = _get_org_radiation_prescription(db, fraction.prescription_id, _org_id(current_user))
+    phase, rx = _get_org_radiation_phase(db, fraction.phase_id, _org_id(current_user))
     body = await request.json()
     status_value = body.get("status")
     if status_value not in ("delivered", "missed", "rescheduled"):
         raise HTTPException(422, "status must be one of delivered, missed, rescheduled")
     fraction.status = status_value
     if status_value == "delivered":
-        fraction.delivered_dose_gy = body.get("delivered_dose_gy", rx.dose_per_fraction_gy)
+        fraction.delivered_dose_gy = body.get("delivered_dose_gy", phase.dose_per_fraction_gy)
     if body.get("interruption_reason"):
         fraction.interruption_reason = body["interruption_reason"]
     if body.get("on_treatment_review_note"):
         fraction.on_treatment_review_note = body["on_treatment_review_note"]
+    if body.get("variance_or_toxicity"):
+        fraction.variance_or_toxicity = body["variance_or_toxicity"]
     fraction.recorded_by = _actor(current_user)
     fraction.recorded_at = datetime.utcnow()
-    if rx.rt_sub_status == "treatment_ready":
-        rx.rt_sub_status = "on_treatment"
+    if phase.rt_sub_status == "treatment_ready":
+        phase.rt_sub_status = "on_treatment"
     publish(
         db, "RADIATION_FRACTION_RECORDED", patient_id=rx.patient_id, actor=_actor(current_user),
         role=current_user.get("role"), title="Radiation fraction recorded", category="TREATMENT",
-        description=f"{_actor(current_user)} recorded fraction {fraction.fraction_number} as {status_value}.",
-        prescription_id=rx.id, fraction_id=fraction.id,
+        description=f"{_actor(current_user)} recorded fraction {fraction.fraction_number} of phase {phase.phase_number} as {status_value}.",
+        prescription_id=rx.id, phase_id=phase.id, fraction_id=fraction.id,
     )
     db.commit()
     db.refresh(fraction)
     return {"status": "success", "fraction": _rt_fraction_out(fraction)}
 
 
-@router.post("/radiation-prescriptions/{prescription_id}/complete")
-def complete_radiation_course(prescription_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+@router.post("/radiation-phases/{phase_id}/complete")
+def complete_radiation_phase(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     _require_modality_signer(current_user, "radiation")
-    rx = _get_org_radiation_prescription(db, prescription_id, _org_id(current_user))
-    delivered = db.query(RadiationFraction).filter(RadiationFraction.prescription_id == rx.id, RadiationFraction.status == "delivered").count()
-    if delivered < rx.number_of_fractions:
-        raise HTTPException(409, f"Only {delivered} of {rx.number_of_fractions} fractions delivered")
-    rx.rt_sub_status = "completed"
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    delivered = db.query(RadiationFraction).filter(RadiationFraction.phase_id == phase.id, RadiationFraction.status == "delivered").count()
+    if delivered < phase.number_of_fractions:
+        raise HTTPException(409, f"Only {delivered} of {phase.number_of_fractions} fractions delivered")
+    phase.rt_sub_status = "completed"
     publish(
-        db, "RADIATION_COURSE_COMPLETED", patient_id=rx.patient_id, actor=_actor(current_user),
-        role=current_user.get("role"), title="Radiation course completed", category="TREATMENT",
-        description=f"{_actor(current_user)} marked the radiation course complete.", prescription_id=rx.id,
+        db, "RADIATION_PHASE_COMPLETED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Radiation phase completed", category="TREATMENT",
+        description=f"{_actor(current_user)} marked phase {phase.phase_number} ({phase.label}) complete.",
+        prescription_id=rx.id, phase_id=phase.id,
     )
     db.commit()
-    db.refresh(rx)
-    return {"status": "success", "radiation_prescription": _rt_prescription_out(rx)}
+    db.refresh(phase)
+    return {"status": "success", "phase": _rt_phase_out(phase)}
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +571,418 @@ async def record_surgical_outcome(plan_id: int, request: Request, db: Session = 
     db.commit()
     db.refresh(plan)
     return {"status": "success", "surgical_plan": _surgical_plan_out(plan)}
+
+
+# ---------------------------------------------------------------------------
+# Surgical Oncology OR documentation (Gap Analysis PDF items 24-27): Intra-operative
+# Monitoring, Intra-operative Notes, Specimen Labelling and Lab Handoff, Surgical Blood
+# Transfusion Record. All keyed off an existing SurgicalPlan; available from "scheduled"
+# onward (surgery imminent/underway) through "post_op", never gated tighter than that -- same
+# reasoning as Day Care's monitoring/hold/reaction endpoints not gating on TreatmentOrder.status.
+# ---------------------------------------------------------------------------
+
+def _intraop_monitoring_out(o: SurgicalIntraOpMonitoring) -> dict:
+    return {
+        "id": o.id, "patient_id": o.patient_id, "surgical_plan_id": o.surgical_plan_id,
+        "observation_time": o.observation_time.isoformat(), "vitals": o.vitals,
+        "anaesthesia_status": o.anaesthesia_status, "blood_loss_estimate": o.blood_loss_estimate,
+        "fluids_given": o.fluids_given, "events_complications": o.events_complications,
+        "recorded_by": o.recorded_by, "recorded_at": o.recorded_at.isoformat(),
+    }
+
+
+@router.get("/surgical-plans/{plan_id}/intraop-monitoring")
+def list_intraop_monitoring(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    rows = db.query(SurgicalIntraOpMonitoring).filter(
+        SurgicalIntraOpMonitoring.surgical_plan_id == plan.id
+    ).order_by(SurgicalIntraOpMonitoring.observation_time.asc()).all()
+    return {"results": [_intraop_monitoring_out(o) for o in rows]}
+
+
+@router.post("/surgical-plans/{plan_id}/intraop-monitoring", status_code=201)
+async def record_intraop_monitoring(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    record = SurgicalIntraOpMonitoring(
+        patient_id=plan.patient_id, surgical_plan_id=plan.id, vitals=body.get("vitals"),
+        anaesthesia_status=body.get("anaesthesia_status"), blood_loss_estimate=body.get("blood_loss_estimate"),
+        fluids_given=body.get("fluids_given"), events_complications=body.get("events_complications"),
+        recorded_by=_actor(current_user),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "observation": _intraop_monitoring_out(record)}
+
+
+def _operative_note_out(n: SurgicalOperativeNote) -> dict:
+    return {
+        "id": n.id, "patient_id": n.patient_id, "surgical_plan_id": n.surgical_plan_id,
+        "pre_op_diagnosis": n.pre_op_diagnosis, "post_op_diagnosis": n.post_op_diagnosis,
+        "procedure_performed": n.procedure_performed, "findings": n.findings, "technique": n.technique,
+        "complications": n.complications, "closure": n.closure, "surgeon": n.surgeon,
+        "assistants": n.assistants, "anaesthesia_type": n.anaesthesia_type,
+        "estimated_blood_loss": n.estimated_blood_loss,
+        "authored_by": n.authored_by, "authored_at": n.authored_at.isoformat(),
+    }
+
+
+@router.get("/surgical-plans/{plan_id}/operative-notes")
+def list_operative_notes(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    rows = db.query(SurgicalOperativeNote).filter(
+        SurgicalOperativeNote.surgical_plan_id == plan.id
+    ).order_by(SurgicalOperativeNote.authored_at.desc()).all()
+    return {"results": [_operative_note_out(n) for n in rows]}
+
+
+@router.post("/surgical-plans/{plan_id}/operative-notes", status_code=201)
+async def record_operative_note(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Deliberately never overwrites SurgicalPlan.performed_procedure -- this is the fuller
+    narrative note, that field stays the short summary. See SurgicalOperativeNote's docstring."""
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    if not body.get("procedure_performed"):
+        raise HTTPException(422, "procedure_performed is required")
+
+    actor = _actor(current_user)
+    note = SurgicalOperativeNote(
+        patient_id=plan.patient_id, surgical_plan_id=plan.id, pre_op_diagnosis=body.get("pre_op_diagnosis"),
+        post_op_diagnosis=body.get("post_op_diagnosis"), procedure_performed=body["procedure_performed"],
+        findings=body.get("findings"), technique=body.get("technique"), complications=body.get("complications"),
+        closure=body.get("closure"), surgeon=body.get("surgeon"), assistants=body.get("assistants"),
+        anaesthesia_type=body.get("anaesthesia_type"), estimated_blood_loss=body.get("estimated_blood_loss"),
+        authored_by=actor,
+    )
+    db.add(note)
+    db.flush()
+    publish(
+        db, "SURGICAL_OPERATIVE_NOTE_RECORDED", patient_id=plan.patient_id, actor=actor, role=current_user.get("role"),
+        title="Operative note recorded", category="TREATMENT",
+        description=f"{actor} recorded the operative note for {plan.procedure}.", plan_id=plan.id,
+    )
+    db.commit()
+    db.refresh(note)
+    return {"status": "success", "operative_note": _operative_note_out(note)}
+
+
+def _specimen_out(s: SurgicalSpecimen) -> dict:
+    return {
+        "id": s.id, "patient_id": s.patient_id, "surgical_plan_id": s.surgical_plan_id,
+        "specimen_label": s.specimen_label, "specimen_type": s.specimen_type, "site": s.site,
+        "container_type": s.container_type, "fixative": s.fixative,
+        "collected_by": s.collected_by, "collected_at": s.collected_at.isoformat() if s.collected_at else None,
+        "handed_off_to": s.handed_off_to, "handed_off_at": s.handed_off_at.isoformat() if s.handed_off_at else None,
+        "lab_accession_number": s.lab_accession_number, "received_by_lab": s.received_by_lab,
+        "received_at": s.received_at.isoformat() if s.received_at else None, "status": s.status,
+        "notes": s.notes,
+    }
+
+
+@router.get("/surgical-plans/{plan_id}/specimens")
+def list_specimens(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    rows = db.query(SurgicalSpecimen).filter(SurgicalSpecimen.surgical_plan_id == plan.id).order_by(SurgicalSpecimen.id.desc()).all()
+    return {"results": [_specimen_out(s) for s in rows]}
+
+
+@router.post("/surgical-plans/{plan_id}/specimens", status_code=201)
+async def add_specimen(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    label = (body.get("specimen_label") or "").strip()
+    if not label:
+        raise HTTPException(422, "specimen_label is required")
+
+    actor = _actor(current_user)
+    specimen = SurgicalSpecimen(
+        patient_id=plan.patient_id, surgical_plan_id=plan.id, specimen_label=label,
+        specimen_type=body.get("specimen_type"), site=body.get("site"), container_type=body.get("container_type"),
+        fixative=body.get("fixative"), collected_by=actor, collected_at=datetime.utcnow(),
+        notes=body.get("notes"), created_by=actor,
+    )
+    db.add(specimen)
+    db.flush()
+    publish(
+        db, "SURGICAL_SPECIMEN_COLLECTED", patient_id=plan.patient_id, actor=actor, role=current_user.get("role"),
+        title="Specimen collected", category="TREATMENT",
+        description=f"{actor} labelled and collected specimen \"{label}\".", plan_id=plan.id,
+    )
+    db.commit()
+    db.refresh(specimen)
+    return {"status": "success", "specimen": _specimen_out(specimen)}
+
+
+# Workflow-sequencing only -- chain-of-custody progression, not a clinical rule.
+_SPECIMEN_TRANSITIONS = {
+    "HandedOff": {"Collected"},
+    "ReceivedByLab": {"HandedOff"},
+}
+
+
+@router.post("/specimens/{specimen_id}/event")
+async def record_specimen_event(specimen_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Advances a specimen's chain-of-custody by one step. HandedOff requires handed_off_to;
+    ReceivedByLab requires received_by_lab -- both the actual named recipient, never defaulted."""
+    _require_surgical_team(current_user)
+    org_id = _org_id(current_user)
+    specimen = db.query(SurgicalSpecimen).filter(SurgicalSpecimen.id == specimen_id).first()
+    if not specimen:
+        raise HTTPException(404, "Specimen not found")
+    _check_patient_in_org(db, specimen.patient_id, org_id)
+
+    body = await request.json()
+    target = body.get("status")
+    allowed_from = _SPECIMEN_TRANSITIONS.get(target)
+    if not allowed_from:
+        raise HTTPException(422, f"status must be one of {sorted(_SPECIMEN_TRANSITIONS)}")
+    if specimen.status not in allowed_from:
+        raise HTTPException(409, f"Cannot move specimen from {specimen.status} to {target}")
+
+    now = datetime.utcnow()
+    if target == "HandedOff":
+        if not body.get("handed_off_to"):
+            raise HTTPException(422, "handed_off_to is required")
+        specimen.handed_off_to = body["handed_off_to"]
+        specimen.handed_off_at = now
+    if target == "ReceivedByLab":
+        if not body.get("received_by_lab"):
+            raise HTTPException(422, "received_by_lab is required")
+        specimen.received_by_lab = body["received_by_lab"]
+        specimen.received_at = now
+        if body.get("lab_accession_number"):
+            specimen.lab_accession_number = body["lab_accession_number"]
+    specimen.status = target
+    db.flush()
+    publish(
+        db, "SURGICAL_SPECIMEN_" + target.upper(), patient_id=specimen.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title=f"Specimen {target}", category="TREATMENT",
+        description=f"{_actor(current_user)} recorded specimen \"{specimen.specimen_label}\" as {target}.",
+        plan_id=specimen.surgical_plan_id,
+    )
+    db.commit()
+    db.refresh(specimen)
+    return {"status": "success", "specimen": _specimen_out(specimen)}
+
+
+def _surgical_blood_out(b: SurgicalBloodTransfusion) -> dict:
+    return {
+        "id": b.id, "patient_id": b.patient_id, "surgical_plan_id": b.surgical_plan_id,
+        "product_type": b.product_type, "unit_id": b.unit_id, "blood_group": b.blood_group,
+        "crossmatch_confirmed": b.crossmatch_confirmed, "crossmatch_reference": b.crossmatch_reference,
+        "volume": b.volume, "indication": b.indication, "reaction_occurred": b.reaction_occurred,
+        "reaction_notes": b.reaction_notes, "administered_by": b.administered_by,
+        "administered_at": b.administered_at.isoformat() if b.administered_at else None,
+    }
+
+
+@router.get("/surgical-plans/{plan_id}/blood-transfusions")
+def list_surgical_blood_transfusions(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    rows = db.query(SurgicalBloodTransfusion).filter(
+        SurgicalBloodTransfusion.surgical_plan_id == plan.id
+    ).order_by(SurgicalBloodTransfusion.id.desc()).all()
+    return {"results": [_surgical_blood_out(b) for b in rows]}
+
+
+@router.post("/surgical-plans/{plan_id}/blood-transfusions", status_code=201)
+async def record_surgical_blood_transfusion(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    product_type = (body.get("product_type") or "").strip()
+    unit_id = (body.get("unit_id") or "").strip()
+    if not product_type or not unit_id:
+        raise HTTPException(422, "product_type and unit_id are required")
+
+    actor = _actor(current_user)
+    record = SurgicalBloodTransfusion(
+        patient_id=plan.patient_id, surgical_plan_id=plan.id, product_type=product_type, unit_id=unit_id,
+        blood_group=body.get("blood_group"), crossmatch_confirmed=bool(body.get("crossmatch_confirmed", False)),
+        crossmatch_reference=body.get("crossmatch_reference"), volume=body.get("volume"),
+        indication=body.get("indication"), reaction_occurred=bool(body.get("reaction_occurred", False)),
+        reaction_notes=body.get("reaction_notes"), administered_by=actor, administered_at=datetime.utcnow(),
+        created_by=actor,
+    )
+    db.add(record)
+    db.flush()
+    publish(
+        db, "SURGICAL_BLOOD_TRANSFUSION_RECORDED", patient_id=plan.patient_id, actor=actor, role=current_user.get("role"),
+        title="Surgical blood transfusion recorded", category="TREATMENT",
+        description=f"{actor} recorded {product_type} unit {unit_id} transfused intra-operatively.",
+        plan_id=plan.id,
+    )
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "blood_transfusion": _surgical_blood_out(record)}
+
+
+# ---------------------------------------------------------------------------
+# Procedures & Notes (Gap Analysis PDF items 31-33: Palliative, Medical Oncology, Radiation
+# Oncology) and Palliative Treatment Orders (item 30). See ClinicalProcedureNote and
+# PalliativeTreatmentOrder's docstrings for why these are separate from SurgicalOperativeNote
+# and the chemo TreatmentOrder pipeline respectively.
+# ---------------------------------------------------------------------------
+
+_PROCEDURE_NOTE_ROLES = {
+    "CCAMedicalOncologist": is_cca_medical_oncologist,
+    "CCARadiationOncologist": is_cca_radiation_oncologist,
+    "CCAPalliativeCareSpecialist": is_cca_palliative_care_specialist,
+}
+
+
+def _require_procedure_note_author(current_user: dict) -> str:
+    """Any of the three specialties this item set covers may author their own procedure note --
+    returns the caller's own role, always self-declared from the session, never entered
+    independently (see ClinicalProcedureNote's docstring)."""
+    role = current_user.get("role")
+    if role not in _PROCEDURE_NOTE_ROLES or not _PROCEDURE_NOTE_ROLES[role](current_user):
+        raise HTTPException(403, "Only the Medical Oncologist, Radiation Oncologist, or Palliative Care Specialist may record a procedure note")
+    return role
+
+
+def _procedure_note_out(n: ClinicalProcedureNote) -> dict:
+    return {
+        "id": n.id, "patient_id": n.patient_id, "performed_by_role": n.performed_by_role,
+        "procedure_name": n.procedure_name, "indication": n.indication, "findings": n.findings,
+        "technique": n.technique, "complications": n.complications,
+        "performed_at": n.performed_at.isoformat(), "performed_by": n.performed_by,
+    }
+
+
+@router.get("/patients/{patient_id}/procedure-notes")
+def list_procedure_notes(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(ClinicalProcedureNote).filter(
+        ClinicalProcedureNote.patient_id == patient_id
+    ).order_by(ClinicalProcedureNote.performed_at.desc()).all()
+    return {"results": [_procedure_note_out(n) for n in rows]}
+
+
+@router.post("/patients/{patient_id}/procedure-notes", status_code=201)
+async def record_procedure_note(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    role = _require_procedure_note_author(current_user)
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    procedure_name = (body.get("procedure_name") or "").strip()
+    if not procedure_name:
+        raise HTTPException(422, "procedure_name is required")
+
+    actor = _actor(current_user)
+    note = ClinicalProcedureNote(
+        patient_id=patient_id, performed_by_role=role, procedure_name=procedure_name,
+        indication=body.get("indication"), findings=body.get("findings"), technique=body.get("technique"),
+        complications=body.get("complications"), performed_by=actor, created_by=actor,
+    )
+    db.add(note)
+    db.flush()
+    publish(
+        db, "PROCEDURE_NOTE_RECORDED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Procedure note: {procedure_name}", category="TREATMENT",
+        description=f"{actor} recorded a procedure note for {procedure_name}.",
+    )
+    db.commit()
+    db.refresh(note)
+    return {"status": "success", "procedure_note": _procedure_note_out(note)}
+
+
+_PALLIATIVE_ORDER_STATUS_ORDER = ["Draft", "Signed", "Active", "Discontinued"]
+
+
+def _palliative_order_out(o: PalliativeTreatmentOrder) -> dict:
+    return {
+        "id": o.id, "patient_id": o.patient_id, "order_type": o.order_type, "instructions": o.instructions,
+        "status": o.status, "signer_email": o.signer_email, "signer_role": o.signer_role,
+        "signed_at": o.signed_at.isoformat() if o.signed_at else None,
+        "discontinued_reason": o.discontinued_reason, "created_by": o.created_by,
+    }
+
+
+@router.get("/patients/{patient_id}/palliative-orders")
+def list_palliative_orders(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(PalliativeTreatmentOrder).filter(
+        PalliativeTreatmentOrder.patient_id == patient_id
+    ).order_by(PalliativeTreatmentOrder.id.desc()).all()
+    return {"results": [_palliative_order_out(o) for o in rows]}
+
+
+@router.post("/patients/{patient_id}/palliative-orders", status_code=201)
+async def create_palliative_order(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not is_cca_palliative_care_specialist(current_user):
+        raise HTTPException(403, "Only the Palliative Care Specialist may author a palliative treatment order")
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    order_type = (body.get("order_type") or "").strip()
+    instructions = (body.get("instructions") or "").strip()
+    if not order_type or not instructions:
+        raise HTTPException(422, "order_type and instructions are required")
+
+    actor = _actor(current_user)
+    order = PalliativeTreatmentOrder(
+        patient_id=patient_id, order_type=order_type, instructions=instructions, created_by=actor,
+    )
+    db.add(order)
+    db.flush()
+    publish(
+        db, "PALLIATIVE_ORDER_CREATED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Palliative order: {order_type}", category="TREATMENT",
+        description=f"{actor} created a palliative treatment order ({order_type}).",
+    )
+    db.commit()
+    db.refresh(order)
+    return {"status": "success", "palliative_order": _palliative_order_out(order)}
+
+
+@router.patch("/palliative-orders/{order_id}")
+async def transition_palliative_order(order_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Structural sequencing (Draft -> Signed -> Active -> Discontinued) only -- Discontinued
+    is reachable from Signed or Active (a comfort-care order can be stopped from either), never
+    a clinical judgment about whether stopping is warranted."""
+    if not is_cca_palliative_care_specialist(current_user):
+        raise HTTPException(403, "Only the Palliative Care Specialist may update a palliative treatment order")
+    org_id = _org_id(current_user)
+    order = db.query(PalliativeTreatmentOrder).filter(PalliativeTreatmentOrder.id == order_id).first()
+    if not order:
+        raise HTTPException(404, "Palliative treatment order not found")
+    _check_patient_in_org(db, order.patient_id, org_id)
+
+    body = await request.json()
+    target = body.get("status")
+    if target not in _PALLIATIVE_ORDER_STATUS_ORDER:
+        raise HTTPException(422, f"status must be one of {_PALLIATIVE_ORDER_STATUS_ORDER}")
+    if target == "Discontinued":
+        if order.status not in ("Signed", "Active"):
+            raise HTTPException(409, f"Cannot discontinue an order that is {order.status}")
+        if not body.get("discontinued_reason"):
+            raise HTTPException(422, "discontinued_reason is required")
+        order.discontinued_reason = body["discontinued_reason"]
+    else:
+        current_index = _PALLIATIVE_ORDER_STATUS_ORDER.index(order.status) if order.status in _PALLIATIVE_ORDER_STATUS_ORDER else -1
+        target_index = _PALLIATIVE_ORDER_STATUS_ORDER.index(target)
+        if target_index != current_index + 1:
+            raise HTTPException(409, f"Cannot move from {order.status} directly to {target}")
+    order.status = target
+    if target == "Signed":
+        order.signer_email = current_user.get("email")
+        order.signer_role = current_user.get("role")
+        order.signed_at = datetime.utcnow()
+    publish(
+        db, "PALLIATIVE_ORDER_TRANSITIONED", patient_id=order.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Palliative order updated", category="TREATMENT",
+        description=f"{_actor(current_user)} moved the palliative order to {target}.",
+    )
+    db.commit()
+    db.refresh(order)
+    return {"status": "success", "palliative_order": _palliative_order_out(order)}
 
 
 # ---------------------------------------------------------------------------

@@ -1083,6 +1083,7 @@
                                         <select id="wiz-doc-type" class="form-select" style="max-width:260px;">
                                             <option>Previous pathology report</option>
                                             <option>Previous radiology report</option>
+                                            <option>Previous case file</option>
                                             <option>Insurance card</option>
                                             <option>Other</option>
                                         </select>
@@ -1398,6 +1399,7 @@
                 try {
                     const formData = new FormData();
                     formData.append('file', doc.file);
+                    formData.append('document_type', doc.label);
                     const result = await Api.upload(`/cca/documents?patient_id=${patientId}`, formData);
                     // Upload can "succeed" (201) while OCR itself failed on this specific file --
                     // the file is still saved, but it won't contribute anything to the Patient

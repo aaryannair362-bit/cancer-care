@@ -48,6 +48,7 @@ from .routers.nursing_charting import router as nursing_charting_router
 from .routers.procedures import router as procedures_router
 from .routers.nursing_assessments import router as nursing_assessments_router
 from .routers.mar import router as mar_router
+from .routers.mar import _get_assigned_patient
 from .routers.patient_documents import router as patient_documents_router
 from .routers import cca
 from .routers import cca_diagnostics
@@ -311,6 +312,22 @@ def seed_demo_logins(db: Session):
                 "description": "Surgical resection notes & MDT panel input",
             },
             {
+                "role": "CCASurgicalNurse",
+                "email": "surgnurse@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Surgical Nurse)",
+                "target_url": "/surgical_nurse.html",
+                "description": "Intra-operative monitoring, specimen handoff & surgical blood transfusion",
+            },
+            {
+                "role": "CCAPalliativeCareSpecialist",
+                "email": "palliative@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Palliative Care)",
+                "target_url": "/palliative_care.html",
+                "description": "Palliative treatment orders & supportive-care procedures/notes",
+            },
+            {
                 "role": "CCARadiationOncologist",
                 "email": "radonc@aivana.com",
                 "password": "Password@2026!",
@@ -319,12 +336,20 @@ def seed_demo_logins(db: Session):
                 "description": "Radiation therapy plans & fractional treatment logs",
             },
             {
+                "role": "CCARadiationPhysicist",
+                "email": "radphysicist@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Radiation Physicist)",
+                "target_url": "/radiation_physicist.html",
+                "description": "RT planning, simulation, contouring & physics QA",
+            },
+            {
                 "role": "CCARadiologist",
                 "email": "radiologist@aivana.com",
                 "password": "Password@2026!",
                 "portal_name": "CCA Oncology OS (Radiologist)",
                 "target_url": "/radiologist.html",
-                "description": "Imaging review, lesion measurements & RECIST response",
+                "description": "Imaging review, lesion measurements & RECIST response; also covers Radiation Technologist fraction delivery",
             },
             {
                 "role": "CCAPathologist",
@@ -1745,7 +1770,11 @@ async def create_ipd_round(
         medications=medications,
         lab_tests=lab_tests,
         advice=body.get("advice", ""),
-        visit_type="IPD_ROUND",
+        # Oncology Review Results PDF item 17: a consultant/senior review must be kept as a
+        # distinct note type, never merged with a routine clinician round -- both still create
+        # the same Consultation row shape (same fields, same auto-task pipeline below), tagged
+        # by visit_type so Patient History can render/filter them separately.
+        visit_type="IPD_CONSULTANT" if body.get("is_consultant_review") else "IPD_ROUND",
         admission_day=admission_day,
     )
     db.add(consultation)
@@ -2551,6 +2580,47 @@ def get_my_tasks(current_user: dict = Depends(get_current_user), db: Session = D
         "notes": t.notes,
         "is_overdue": bool(t.due_date and t.status != "Completed" and t.due_date < now)
     } for t in tasks]
+
+@app.post("/api/ipd/lab-requests", status_code=201)
+async def raise_lab_request(request: Request, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Oncology Review Results PDF item 18: a Raise Request workflow for lab-related requests
+    (e.g. blood samples), open to any nursing role -- not just HeadNurse. Deliberately a thin
+    wrapper over the existing Task model/table (task_type="Lab" is already a supported value,
+    see create_task above) rather than a new table: everything a request needs (description,
+    status, patient linkage, who raised it) already exists there.
+
+    A SEPARATE endpoint from POST /api/ipd/tasks (not a relaxed gate on it) on purpose: that
+    endpoint is deliberately HeadNurse-only for general task assignment/delegation, an
+    unrelated privilege this item doesn't ask to change. self-assigning nurse_id to the
+    requesting nurse means the existing PATCH /api/ipd/tasks/{id} (a nurse may already update a
+    task assigned to themselves) and GET /api/ipd/tasks (already returns a nurse's own
+    assigned-patient tasks) work as the status-tracking/listing side with no changes needed.
+    """
+    if not (is_nurse(current_user) or is_head_nurse(current_user)):
+        raise HTTPException(403, "Only nurses and head nurses can raise a lab request")
+    body = await request.json()
+    patient_id = body.get("patient_id")
+    request_type = (body.get("request_type") or "").strip()
+    details = (body.get("details") or "").strip()
+    if not patient_id or not request_type:
+        raise HTTPException(400, "patient_id and request_type are required")
+    _get_assigned_patient(db, patient_id, current_user)
+
+    description = f"Lab request: {request_type}" + (f" -- {details}" if details else "")
+    task = Task(
+        patient_id=patient_id, nurse_id=current_user["id"], assigned_by=current_user["id"],
+        description=description, status="Pending", task_type="Lab", source="Manual",
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    log_audit(db, current_user["id"], current_user["email"], current_user.get("organization_id"),
+              "raise_lab_request", f"tasks/{task.id}", "Success", f"request_type={request_type}")
+    return {
+        "id": task.id, "patient_id": task.patient_id, "description": task.description,
+        "status": task.status, "task_type": task.task_type, "created_at": task.created_at.isoformat(),
+    }
 
 @app.get("/api/ipd/tasks/{patient_id}")
 def get_tasks(patient_id: int, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):

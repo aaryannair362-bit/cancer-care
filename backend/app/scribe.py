@@ -23,6 +23,15 @@ _TRANSIENT_ERROR_STATUS_CODES = {413, 502, 503, 504}
 # breaking point and leaves headroom for token-estimation error, while being less needlessly
 # conservative than an earlier 24,000 cap that was truncating (and flagging) consultations,
 # like a real proven-working 25,382-character one, that didn't actually need it.
+#
+# A transcript longer than this used to simply be truncated at this point, silently dropping
+# everything past it before the LLM ever saw it -- verified live to actually happen on real,
+# dense 15-20 minute consultations (character density varies a lot by speaker/conversation
+# style; the 25,382-char calibration above was one sample, not a ceiling every consultation
+# respects). Past this size scribe_transcript() now instead SPLITS the transcript into
+# multiple chunks of this size and processes each with its own paced Groq call, then merges
+# the results -- so this constant is now a per-call chunk size, not a hard ceiling on what the
+# AI scribe can ever process; see scribe_transcript()/_split_transcript_into_chunks().
 _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING = 26000
 
 # Doctor-patient transcripts and the AI's structured output derived from them are PHI. Raw
@@ -330,24 +339,19 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
                 result[field] = str(value)
         return result
 
-    def scribe_transcript(self, transcript: str) -> dict:
-        # Groq's real per-minute token budget for this account is 8000 (verified live against
-        # response headers, on BOTH the standard and higher-tier "Prod" key -- this is a hard
-        # account-level ceiling, not something rate_limiter.py's pacing can work around). A
-        # single scribe_transcript() call for a genuinely long consultation (a 45+ minute visit,
-        # transcript >~29,000 characters once wrapped in this prompt) needs more tokens than
-        # that in ONE request, which token_bucket.consume() cannot ever satisfy -- caught by
-        # _generate_json's broad except, silently returning {} and backfilling to an EMPTY
-        # draft with no error surfaced anywhere. Verified live: a 25,382-character transcript
-        # (real ~30-minute consultation) worked; a 37,039-character one (real ~45-minute
-        # consultation) silently produced nothing. Truncating here, at a size proven to work,
-        # and clearly flagging when that happens (both a dedicated field and a note prepended to
-        # "advice", so it's visible even without a frontend change) is far safer than a doctor
-        # receiving a blank draft with no indication anything went wrong.
-        truncated = len(transcript) > _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING
-        if truncated:
-            transcript = transcript[:_MAX_TRANSCRIPT_CHARS_FOR_SCRIBING].rsplit(".", 1)[0] + "."
+    _NOTE_DEFAULT_FIELDS = {
+        "chiefComplaint": "", "hpi": "", "physicalExam": "", "primaryDiagnosis": "",
+        "differentialDiagnosis": "", "medications": [], "advice": "", "labTests": []
+    }
+    _NOTE_NARRATIVE_FIELDS = (
+        "chiefComplaint", "hpi", "physicalExam", "primaryDiagnosis", "differentialDiagnosis", "advice"
+    )
 
+    def _extract_note_fields(self, transcript: str) -> dict:
+        """One single-pass extraction call against the note schema -- shared by both the common
+        (short transcript) case and each individual chunk of a long one, via scribe_transcript().
+        Returns every field backfilled/coerced to the right type; does NOT run drug/lab-test name
+        correction (scribe_transcript() does that once, after chunking/merging, not per chunk)."""
         prompt = f"""Process the following spoken consultation transcript and structure it perfectly.
 
 Transcript of conversation:
@@ -367,31 +371,138 @@ Return a JSON object with the following structure:
     "labTests": ["list of recommended tests"]
 }}"""
         result = self._generate_json(prompt, temperature=0.3)
-        default = {
-            "chiefComplaint": "", "hpi": "", "physicalExam": "", "primaryDiagnosis": "",
-            "differentialDiagnosis": "", "medications": [], "advice": "", "labTests": []
-        }
-        for key in default:
+        for key, default_value in self._NOTE_DEFAULT_FIELDS.items():
             if key not in result or result[key] is None:
-                result[key] = default[key]
-        result = self._coerce_string_fields(
-            result, ("chiefComplaint", "hpi", "physicalExam", "primaryDiagnosis", "differentialDiagnosis", "advice")
+                result[key] = default_value
+        return self._coerce_string_fields(result, self._NOTE_NARRATIVE_FIELDS)
+
+    def _split_transcript_into_chunks(self, transcript: str) -> list:
+        """Splits a transcript longer than _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING into ordered,
+        sentence-boundary-aligned pieces no larger than that -- returns [transcript] unchanged
+        (one chunk) for the common case that already fits in one call, so nothing about typical
+        consultations changes."""
+        if len(transcript) <= _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING:
+            return [transcript]
+        chunks = []
+        remaining = transcript
+        while len(remaining) > _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING:
+            window = remaining[:_MAX_TRANSCRIPT_CHARS_FOR_SCRIBING]
+            split_at = window.rfind(". ")
+            if split_at == -1:
+                # No sentence boundary anywhere in this window (e.g. punctuation-free ASR
+                # output) -- hard split rather than loop forever on the same oversized window.
+                split_at = len(window) - 1
+            chunks.append(remaining[:split_at + 1].strip())
+            remaining = remaining[split_at + 1:].strip()
+        if remaining:
+            chunks.append(remaining)
+        return chunks
+
+    def _merge_chunk_drafts(self, partials: list) -> dict:
+        """Consolidates N partial single-pass drafts (one per transcript chunk, in chronological
+        order) into one coherent final draft in the same schema. List fields (medications/
+        labTests) are concatenated -- de-duplicated by the caller, after drug/lab-test name
+        correction normalizes them, so the dedup key is meaningful. Narrative fields go through
+        one more, much smaller Groq call: merging N structured JSON summaries, not raw
+        transcript, so it's comfortably inside the token budget even though it's an extra call --
+        this is what keeps the result reading as one consultation instead of N fragments pasted
+        back to back. Falls back to simple concatenation per field if that call fails or omits
+        a field, rather than losing real content extracted by the per-chunk passes."""
+        medications = [m for p in partials for m in (p.get("medications") or [])]
+        lab_tests = [t for p in partials for t in (p.get("labTests") or [])]
+        partial_narratives = [{k: p.get(k, "") for k in self._NOTE_NARRATIVE_FIELDS} for p in partials]
+
+        system = (
+            "You are consolidating multiple partial clinical-note drafts, each independently "
+            "extracted from a different, sequential portion of the SAME long doctor-patient "
+            "consultation, into one single coherent draft. Merge and de-duplicate overlapping "
+            "or repeated information -- never invent anything not present in the partial "
+            "drafts below. Preserve every distinct clinical detail found in any partial. "
+            'Return strict JSON of the shape {"chiefComplaint": "", "hpi": "", '
+            '"physicalExam": "", "primaryDiagnosis": "", "differentialDiagnosis": "", '
+            '"advice": ""}. Never include markdown or commentary outside the JSON object.'
         )
+        prompt = f"Partial drafts, in chronological order:\n\n{json.dumps(partial_narratives, indent=2)}"
+        try:
+            merged = self._generate_json(prompt, system=system, max_tokens=3000)
+        except Exception:
+            merged = {}
+        if not isinstance(merged, dict):
+            merged = {}
+
+        result = {}
+        for field in self._NOTE_NARRATIVE_FIELDS:
+            value = merged.get(field)
+            if isinstance(value, str) and value.strip():
+                result[field] = value
+            else:
+                # Consolidation call failed or omitted this field -- fall back to concatenating
+                # the per-chunk values rather than losing that content entirely.
+                result[field] = "\n\n".join(v for v in (p.get(field) for p in partials) if v).strip()
+        result["medications"] = medications
+        result["labTests"] = lab_tests
+        return result
+
+    @staticmethod
+    def _dedupe_medications(medications: list) -> list:
+        seen = set()
+        out = []
+        for m in medications:
+            name = str((m or {}).get("drugName", "")).strip().lower() if isinstance(m, dict) else str(m).strip().lower()
+            if name and name in seen:
+                continue
+            if name:
+                seen.add(name)
+            out.append(m)
+        return out
+
+    @staticmethod
+    def _dedupe_strings(items: list) -> list:
+        seen = set()
+        out = []
+        for item in items:
+            key = str(item).strip().lower()
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            out.append(item)
+        return out
+
+    def scribe_transcript(self, transcript: str) -> dict:
+        # Groq's real per-minute token budget for this account is 8000 (verified live against
+        # response headers, on BOTH the standard and higher-tier "Prod" key -- this is a hard
+        # account-level ceiling, not something rate_limiter.py's pacing can work around). A
+        # single Groq call for a genuinely long consultation (a 45+ minute visit, transcript
+        # >~29,000 characters once wrapped in this prompt) needs more tokens than that in ONE
+        # request, which token_bucket.consume() can never satisfy for a single call. This used
+        # to mean truncating the transcript before it ever reached the LLM, silently dropping
+        # everything past ~26,000 characters -- verified live to bite real, dense 15-20 minute
+        # consultations, not just 45+ minute ones (character density varies a lot by speaker).
+        # Instead, split into ordered, sentence-aligned chunks that each individually fit the
+        # per-minute budget, extract each with its own call (naturally paced by
+        # rate_limiter.token_bucket/request_bucket inside _call_groq_api -- no new pacing logic
+        # needed here, just multiple sequential calls instead of one), then merge the partial
+        # drafts into one coherent note. No consultation of realistic length is ever silently
+        # cut short again; transcriptChunked tells the caller whether this happened at all.
+        chunks = self._split_transcript_into_chunks(transcript)
+        chunked = len(chunks) > 1
+        if chunked:
+            partials = [self._extract_note_fields(c) for c in chunks]
+            result = self._merge_chunk_drafts(partials)
+        else:
+            result = self._extract_note_fields(chunks[0] if chunks else transcript)
+
         # Corrects each medication's drugName against the canonical medicines dataset before
         # the draft ever reaches the doctor -- see drug_matcher.py for why (ASR/LLM-introduced
         # brand-name misspellings, verified to hit a meaningful fraction of real prescriptions).
-        result["medications"] = drug_matcher.correct_medication_names(result["medications"])
+        # De-duplicated after correction (not before) so two chunks mentioning the same drug
+        # under slightly different ASR spellings still collapse to one entry.
+        result["medications"] = self._dedupe_medications(drug_matcher.correct_medication_names(result["medications"]))
         # Same idea for recommended lab tests: "CBC"/"Widal"/a misspelled test name gets
         # normalized against the canonical lab test master (see lab_test_matcher.py).
-        result["labTests"] = lab_test_matcher.correct_lab_test_names(result["labTests"])
-        result["transcriptTruncated"] = truncated
-        if truncated:
-            note = (
-                "Note: this consultation transcript was very long and only the first portion "
-                "could be processed by the AI scribe. Please review the remainder of the "
-                "recording/transcript manually and add anything missed."
-            )
-            result["advice"] = f"{note}\n\n{result['advice']}".strip()
+        result["labTests"] = self._dedupe_strings(lab_test_matcher.correct_lab_test_names(result["labTests"]))
+        result["transcriptChunked"] = chunked
         return result
 
     def clinical_helper(self, current_draft: dict, query: str) -> str:

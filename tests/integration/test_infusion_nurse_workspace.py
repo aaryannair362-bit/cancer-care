@@ -363,12 +363,12 @@ def test_completion_gated_on_every_medication_having_a_final_status(client, nurs
     client.post(f"/api/cca/treatment/medications/{admin_id}/event", headers=nurse_headers, json={"event_type": "COMPLETE"})
 
     done = client.post("/api/cca/treatment/completion", headers=nurse_headers, json={
-        "patient_id": patient.id, "order_id": order_id, "disposition": "Stable, tolerated infusion well.",
+        "patient_id": patient.id, "order_id": order_id, "disposition": "Completed",
         "access_status": "Removed", "red_flags_given": True, "next_treatment_date": "2026-09-20",
         "next_labs_required": "CBC, renal/liver function before next cycle.",
     })
     assert done.status_code == 200, done.text
-    assert done.json()["completion"]["disposition"] == "Stable, tolerated infusion well."
+    assert done.json()["completion"]["disposition"] == "Completed"
 
     already_locked = client.post("/api/cca/treatment/completion", headers=nurse_headers, json={
         "patient_id": patient.id, "order_id": order_id,

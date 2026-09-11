@@ -270,6 +270,7 @@
             <a class="sidebar-nav-item" id="nav-consultation" onclick="showTab('consultation')"><div class="nav-item-left"><span>🩺</span><span>Consultation</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-careplan" onclick="showTab('careplan')"><div class="nav-item-left"><span>📋</span><span>Care Plan</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-treatmentplan" onclick="showTab('treatmentplan')"><div class="nav-item-left"><span>💊</span><span>Treatment Plan</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-procedurenotes" onclick="showTab('procedurenotes')"><div class="nav-item-left"><span>🩻</span><span>Procedures &amp; Notes</span></div><span class="nav-chevron">›</span></a>
 
             <div class="sidebar-section-title">CLINICAL INTELLIGENCE / COORDINATION</div>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
@@ -452,6 +453,13 @@
                 <div id="treatmentplan-content"><!-- Populated via JS: loadTreatmentPlanView() --></div>
             </div>
 
+            <!-- ===== PROCEDURES & NOTES ===== -->
+            <div id="view-procedurenotes" class="view-panel">
+                <h1 class="page-title">Procedures &amp; Notes</h1>
+                <p class="page-subtitle">Bedside/outpatient procedures performed outside the operating theatre (e.g. bone marrow biopsy, lumbar puncture) — distinct from the surgical operative note.</p>
+                <div id="procedurenotes-content"><!-- Populated via JS: loadProcedureNotesView() --></div>
+            </div>
+
             <!-- ===== NEXUS: real 13(+1)-section clinical brief (renderNexusBrief, cca-summary.js)
                  above a coordination-task board that is still static/mock ===== -->
             <div id="view-nexus" class="view-panel">
@@ -588,6 +596,7 @@
             if (tab === 'consultation') refreshConsultationView();
             if (tab === 'careplan') loadCarePlanView();
             if (tab === 'treatmentplan') loadTreatmentPlanView();
+            if (tab === 'procedurenotes') loadProcedureNotesView();
             if (tab === 'guideline') loadGuidelinePathway();
             if (tab === 'staging') loadStagingWorkspace();
             if (tab === 'mdt') loadMdtWorkspace();
@@ -748,7 +757,12 @@
             try {
                 const transcript = await scribeVoiceRecorder.stop();
                 document.getElementById('scribe-transcript').value = transcript;
-                statusEl.textContent = transcript ? '✅ Transcribed. Review below, then Generate AI Draft.' : 'No speech detected — type manually.';
+                if (scribeVoiceRecorder.wasInterrupted()) {
+                    statusEl.textContent = '⚠️ Recording was interrupted before you clicked Stop — the transcript below may be incomplete. Review it carefully.';
+                    toast('Recording was interrupted — transcript may be incomplete', 'error');
+                } else {
+                    statusEl.textContent = transcript ? '✅ Transcribed. Review below, then Generate AI Draft.' : 'No speech detected — type manually.';
+                }
             } catch (err) {
                 statusEl.textContent = `⚠️ ${err.message || 'Transcription failed'} — type the transcript manually.`;
             }
@@ -1610,6 +1624,57 @@
                     </div>
                 `).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No version history.</p>';
             } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        // ---------------------------------------------------------------
+        // Procedures & Notes (Oncology Review Results PDF item 32: Medical Oncology)
+        // ---------------------------------------------------------------
+        async function loadProcedureNotesView() {
+            const container = document.getElementById('procedurenotes-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/procedure-notes`);
+                const notes = data.results || [];
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Recorded Procedures</div>
+                        ${notes.map(n => `
+                            <div class="med-card" style="background:var(--bg-card-subtle); border:1px solid var(--line); border-radius:var(--radius-md); padding:12px 14px; margin-bottom:8px;">
+                                <div style="font-size:13px; font-weight:700; color:var(--ink-900);">${escapeHtml(n.procedure_name)}</div>
+                                ${n.indication ? `<div style="font-size:12px; color:var(--ink-600); margin-top:2px;">Indication: ${escapeHtml(n.indication)}</div>` : ''}
+                                ${n.findings ? `<div style="font-size:12px; color:var(--ink-600); margin-top:2px;">Findings: ${escapeHtml(n.findings)}</div>` : ''}
+                                <div style="font-size:11px; color:var(--ink-500); margin-top:4px;">${escapeHtml(n.performed_by)} · ${new Date(n.performed_at).toLocaleString()}</div>
+                            </div>
+                        `).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No procedures recorded yet.</p>'}
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Record a Procedure</div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Procedure *</label><input type="text" id="pn-procedure" class="form-input" placeholder="e.g. Bone marrow biopsy" /></div>
+                            <div class="form-group"><label class="form-label">Indication</label><input type="text" id="pn-indication" class="form-input" /></div>
+                        </div>
+                        <div class="form-group"><label class="form-label">Findings</label><textarea id="pn-findings" class="form-textarea" rows="2"></textarea></div>
+                        <div class="form-group"><label class="form-label">Technique</label><textarea id="pn-technique" class="form-textarea" rows="2"></textarea></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Complications</label><textarea id="pn-complications" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-navy" onclick="submitProcedureNote()">Record Procedure Note</button>
+                    </div>
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitProcedureNote() {
+            const procedure = document.getElementById('pn-procedure').value;
+            if (!procedure) { toast('Procedure name is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/procedure-notes`, {
+                    procedure_name: procedure, indication: document.getElementById('pn-indication').value || null,
+                    findings: document.getElementById('pn-findings').value || null,
+                    technique: document.getElementById('pn-technique').value || null,
+                    complications: document.getElementById('pn-complications').value || null,
+                });
+                toast('Procedure note recorded', 'success');
+                loadProcedureNotesView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
         // ---------------------------------------------------------------

@@ -117,39 +117,38 @@ def test_scribe_transcript_backfills_missing_keys(engine):
     assert result["hpi"] == ""
 
 
-def test_scribe_transcript_truncates_very_long_transcripts_and_flags_it(engine):
+def test_scribe_transcript_chunks_very_long_transcripts_instead_of_truncating(engine):
     """Regression test for a real bug found live: Groq's real account-level limit is 8000
     tokens/minute (verified against live response headers, on both the standard and
-    higher-tier "Prod" key) -- a single scribe_transcript() call for a genuinely long
-    consultation needs more tokens than that in ONE request, which token_bucket.consume()
-    can never satisfy. That was previously caught by _generate_json's broad except and
-    silently returned an EMPTY draft with no error anywhere. Verified live: a 25,382-character
-    transcript worked; a 37,039-character one silently produced nothing. Now the transcript is
-    capped before it ever reaches the prompt, and the doctor is told, not left with a blank
-    draft that looks complete."""
-    captured = {}
+    higher-tier "Prod" key) -- a single Groq call for a genuinely long consultation needs more
+    tokens than that in ONE request, which token_bucket.consume() can never satisfy. That was
+    previously "fixed" by truncating the transcript before it ever reached the prompt --
+    correctly flagged, but still silently dropping real content past the cap. Now a long
+    transcript is instead split into multiple chunks (each comfortably under the per-call
+    limit), each extracted with its own call, and merged -- no content is discarded, just
+    processed across more than one paced request."""
+    prompt_lens = []
 
     def _fake(prompt, system=None, temperature=0.3, max_tokens=3000):
-        captured["prompt_len"] = len(prompt)
+        prompt_lens.append(len(prompt))
         return json.dumps({"chiefComplaint": "fever"})
 
     engine._call_groq_api = _fake
-    long_transcript = "Doctor: how are you feeling today. Patient: not well. " * 1000  # far over the cap
+    long_transcript = "Doctor: how are you feeling today. Patient: not well. " * 1000  # far over one chunk's cap
     result = engine.scribe_transcript(long_transcript)
 
     from app.scribe import _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING
-    assert captured["prompt_len"] < _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING + 2000  # cap + prompt template overhead
-    assert captured["prompt_len"] < len(long_transcript)
-    assert result["transcriptTruncated"] is True
-    assert "very long" in result["advice"]
+    assert len(prompt_lens) > 1  # more than one Groq call -- chunked, not a single truncated call
+    for prompt_len in prompt_lens:
+        assert prompt_len < _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING + 2000  # each call's own chunk + prompt overhead
+    assert result["transcriptChunked"] is True
     assert result["chiefComplaint"] == "fever"
 
 
 def test_scribe_transcript_does_not_flag_a_normal_length_transcript(engine):
     _stub_call(engine, raw_return=json.dumps({"chiefComplaint": "cough"}))
     result = engine.scribe_transcript("Doctor: how are you. Patient: I have a cough for two days.")
-    assert result["transcriptTruncated"] is False
-    assert "very long" not in result["advice"]
+    assert result["transcriptChunked"] is False
 
 
 def test_scribe_transcript_backfills_explicit_null_values():

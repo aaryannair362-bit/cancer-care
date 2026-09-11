@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aivana — Palliative Care</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-page: #F1F5F9; --bg-sidebar: #EEF2F6; --bg-surface: #FFFFFF; --bg-card-subtle: #F8FAFC;
+            --ink-900: #0F172A; --ink-800: #1E293B; --ink-700: #334155; --ink-600: #475569; --ink-500: #64748B; --ink-400: #94A3B8; --ink-300: #CBD5E1;
+            --line: #E2E8F0; --line-subtle: #F1F5F9;
+            --brand-primary: #3B82F6; --brand-dark: #1E3A8A; --navy-action: #2A4365; --navy-action-hover: #1E3A8A;
+            --green-badge-bg: #DCFCE7; --green-badge-text: #166534;
+            --amber-badge-bg: #FEF3C7; --amber-badge-text: #92400E;
+            --rose-badge-bg: #FFE4E6; --rose-badge-text: #9F1239;
+            --blue-badge-bg: #E0E7FF; --blue-badge-text: #3730A3;
+            --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px; --radius-full: 9999px;
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05); --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', -apple-system, sans-serif; background: var(--bg-page); color: var(--ink-800); height: 100vh; display: flex; flex-direction: column; overflow: hidden; -webkit-font-smoothing: antialiased; }
+        .topbar { height: 64px; background: var(--bg-surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; flex-shrink: 0; z-index: 20; }
+        .brand-logo { font-size: 20px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; display: flex; align-items: center; gap: 8px; text-decoration: none; }
+        .header-actions { display: flex; align-items: center; gap: 12px; }
+        .role-badge-pill { display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: #F8FAFC; border: 1px solid var(--line); border-radius: var(--radius-full); font-size: 13px; font-weight: 500; color: var(--ink-800); cursor: pointer; }
+        .avatar-pill { width: 38px; height: 38px; border-radius: var(--radius-full); background: #E2E8F0; color: var(--ink-800); display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; border: 1px solid var(--line); cursor: pointer; }
+        .app-body { flex: 1; display: flex; overflow: hidden; }
+        .sidebar { width: 240px; background: var(--bg-sidebar); border-right: 1px solid var(--line); padding: 20px 14px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; overflow-y: auto; }
+        .sidebar-section-title { font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: var(--ink-400); text-transform: uppercase; padding: 10px 12px 6px; }
+        .sidebar-nav-item { display: flex; align-items: center; justify-content: space-between; padding: 11px 14px; border-radius: var(--radius-md); font-size: 13.5px; font-weight: 500; color: var(--ink-700); text-decoration: none; cursor: pointer; }
+        .sidebar-nav-item:hover { background: rgba(255, 255, 255, 0.6); color: var(--ink-900); }
+        .sidebar-nav-item.active { background: #FFFFFF; color: var(--ink-900); font-weight: 600; box-shadow: var(--shadow-sm); border: 1px solid rgba(226, 232, 240, 0.8); }
+        .nav-item-left { display: flex; align-items: center; gap: 10px; }
+        .nav-chevron { color: var(--ink-400); font-size: 12px; }
+        .canvas { flex: 1; overflow-y: auto; padding: 28px 36px; }
+        .view-panel { display: none; }
+        .view-panel.active { display: block; }
+        .page-title { font-size: 26px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; margin-bottom: 4px; }
+        .page-subtitle { font-size: 13.5px; color: var(--ink-500); margin-bottom: 20px; }
+        .section-card { background: var(--bg-surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 20px; box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+        .section-title { font-size: 16px; font-weight: 700; color: var(--ink-900); }
+        .badge { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: var(--radius-sm); display: inline-flex; align-items: center; }
+        .badge-green { background: var(--green-badge-bg); color: var(--green-badge-text); }
+        .badge-amber { background: var(--amber-badge-bg); color: var(--amber-badge-text); }
+        .badge-rose { background: var(--rose-badge-bg); color: var(--rose-badge-text); }
+        .badge-blue { background: var(--blue-badge-bg); color: var(--blue-badge-text); }
+        .btn-navy { background: var(--navy-action); color: #FFFFFF; font-size: 12.5px; font-weight: 600; padding: 9px 16px; border-radius: var(--radius-sm); border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-navy:hover { background: var(--navy-action-hover); }
+        .btn-outline { background: #FFFFFF; border: 1px solid var(--line); color: var(--ink-700); font-size: 12.5px; font-weight: 600; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-outline:hover { border-color: var(--ink-400); background: #F8FAFC; }
+        .btn-sm { font-size: 11px; padding: 6px 10px; }
+        .worklist-row { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; margin-bottom: 10px; display: grid; grid-template-columns: 1.3fr 1fr 1fr auto; gap: 12px; align-items: center; }
+        .wl-label { font-size: 11px; color: var(--ink-500); text-transform: uppercase; margin-bottom: 2px; }
+        .wl-value { font-size: 13.5px; font-weight: 700; color: var(--ink-900); }
+        .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+        .form-group { display: flex; flex-direction: column; gap: 6px; }
+        .form-label { font-size: 12px; font-weight: 600; color: var(--ink-700); }
+        .form-input, .form-select, .form-textarea { width: 100%; height: 38px; padding: 0 12px; background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; color: var(--ink-900); outline: none; }
+        .form-textarea { height: auto; padding: 10px 12px; }
+        .med-card { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 12px 14px; margin-bottom: 8px; }
+        .med-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+        .med-card-title { font-size: 13px; font-weight: 700; color: var(--ink-900); }
+        .med-card-meta { font-size: 12px; color: var(--ink-600); margin-top: 2px; }
+        .med-card-actions { display: flex; gap: 8px; margin-top: 8px; }
+        .empty-hint { font-size: 12.5px; color: var(--ink-500); }
+        .hms-toast { position: fixed; bottom: 24px; right: 24px; background: var(--ink-900); color: #fff; padding: 12px 18px; border-radius: var(--radius-md); font-size: 13px; box-shadow: var(--shadow-md); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 999; max-width: 360px; }
+        .hms-toast--visible { opacity: 1; transform: translateY(0); }
+        .hms-toast--success { background: var(--green-badge-text); }
+        .hms-toast--error { background: var(--rose-badge-text); }
+        .hms-toast--info { background: var(--blue-badge-text); }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <a href="/palliative_care.html" class="brand-logo">Aivana</a>
+        <div></div>
+        <div class="header-actions">
+            <div class="role-badge-pill" onclick="location.href='/index.html'"><span>Palliative Care</span><span>▾</span></div>
+            <div class="avatar-pill" title="Logged in">P ▾</div>
+        </div>
+    </header>
+    <div class="app-body">
+        <aside class="sidebar">
+            <div class="sidebar-section-title">CLINICAL</div>
+            <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Patients</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-history" onclick="showTab('history')"><div class="nav-item-left"><span>🗂️</span><span>Patient History</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-palliativeorders" onclick="showTab('palliativeorders')"><div class="nav-item-left"><span>💊</span><span>Palliative Orders</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-procedurenotes" onclick="showTab('procedurenotes')"><div class="nav-item-left"><span>🩻</span><span>Procedures &amp; Notes</span></div><span class="nav-chevron">›</span></a>
+        </aside>
+        <main class="canvas">
+            <div id="view-patients" class="view-panel active">
+                <h1 class="page-title">Patients</h1>
+                <p class="page-subtitle">Palliative Care caseload</p>
+                <div class="section-card">
+                    <div class="section-head"><div class="section-title">Patient Census</div><span class="badge badge-blue" id="patient-count">0 patients</span></div>
+                    <div id="patient-list"><!-- Populated via JS: loadPatientList() --></div>
+                </div>
+            </div>
+
+            <div id="view-history" class="view-panel">
+                <h1 class="page-title">Patient History</h1>
+                <p class="page-subtitle">Documents, diagnoses, prior investigations/results, medications, and visit history for the selected patient.</p>
+                <div id="history-content"><!-- Populated via JS: renderCaseSummaryPanel() --></div>
+            </div>
+
+            <div id="view-palliativeorders" class="view-panel">
+                <h1 class="page-title">Palliative Orders</h1>
+                <p class="page-subtitle">Supportive/comfort-care orders (pain management, symptom control, ...) — distinct from the chemotherapy Treatment Order pipeline.</p>
+                <div id="palliativeorders-content"><!-- Populated via JS: loadPalliativeOrdersView() --></div>
+            </div>
+
+            <div id="view-procedurenotes" class="view-panel">
+                <h1 class="page-title">Procedures &amp; Notes</h1>
+                <p class="page-subtitle">Bedside/outpatient palliative procedures (e.g. nerve block, paracentesis) — distinct from the surgical operative note.</p>
+                <div id="procedurenotes-content"><!-- Populated via JS: loadProcedureNotesView() --></div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/cca-summary.js"></script>
+    <script>
+        const ccaUser = Auth.requirePage(['CCAPalliativeCareSpecialist', 'Admin']);
+        const CCA_API = '/cca';
+        let currentPatientId = null;
+
+        function showTab(tab) {
+            document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.sidebar-nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(`view-${tab}`).classList.add('active');
+            document.getElementById(`nav-${tab}`).classList.add('active');
+            if (tab === 'patients') loadPatientList();
+            if (tab === 'history') renderCaseSummaryPanel('history-content', currentPatientId);
+            if (tab === 'palliativeorders') loadPalliativeOrdersView();
+            if (tab === 'procedurenotes') loadProcedureNotesView();
+        }
+
+        function openPatient(id) { currentPatientId = id; showTab('history'); }
+
+        async function loadPatientList() {
+            const listEl = document.getElementById('patient-list');
+            try {
+                const data = await Api.get(`${CCA_API}/patients`);
+                const patients = data.results || [];
+                document.getElementById('patient-count').textContent = `${patients.length} patients`;
+                listEl.innerHTML = patients.map(p => `
+                    <div class="worklist-row">
+                        <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(p.name)}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(p.mrn)}</div></div>
+                        <div><div class="wl-label">Age/Sex</div><div class="wl-value" style="font-size:13px;">${p.age != null ? escapeHtml(String(p.age)) + 'y' : '—'} / ${escapeHtml(p.sex)}</div></div>
+                        <div><div class="wl-label">Journey</div><div class="wl-value" style="font-size:13px;">${escapeHtml(p.journey_state || '—')}</div></div>
+                        <div><button class="btn-navy btn-sm" onclick="openPatient(${Number(p.id)})">Open →</button></div>
+                    </div>
+                `).join('') || '<p class="empty-hint">No patients.</p>';
+            } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        // ---------------------------------------------------------------
+        // Palliative Orders (Oncology Review Results PDF item 30)
+        // ---------------------------------------------------------------
+        const PALLIATIVE_STATUS_ORDER = ['Draft', 'Signed', 'Active', 'Discontinued'];
+        const PALLIATIVE_STATUS_BADGE = { Draft: 'badge-amber', Signed: 'badge-blue', Active: 'badge-green', Discontinued: 'badge-rose' };
+
+        async function loadPalliativeOrdersView() {
+            const container = document.getElementById('palliativeorders-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p class="empty-hint">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/palliative-orders`);
+                const orders = data.results || [];
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Orders</div>
+                        ${orders.map(o => `
+                            <div class="med-card">
+                                <div class="med-card-head"><div class="med-card-title">${escapeHtml(o.order_type)}</div><span class="badge ${PALLIATIVE_STATUS_BADGE[o.status] || 'badge-amber'}">${escapeHtml(o.status)}</span></div>
+                                <div class="med-card-meta">${escapeHtml(o.instructions)}</div>
+                                ${o.discontinued_reason ? `<div class="med-card-meta" style="color:var(--rose-badge-text);">Discontinued: ${escapeHtml(o.discontinued_reason)}</div>` : ''}
+                                <div class="med-card-actions">
+                                    ${o.status === 'Draft' ? `<button class="btn-navy btn-sm" onclick="transitionPalliativeOrder(${o.id}, 'Signed')">Sign</button>` : ''}
+                                    ${o.status === 'Signed' ? `<button class="btn-navy btn-sm" onclick="transitionPalliativeOrder(${o.id}, 'Active')">Mark Active</button>` : ''}
+                                    ${['Signed', 'Active'].includes(o.status) ? `<button class="btn-outline btn-sm" style="color:var(--rose-badge-text);" onclick="discontinuePalliativeOrder(${o.id})">Discontinue</button>` : ''}
+                                </div>
+                            </div>
+                        `).join('') || '<p class="empty-hint">No palliative orders yet.</p>'}
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">New Order</div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Order type *</label><input type="text" id="po-type" class="form-input" placeholder="e.g. Pain Management, Symptom Control, Comfort Care" /></div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Instructions *</label><textarea id="po-instructions" class="form-textarea" rows="3"></textarea></div>
+                        <button class="btn-navy" onclick="submitPalliativeOrder()">Create Order</button>
+                    </div>
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitPalliativeOrder() {
+            const orderType = document.getElementById('po-type').value;
+            const instructions = document.getElementById('po-instructions').value;
+            if (!orderType || !instructions) { toast('Order type and instructions are required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/palliative-orders`, { order_type: orderType, instructions });
+                toast('Palliative order created', 'success');
+                loadPalliativeOrdersView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function transitionPalliativeOrder(orderId, status) {
+            try {
+                await Api.patch(`${CCA_API}/palliative-orders/${orderId}`, { status });
+                toast('Order updated', 'success');
+                loadPalliativeOrdersView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function discontinuePalliativeOrder(orderId) {
+            const reason = prompt('Reason for discontinuing this order:');
+            if (!reason) { toast('A documented reason is required', 'error'); return; }
+            try {
+                await Api.patch(`${CCA_API}/palliative-orders/${orderId}`, { status: 'Discontinued', discontinued_reason: reason });
+                toast('Order discontinued', 'success');
+                loadPalliativeOrdersView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---------------------------------------------------------------
+        // Procedures & Notes (Oncology Review Results PDF item 31: Palliative)
+        // ---------------------------------------------------------------
+        async function loadProcedureNotesView() {
+            const container = document.getElementById('procedurenotes-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p class="empty-hint">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/procedure-notes`);
+                const notes = data.results || [];
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Recorded Procedures</div>
+                        ${notes.map(n => `
+                            <div class="med-card">
+                                <div class="med-card-title">${escapeHtml(n.procedure_name)}</div>
+                                ${n.indication ? `<div class="med-card-meta">Indication: ${escapeHtml(n.indication)}</div>` : ''}
+                                ${n.findings ? `<div class="med-card-meta">Findings: ${escapeHtml(n.findings)}</div>` : ''}
+                                <div class="med-card-meta" style="font-size:11px;">${escapeHtml(n.performed_by)} · ${new Date(n.performed_at).toLocaleString()}</div>
+                            </div>
+                        `).join('') || '<p class="empty-hint">No procedures recorded yet.</p>'}
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Record a Procedure</div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Procedure *</label><input type="text" id="pn-procedure" class="form-input" placeholder="e.g. Therapeutic paracentesis" /></div>
+                            <div class="form-group"><label class="form-label">Indication</label><input type="text" id="pn-indication" class="form-input" /></div>
+                        </div>
+                        <div class="form-group"><label class="form-label">Findings</label><textarea id="pn-findings" class="form-textarea" rows="2"></textarea></div>
+                        <div class="form-group"><label class="form-label">Technique</label><textarea id="pn-technique" class="form-textarea" rows="2"></textarea></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Complications</label><textarea id="pn-complications" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-navy" onclick="submitProcedureNote()">Record Procedure Note</button>
+                    </div>
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitProcedureNote() {
+            const procedure = document.getElementById('pn-procedure').value;
+            if (!procedure) { toast('Procedure name is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/procedure-notes`, {
+                    procedure_name: procedure, indication: document.getElementById('pn-indication').value || null,
+                    findings: document.getElementById('pn-findings').value || null,
+                    technique: document.getElementById('pn-technique').value || null,
+                    complications: document.getElementById('pn-complications').value || null,
+                });
+                toast('Procedure note recorded', 'success');
+                loadProcedureNotesView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => { loadPatientList(); });
+    </script>
+</body>
+</html>

@@ -270,6 +270,7 @@
             <a class="sidebar-nav-item" id="nav-consultation" onclick="showTab('consultation')"><div class="nav-item-left"><span>🩺</span><span>Consultation</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-careplan" onclick="showTab('careplan')"><div class="nav-item-left"><span>📋</span><span>Care Plan</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-treatmentplan" onclick="showTab('treatmentplan')"><div class="nav-item-left"><span>💊</span><span>Treatment Plan</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-surgicalplan" onclick="showTab('surgicalplan')"><div class="nav-item-left"><span>🔪</span><span>Surgical Plan</span></div><span class="nav-chevron">›</span></a>
 
             <div class="sidebar-section-title">CLINICAL INTELLIGENCE / COORDINATION</div>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
@@ -452,6 +453,13 @@
                 <div id="treatmentplan-content"><!-- Populated via JS: loadTreatmentPlanView() --></div>
             </div>
 
+            <!-- ===== SURGICAL PLAN ===== -->
+            <div id="view-surgicalplan" class="view-panel">
+                <h1 class="page-title">Surgical Plan</h1>
+                <p class="page-subtitle">Procedure planning through post-op findings, plus OR documentation: intra-operative monitoring, the operative note, specimen labelling/lab handoff, and any intra-operative blood transfusion.</p>
+                <div id="surgicalplan-content"><!-- Populated via JS: loadSurgicalPlanView() --></div>
+            </div>
+
             <!-- ===== NEXUS (static demo hub) ===== -->
             <div id="view-nexus" class="view-panel">
                 <h1 class="page-title">NEXUS</h1>
@@ -587,6 +595,7 @@
             if (tab === 'consultation') refreshConsultationView();
             if (tab === 'careplan') loadCarePlanView();
             if (tab === 'treatmentplan') loadTreatmentPlanView();
+            if (tab === 'surgicalplan') loadSurgicalPlanView();
             if (tab === 'guideline') loadGuidelinePathway();
             if (tab === 'staging') loadStagingWorkspace();
             if (tab === 'mdt') loadMdtWorkspace();
@@ -747,7 +756,12 @@
             try {
                 const transcript = await scribeVoiceRecorder.stop();
                 document.getElementById('scribe-transcript').value = transcript;
-                statusEl.textContent = transcript ? '✅ Transcribed. Review below, then Generate AI Draft.' : 'No speech detected — type manually.';
+                if (scribeVoiceRecorder.wasInterrupted()) {
+                    statusEl.textContent = '⚠️ Recording was interrupted before you clicked Stop — the transcript below may be incomplete. Review it carefully.';
+                    toast('Recording was interrupted — transcript may be incomplete', 'error');
+                } else {
+                    statusEl.textContent = transcript ? '✅ Transcribed. Review below, then Generate AI Draft.' : 'No speech detected — type manually.';
+                }
             } catch (err) {
                 statusEl.textContent = `⚠️ ${err.message || 'Transcription failed'} — type the transcript manually.`;
             }
@@ -1609,6 +1623,262 @@
                     </div>
                 `).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No version history.</p>';
             } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        // ---------------------------------------------------------------
+        // Surgical Plan (Oncology Review Results PDF item 13, plus OR documentation items
+        // 24-27: Intra-operative Monitoring, Intra-operative Notes, Specimen Labelling and Lab
+        // Handoff, Surgical Blood Transfusion Record). The plan itself and OR documentation are
+        // both open to the Surgical Oncologist; a Surgical Nurse (surgical_nurse.html) can also
+        // write the four OR documentation sections, matching the backend's _require_surgical_team.
+        // ---------------------------------------------------------------
+        const SURGICAL_STATUS_ORDER = ['recommended', 'surgeon_reviewed', 'planned', 'pre_op_ready', 'scheduled', 'performed', 'post_op', 'histopathology_available'];
+        const SURGICAL_STATUS_BADGE = { recommended: 'badge-amber', surgeon_reviewed: 'badge-amber', planned: 'badge-blue', pre_op_ready: 'badge-blue', scheduled: 'badge-blue', performed: 'badge-green', post_op: 'badge-green', histopathology_available: 'badge-green' };
+        let currentSurgicalPlanId = null;
+
+        async function loadSurgicalPlanView() {
+            const container = document.getElementById('surgicalplan-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/surgical-plans`);
+                const plans = data.surgical_plans || [];
+                if (!plans.length) {
+                    container.innerHTML = `
+                        <div class="section-card">
+                            <div class="section-title">Recommend a Surgical Plan</div>
+                            <div class="form-grid-2">
+                                <div class="form-group"><label class="form-label">Procedure</label><input type="text" id="sp-procedure" class="form-input" placeholder="e.g. Modified radical mastectomy" /></div>
+                                <div class="form-group"><label class="form-label">Intent</label><input type="text" id="sp-intent" class="form-input" value="Curative" /></div>
+                            </div>
+                            <div class="form-grid-2">
+                                <div class="form-group"><label class="form-label">Anatomical Site</label><input type="text" id="sp-site" class="form-input" /></div>
+                                <div class="form-group"><label class="form-label">Laterality</label><select id="sp-laterality" class="form-select"><option value="">N/A</option><option value="left">Left</option><option value="right">Right</option><option value="bilateral">Bilateral</option></select></div>
+                            </div>
+                            <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Indication</label><textarea id="sp-indication" class="form-textarea" rows="2"></textarea></div>
+                            <button class="btn-navy" onclick="submitNewSurgicalPlan()">Recommend Plan</button>
+                        </div>`;
+                    return;
+                }
+                const plan = plans[0];
+                currentSurgicalPlanId = plan.id;
+                const idx = SURGICAL_STATUS_ORDER.indexOf(plan.status);
+                const nextStatus = idx >= 0 && idx < SURGICAL_STATUS_ORDER.length - 1 ? SURGICAL_STATUS_ORDER[idx + 1] : null;
+
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-head"><div class="section-title">${escapeHtml(plan.procedure)}</div><span class="badge ${SURGICAL_STATUS_BADGE[plan.status] || 'badge-amber'}">${escapeHtml(plan.status.replace(/_/g, ' '))}</span></div>
+                        <div class="section-sub">${escapeHtml(plan.anatomical_site || '')}${plan.laterality ? ' · ' + escapeHtml(plan.laterality) : ''} · ${escapeHtml(plan.intent || '')}</div>
+                        ${plan.indication ? `<div class="section-sub" style="margin-top:6px;">${escapeHtml(plan.indication)}</div>` : ''}
+                        ${nextStatus && plan.status !== 'scheduled' ? `<button class="btn-navy" style="margin-top:10px;" onclick="transitionSurgicalPlan('${nextStatus}')">Move to: ${escapeHtml(nextStatus.replace(/_/g, ' '))}</button>` : ''}
+                        ${plan.status === 'scheduled' ? `<button class="btn-navy" style="margin-top:10px;" onclick="transitionSurgicalPlan('performed')">Mark Performed</button>` : ''}
+                    </div>
+                    ${['scheduled', 'performed', 'post_op'].includes(plan.status) ? `
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Record Surgical Outcome</div>
+                        <div class="form-group"><label class="form-label">Performed Procedure</label><textarea id="sp-performed-procedure" class="form-textarea" rows="2">${escapeHtml(plan.performed_procedure || '')}</textarea></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Histopathology Summary (once available)</label><textarea id="sp-histopathology" class="form-textarea" rows="2">${escapeHtml(plan.histopathology_summary || '')}</textarea></div>
+                        <button class="btn-navy" onclick="submitSurgicalOutcome()">Save Outcome</button>
+                    </div>` : ''}
+                    <div class="section-card"><div class="section-title" style="margin-bottom:10px;">Intra-operative Monitoring</div><div id="sp-monitoring-list"></div>
+                        <div class="form-grid-3" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Vitals</label><input type="text" id="sp-mon-vitals" class="form-input" placeholder="e.g. BP 118/76, pulse 78" /></div>
+                            <div class="form-group"><label class="form-label">Anaesthesia status</label><input type="text" id="sp-mon-anaesthesia" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Blood loss estimate</label><input type="text" id="sp-mon-blood-loss" class="form-input" /></div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:8px;"><label class="form-label">Events / complications</label><input type="text" id="sp-mon-events" class="form-input" /></div>
+                        <button class="btn-outline" onclick="submitIntraopMonitoring()">+ Add Observation</button>
+                    </div>
+                    <div class="section-card"><div class="section-title" style="margin-bottom:10px;">Operative Note</div><div id="sp-notes-list"></div>
+                        <div class="form-grid-2" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Surgeon</label><input type="text" id="sp-note-surgeon" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Estimated blood loss</label><input type="text" id="sp-note-ebl" class="form-input" /></div>
+                        </div>
+                        <div class="form-group"><label class="form-label">Procedure Performed *</label><textarea id="sp-note-procedure" class="form-textarea" rows="2"></textarea></div>
+                        <div class="form-group"><label class="form-label">Findings</label><textarea id="sp-note-findings" class="form-textarea" rows="2"></textarea></div>
+                        <div class="form-group" style="margin-bottom:8px;"><label class="form-label">Complications</label><textarea id="sp-note-complications" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-outline" onclick="submitOperativeNote()">+ Add Operative Note</button>
+                    </div>
+                    <div class="section-card"><div class="section-title" style="margin-bottom:10px;">Specimen Labelling &amp; Lab Handoff</div><div id="sp-specimens-list"></div>
+                        <div class="form-grid-3" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Specimen Label *</label><input type="text" id="sp-spec-label" class="form-input" placeholder="e.g. Left breast mass" /></div>
+                            <div class="form-group"><label class="form-label">Specimen Type</label><input type="text" id="sp-spec-type" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Container</label><input type="text" id="sp-spec-container" class="form-input" placeholder="e.g. Formalin jar" /></div>
+                        </div>
+                        <button class="btn-outline" onclick="submitSpecimen()">+ Label Specimen</button>
+                    </div>
+                    <div class="section-card"><div class="section-title" style="margin-bottom:10px;">Surgical Blood Transfusion</div><div id="sp-blood-list"></div>
+                        <div class="form-grid-3" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Product Type *</label><select id="sp-blood-type" class="form-select"><option>PRBC</option><option>Platelets</option><option>FFP</option><option>Cryoprecipitate</option><option>Other</option></select></div>
+                            <div class="form-group"><label class="form-label">Unit ID *</label><input type="text" id="sp-blood-unit" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Blood group</label><input type="text" id="sp-blood-group" class="form-input" /></div>
+                        </div>
+                        <div class="form-checkbox-row"><input type="checkbox" id="sp-blood-crossmatch"/> <label for="sp-blood-crossmatch">Crossmatch/compatibility confirmed</label></div>
+                        <button class="btn-outline" onclick="submitSurgicalBloodTransfusion()">+ Record Unit</button>
+                    </div>
+                `;
+                loadIntraopMonitoring();
+                loadOperativeNotes();
+                loadSpecimens();
+                loadSurgicalBloodTransfusions();
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitNewSurgicalPlan() {
+            try {
+                await Api.post(`${CCA_API}/surgical-plans`, {
+                    patient_id: currentPatientId, procedure: document.getElementById('sp-procedure').value,
+                    intent: document.getElementById('sp-intent').value, anatomical_site: document.getElementById('sp-site').value,
+                    laterality: document.getElementById('sp-laterality').value || null,
+                    indication: document.getElementById('sp-indication').value || null,
+                });
+                toast('Surgical plan recommended', 'success');
+                loadSurgicalPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function transitionSurgicalPlan(status) {
+            try {
+                await Api.patch(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}`, { status });
+                toast('Surgical plan updated', 'success');
+                loadSurgicalPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitSurgicalOutcome() {
+            const performed = document.getElementById('sp-performed-procedure').value;
+            if (!performed) { toast('Performed procedure is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/performed`, {
+                    performed_procedure: performed, histopathology_summary: document.getElementById('sp-histopathology').value || null,
+                });
+                toast('Surgical outcome saved', 'success');
+                loadSurgicalPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadIntraopMonitoring() {
+            const el = document.getElementById('sp-monitoring-list');
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/intraop-monitoring`);
+                el.innerHTML = (data.results || []).map(o => `
+                    <div class="med-card-meta" style="padding:4px 0;">${new Date(o.observation_time).toLocaleTimeString()} — ${o.vitals ? escapeHtml(JSON.stringify(o.vitals)) : ''}${o.anaesthesia_status ? ' · ' + escapeHtml(o.anaesthesia_status) : ''}${o.blood_loss_estimate ? ' · Blood loss: ' + escapeHtml(o.blood_loss_estimate) : ''}${o.events_complications ? ' · ' + escapeHtml(o.events_complications) : ''}</div>
+                `).join('') || '<p class="empty-hint">No observations recorded yet.</p>';
+            } catch (err) { el.innerHTML = `<p style="color:var(--rose-badge-text); font-size:12px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function submitIntraopMonitoring() {
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/intraop-monitoring`, {
+                    vitals: { free_text: document.getElementById('sp-mon-vitals').value || null },
+                    anaesthesia_status: document.getElementById('sp-mon-anaesthesia').value || null,
+                    blood_loss_estimate: document.getElementById('sp-mon-blood-loss').value || null,
+                    events_complications: document.getElementById('sp-mon-events').value || null,
+                });
+                toast('Observation recorded', 'success');
+                loadIntraopMonitoring();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadOperativeNotes() {
+            const el = document.getElementById('sp-notes-list');
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/operative-notes`);
+                el.innerHTML = (data.results || []).map(n => `
+                    <div class="med-card">
+                        <div class="med-card-title">${escapeHtml(n.procedure_performed)}</div>
+                        ${n.findings ? `<div class="med-card-meta">Findings: ${escapeHtml(n.findings)}</div>` : ''}
+                        ${n.complications ? `<div class="med-card-meta">Complications: ${escapeHtml(n.complications)}</div>` : ''}
+                        <div class="med-card-meta" style="font-size:11px;">${escapeHtml(n.authored_by)} · ${new Date(n.authored_at).toLocaleString()}</div>
+                    </div>
+                `).join('') || '<p class="empty-hint">No operative note recorded yet.</p>';
+            } catch (err) { el.innerHTML = `<p style="color:var(--rose-badge-text); font-size:12px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function submitOperativeNote() {
+            const procedure = document.getElementById('sp-note-procedure').value;
+            if (!procedure) { toast('Procedure Performed is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/operative-notes`, {
+                    procedure_performed: procedure, surgeon: document.getElementById('sp-note-surgeon').value || null,
+                    estimated_blood_loss: document.getElementById('sp-note-ebl').value || null,
+                    findings: document.getElementById('sp-note-findings').value || null,
+                    complications: document.getElementById('sp-note-complications').value || null,
+                });
+                toast('Operative note recorded', 'success');
+                loadOperativeNotes();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadSpecimens() {
+            const el = document.getElementById('sp-specimens-list');
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/specimens`);
+                el.innerHTML = (data.results || []).map(s => `
+                    <div class="med-card">
+                        <div class="med-card-head"><div class="med-card-title">${escapeHtml(s.specimen_label)}</div><span class="badge ${s.status === 'ReceivedByLab' ? 'badge-green' : 'badge-amber'}">${escapeHtml(s.status)}</span></div>
+                        <div class="med-card-meta">${escapeHtml(s.specimen_type || '—')}${s.container_type ? ' · ' + escapeHtml(s.container_type) : ''}</div>
+                        <div class="med-card-actions">
+                            ${s.status === 'Collected' ? `<button class="btn-navy btn-sm" onclick="submitSpecimenEvent(${s.id}, 'HandedOff')">Hand Off</button>` : ''}
+                            ${s.status === 'HandedOff' ? `<button class="btn-navy btn-sm" onclick="submitSpecimenEvent(${s.id}, 'ReceivedByLab')">Mark Received by Lab</button>` : ''}
+                        </div>
+                    </div>
+                `).join('') || '<p class="empty-hint">No specimens recorded yet.</p>';
+            } catch (err) { el.innerHTML = `<p style="color:var(--rose-badge-text); font-size:12px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function submitSpecimen() {
+            const label = document.getElementById('sp-spec-label').value;
+            if (!label) { toast('Specimen label is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/specimens`, {
+                    specimen_label: label, specimen_type: document.getElementById('sp-spec-type').value || null,
+                    container_type: document.getElementById('sp-spec-container').value || null,
+                });
+                toast('Specimen labelled and collected', 'success');
+                loadSpecimens();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitSpecimenEvent(specimenId, status) {
+            try {
+                const payload = { status };
+                if (status === 'HandedOff') {
+                    const to = prompt('Handed off to (name):');
+                    if (!to) { toast('A recipient name is required', 'error'); return; }
+                    payload.handed_off_to = to;
+                } else if (status === 'ReceivedByLab') {
+                    const receiver = prompt('Received by lab (name):');
+                    if (!receiver) { toast('A recipient name is required', 'error'); return; }
+                    payload.received_by_lab = receiver;
+                }
+                await Api.post(`${CCA_API}/specimens/${specimenId}/event`, payload);
+                toast('Specimen status updated', 'success');
+                loadSpecimens();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadSurgicalBloodTransfusions() {
+            const el = document.getElementById('sp-blood-list');
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/blood-transfusions`);
+                el.innerHTML = (data.results || []).map(b => `
+                    <div class="med-card-meta" style="padding:4px 0;">${escapeHtml(b.product_type)} · Unit ${escapeHtml(b.unit_id)}${b.blood_group ? ' · ' + escapeHtml(b.blood_group) : ''}${b.crossmatch_confirmed ? ' · ✔ Crossmatch confirmed' : ''}</div>
+                `).join('') || '<p class="empty-hint">No blood products recorded yet.</p>';
+            } catch (err) { el.innerHTML = `<p style="color:var(--rose-badge-text); font-size:12px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function submitSurgicalBloodTransfusion() {
+            const unitId = document.getElementById('sp-blood-unit').value;
+            if (!unitId) { toast('Unit ID is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/blood-transfusions`, {
+                    product_type: document.getElementById('sp-blood-type').value, unit_id: unitId,
+                    blood_group: document.getElementById('sp-blood-group').value || null,
+                    crossmatch_confirmed: document.getElementById('sp-blood-crossmatch').checked,
+                });
+                toast('Blood transfusion recorded', 'success');
+                loadSurgicalBloodTransfusions();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
         // ---------------------------------------------------------------

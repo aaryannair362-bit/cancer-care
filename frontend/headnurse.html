@@ -458,6 +458,7 @@ async function showPatientDetail(patientId) {
             `).join('') || '<p style="color:var(--ink-400);">No vitals recorded.</p>'}
         </div>
         <div id="tasks-tab" class="tab-content" style="display:none;">
+            <button class="btn-primary" style="margin-bottom:10px;" onclick="raiseLabRequest(${patient.id})">🧪 Raise Lab Request</button>
             ${data.tasks.map(t => `
                 <div style="background:var(--paper-alt);padding:8px;border-radius:6px;margin-bottom:6px;${t.is_overdue ? 'border-left:3px solid var(--clay-600);' : ''}">
                     <div>${taskTypeBadge(t)} <strong>${t.description}</strong> - ${t.status} ${t.is_overdue ? '<span style="color:var(--clay-600);">⏰ Overdue</span>' : ''}</div>
@@ -472,18 +473,29 @@ async function showPatientDetail(patientId) {
             <h3 style="font-size:13px;color:var(--ink-500);margin-bottom:6px;text-transform:uppercase;">💊 Currently Active${activeMedsData.admission_day ? ` (Day ${activeMedsData.admission_day})` : ''}</h3>
             <div style="margin-bottom:16px;">
                 ${(activeMedsData.active_medications || []).map(m => `
-                    <div style="background:var(--paper-alt);padding:6px 10px;border-radius:6px;margin-bottom:4px;font-size:13px;">${m.drugName || 'Unknown'} - ${m.dose || 'N/A'} - ${m.frequency || 'N/A'} - ${m.route || 'N/A'}</div>
+                    <div style="background:var(--paper-alt);padding:6px 10px;border-radius:6px;margin-bottom:4px;font-size:13px; display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                        <span>${m.drugName || 'Unknown'} - ${m.dose || 'N/A'} - ${m.frequency || 'N/A'} - ${m.route || 'N/A'}</span>
+                        <button class="btn-secondary" style="font-size:11px; padding:4px 8px; white-space:nowrap;" onclick="recordMedicationAdministration(${patient.id}, '${(m.drugName || '').replace(/'/g, "\\'")}', '${(m.dose || '').replace(/'/g, "\\'")}', '${(m.route || '').replace(/'/g, "\\'")}')">✓ Record</button>
+                    </div>
                 `).join('') || '<p style="color:var(--ink-400);">No active medications on record.</p>'}
             </div>
+            <div id="mar-history-${patient.id}" style="margin-bottom:16px; font-size:12px;"></div>
             <h3 style="font-size:13px;color:var(--ink-500);margin-bottom:6px;text-transform:uppercase;">📋 Consultation History</h3>
-            ${data.consultations.map(c => `
-                <div style="background:var(--paper-alt);padding:8px;border-radius:6px;margin-bottom:6px;">
+            ${data.consultations.map(c => {
+                // Same visit_type distinction as ipd.html's Ward Round modal (Oncology Review
+                // Results PDF item 17) -- Nurse Daily Notes stay in the separate #nursing-tab.
+                const noteTypeLabel = c.visit_type === 'IPD_CONSULTANT' ? '👨‍⚕️ Consultant Review'
+                    : c.visit_type === 'IPD_ROUND' ? '🩺 Clinician Round' : '📋 Consultation';
+                const noteTypeColor = c.visit_type === 'IPD_CONSULTANT' ? '#7C3AED' : '#2F6F52';
+                return `
+                <div style="background:var(--paper-alt);padding:8px;border-radius:6px;margin-bottom:6px; border-left:3px solid ${noteTypeColor};">
+                    <div><span style="color:${noteTypeColor}; font-weight:700; font-size:11.5px; text-transform:uppercase;">${noteTypeLabel}</span></div>
                     <div><strong>${c.case_id}</strong> - ${new Date(c.created_at).toLocaleString()}</div>
                     <div><strong>Chief Complaint:</strong> ${c.chief_complaint || 'N/A'}</div>
                     <div><strong>Diagnosis:</strong> ${c.primary_diagnosis || 'N/A'}</div>
                     <div><strong>Medications:</strong> ${c.medications?.map(m => m.drugName + ' ' + m.dose).join(', ') || 'None'}</div>
                 </div>
-            `).join('') || '<p style="color:var(--ink-400);">No consultation history.</p>'}
+            `; }).join('') || '<p style="color:var(--ink-400);">No consultation history.</p>'}
         </div>
         <div id="nursing-tab" class="tab-content" style="display:none;">
             ${data.nursing_notes.map(n => `
@@ -508,6 +520,7 @@ async function showPatientDetail(patientId) {
     });
     document.getElementById('patient-detail-modal').style.display = 'flex';
     loadDischargeSummary(patient.id);
+    loadMarHistory(patient.id); // shared in frontend/js/ipd-shared.js
 }
 
 function renderDischargeSummary(summary) {

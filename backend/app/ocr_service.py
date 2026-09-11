@@ -238,18 +238,43 @@ def _split_pdf_into_chunks(content: bytes, max_pages: int) -> list[tuple[int, by
 # carry real information (a hospital name/seal) and cost only a sentence, not tens of
 # thousands of characters.
 _BASE64_IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\(data:image/[^;]+;base64,[^)]*\)")
+# Same directive shape as _BASE64_IMAGE_PATTERN, but with the mime subtype and base64 payload
+# captured separately -- used only by _extract_embedded_image_bytes() below to recover an actual
+# viewable image for a scan/imaging page, never for the plain-text extraction path (which only
+# ever strips, via _strip_embedded_base64_images()).
+_BASE64_IMAGE_CAPTURE_PATTERN = re.compile(r"!\[[^\]]*\]\(data:image/([^;]+);base64,([^)]*)\)")
 
 
 def _strip_embedded_base64_images(text: str) -> str:
     return _BASE64_IMAGE_PATTERN.sub("", text).strip()
 
 
-def _run_one_sarvam_doc_job(client, file_bytes: bytes, ext: str) -> str:
+def _extract_embedded_image_bytes(text: str) -> tuple[str, bytes] | None:
+    """
+    Returns (mime_type, raw_bytes) for the largest inline base64 image embedded in Sarvam's
+    markdown output (see _BASE64_IMAGE_PATTERN's docstring for why these are embedded at all),
+    or None if the page has none. "Largest" is a proxy for "the actual scanned page image"
+    rather than a small embedded logo/stamp. Used only by extract_document_pages() to give
+    doctors something to actually view for an image-heavy (X-ray/MRI/scan) page -- never used by
+    the plain-text extraction path, which is unaffected by this function's existence.
+    """
+    matches = _BASE64_IMAGE_CAPTURE_PATTERN.findall(text or "")
+    if not matches:
+        return None
+    mime, b64_data = max(matches, key=lambda m: len(m[1]))
+    try:
+        import base64
+        return f"image/{mime}", base64.b64decode(b64_data)
+    except Exception:
+        return None
+
+
+def _run_sarvam_job_and_read_zip(client, file_bytes: bytes, ext: str) -> tuple[str, tuple[str, bytes] | None]:
     """
     Runs one Sarvam Document AI digitise job on a single file (<= 10 pages, Sarvam's own cap)
-    and returns its extracted text. Raises on any failure -- extract_document() below catches
-    that and falls back to local RapidOCR for the whole document, so a wrong assumption in here
-    (see the ZIP-parsing note) degrades to "OCR ran locally instead", never to bad clinical text.
+    and returns (cleaned_text, representative_embedded_image). Raises on any failure -- callers
+    decide how to degrade (extract_document() falls back to local OCR for the whole document;
+    extract_document_pages() skips just the failed page).
     """
     import os
     import tempfile
@@ -284,7 +309,11 @@ def _run_one_sarvam_doc_job(client, file_bytes: bytes, ext: str) -> str:
         # metadata JSON's own "text" fields) and polluted _clinical_signals() with malformed,
         # JSON-escaped duplicate matches -- caught by testing against the real API, not assumed.
         # Only read the file(s) matching the requested output extension; ignore everything else
-        # in the archive (metadata/*, or any future addition) by construction.
+        # in the archive (metadata/*, or any future addition) by construction. Per-page text
+        # granularity (extract_document_pages()) deliberately does NOT try to parse
+        # metadata/page_NNN.json either, for the same reason -- its exact schema has never been
+        # verified against the live API, so per-page splitting instead runs one job per page
+        # (see extract_document_pages()), which needs no assumption about that file's shape.
         texts = []
         with zipfile.ZipFile(zip_path) as zf:
             names = sorted(
@@ -296,10 +325,19 @@ def _run_one_sarvam_doc_job(client, file_bytes: bytes, ext: str) -> str:
                 if raw.strip():
                     texts.append(raw)
         combined = "\n\n".join(texts).strip()
+        image = _extract_embedded_image_bytes(combined)
         combined = _strip_embedded_base64_images(combined)
         if not combined:
             raise RuntimeError("Sarvam Document AI returned an empty result")
-        return combined
+        return combined, image
+
+
+def _run_one_sarvam_doc_job(client, file_bytes: bytes, ext: str) -> str:
+    """Text-only convenience wrapper around _run_sarvam_job_and_read_zip(), for the existing
+    whole-document extraction path (_extract_via_sarvam), which doesn't need the embedded
+    image."""
+    text, _image = _run_sarvam_job_and_read_zip(client, file_bytes, ext)
+    return text
 
 
 def _extract_via_sarvam(content: bytes, content_type: str) -> dict[str, Any]:
@@ -360,3 +398,86 @@ def extract_document(content: bytes, content_type: str) -> dict[str, Any]:
         except Exception as exc:
             logger.warning("Sarvam Document AI OCR failed, falling back to local OCR: %s", exc)
     return _extract_local(content, content_type)
+
+
+# Below this a page counts as "image-heavy" (mostly a scanned photograph -- X-ray film, MRI/CT
+# printout, mammogram -- with little or no real extractable text) rather than a text page. Free,
+# deterministic half of the hybrid page classifier (see cca_engine.classify_and_extract_page for
+# the LLM half, applied only to pages that fall below this bar).
+_IMAGE_HEAVY_TEXT_THRESHOLD = 150
+
+
+def extract_document_pages(content: bytes, content_type: str, ocr_result: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    True per-page breakdown for per-page classification (Patient History's "Scans" section, and
+    correctly page-attributed clinical facts) -- distinct from extract_document()'s own `pages`
+    field, which is only job-level for the Sarvam path (see _extract_via_sarvam's comment): a
+    multi-page PDF batched into one <=10-page Sarvam job has no page boundary in that job's
+    returned text. Re-deriving a true split is too slow to do inline within an upload request
+    (see below), so this is meant to be called from a background task after the document/
+    ocr_result from extract_document() already exist -- see routers/cca.py's upload_document and
+    document_pages.py's background task.
+
+    Returns [{"page": int, "text": str, "is_image_heavy": bool, "image_mime_type": str|None,
+    "image_bytes": bytes|None}, ...], in page order. Never raises -- a page that fails is simply
+    omitted (best-effort enrichment, not a required part of the document existing).
+    """
+    if ocr_result.get("engine") != "sarvam_doc_ai":
+        # Local OCR (_extract_local) already gives true per-page text via pypdf/pymupdf page
+        # boundaries -- reused directly, no extra OCR work needed. Local OCR doesn't extract
+        # embedded images, so a short/ocr_failed page here is flagged image-heavy by text length
+        # alone (no image_bytes to show for it -- the Scans section falls back to linking the
+        # whole document for these).
+        return [
+            {
+                "page": p["page"],
+                "text": p["text"] or "",
+                "is_image_heavy": len((p["text"] or "").strip()) < _IMAGE_HEAVY_TEXT_THRESHOLD,
+                "image_mime_type": None,
+                "image_bytes": None,
+            }
+            for p in ocr_result.get("pages", [])
+        ]
+
+    if content_type not in _SARVAM_DOC_AI_CONTENT_TYPES:
+        return []
+
+    if content_type != "application/pdf" or ocr_result.get("page_count", 1) <= 1:
+        # A single-page PDF or a single image upload already has true page granularity in
+        # ocr_result -- no need to re-run OCR to get it again.
+        text = ocr_result.get("text", "")
+        return [{
+            "page": 1,
+            "text": text,
+            "is_image_heavy": len(text.strip()) < _IMAGE_HEAVY_TEXT_THRESHOLD,
+            "image_mime_type": None,
+            "image_bytes": None,
+        }]
+
+    # Multi-page PDF processed via Sarvam: one job per page (reusing the same
+    # _split_pdf_into_chunks() already used/tested for <=10-page batching, just with
+    # max_pages=1) is the only way to get an unambiguous true per-page split without depending
+    # on Sarvam's undocumented metadata/page_NNN.json shape (see _run_sarvam_job_and_read_zip's
+    # docstring for why that's deliberately never parsed). Slower than the whole-document path
+    # (N sequential jobs instead of 1) -- acceptable here because this only ever runs in the
+    # background, after the document itself is already saved and visible.
+    if not settings.SARVAM_API_KEY:
+        return []
+    client = SarvamAI(api_subscription_key=settings.SARVAM_API_KEY)
+    chunks = _split_pdf_into_chunks(content, 1)
+    pages: list[dict[str, Any]] = []
+    for page_number, chunk_bytes in chunks:
+        try:
+            text, image = _run_sarvam_job_and_read_zip(client, chunk_bytes, ".pdf")
+        except Exception as exc:
+            logger.warning("Per-page Sarvam OCR failed for page %d: %s", page_number, exc)
+            continue
+        is_image_heavy = len(text.strip()) < _IMAGE_HEAVY_TEXT_THRESHOLD and image is not None
+        pages.append({
+            "page": page_number,
+            "text": text,
+            "is_image_heavy": is_image_heavy,
+            "image_mime_type": image[0] if is_image_heavy and image else None,
+            "image_bytes": image[1] if is_image_heavy and image else None,
+        })
+    return pages

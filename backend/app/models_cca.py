@@ -136,6 +136,13 @@ class CCADocument(Base):
     page_count = Column(Integer, default=1)
     file_hash = Column(String(100))
     storage_path = Column(String(500))
+    # Front-desk-declared type at upload time (the "Previous pathology report / Previous
+    # radiology report / Insurance card / Previous case file / Other" dropdown in
+    # frontend/frontdesk.html's Documents & Consent step) -- distinct from
+    # classification_class below, which is the system's own auto-detected content type. The
+    # dropdown selection used to be captured client-side and silently dropped (never sent in
+    # the upload request, and this column didn't exist), so it was lost entirely.
+    document_type = Column(String(100), nullable=True)
     classification_class = Column(String(100))  # REFERRAL, IMAGING, HISTOPATHOLOGY, PATHOLOGY, LAB, CONSULT_NOTE
     classification_confidence = Column(Float, default=0.95)
     ocr_text = Column(Text)
@@ -146,6 +153,32 @@ class CCADocument(Base):
     uploaded_by = Column(String(200))
     uploaded_at = Column(DateTime, default=datetime.utcnow)
     status = Column(String(30), default="EXTRACTED")  # UPLOADED, OCR_COMPLETE, CLASSIFIED, EXTRACTED, VERIFIED
+
+class CCADocumentPage(Base):
+    """
+    True per-page breakdown of a CCADocument -- CCADocument.ocr_text/classification_class are
+    whole-document (one blob, one bucket), which can't tell a doctor "page 3 of this bundle is
+    an X-ray report" vs "page 1 is the referral letter". Populated asynchronously after upload
+    (see routers/cca.py's upload_document + the background task in document_pages.py) because
+    getting true (not just job-batched) per-page text out of Sarvam Document AI means one OCR
+    job per page for a multi-page PDF, which is too slow to do inline within the upload request.
+    """
+    __tablename__ = "cca_document_pages"
+    id = Column(Integer, primary_key=True)
+    document_id = Column(Integer, ForeignKey("cca_documents.id"), nullable=False)
+    page_number = Column(Integer, nullable=False)
+    text = Column(Text)
+    # CASE_DETAILS, PRESCRIPTION, LAB_REPORT, SCAN_IMAGING, PATHOLOGY_REPORT, INSURANCE, OTHER,
+    # UNCLASSIFIED -- see cca_engine.classify_and_extract_page for the authoritative list.
+    page_type = Column(String(30))
+    classification_confidence = Column(Float, default=0.0)
+    # True when this page is mostly an embedded image with little/no extractable text (an X-ray
+    # film, MRI/CT printout, mammogram, or other scan photograph) -- the free heuristic half of
+    # the hybrid classifier, computed before any LLM call.
+    is_image_heavy = Column(Boolean, default=False)
+    image_content = Column(LargeBinary, nullable=True)  # only populated when is_image_heavy
+    image_mime_type = Column(String(50), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class ClinicalFact(Base):
     __tablename__ = "cca_clinical_facts"
@@ -489,6 +522,33 @@ class CCACoordinationCase(Base):
     next_action_due = Column(Date, nullable=True)
     next_action_status = Column(String(30), default="Pending")  # Pending|InProgress|Completed|Overdue
     created_by = Column(String(200), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class CCAAppointmentCoordination(Base):
+    """Hospital-wide Appointment Coordination (Gap Analysis PDF item 23) -- the Patient
+    Liaison's own record of an appointment in any department (Radiology, Surgery, Lab,
+    another OPD consult, ...) they are helping the patient navigate to. Deliberately separate
+    from the general HMS Appointment/doctor-queue system (models.py's Appointment) -- that
+    system's patient_id targets the general `patients` table, which has no live linkage to
+    CCAPatient (CCAPatient.hms_patient_id exists on the model but is not populated anywhere in
+    this codebase); this stays entirely within CCA's own patient identity space, matching the
+    reasoning that already keeps SurgicalBloodTransfusion (models_cca_oncology_ext.py) separate
+    from Day Care's BloodProductAdministration rather than force-sharing a table across two
+    unrelated parent identities."""
+    __tablename__ = "cca_appointment_coordination"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    coordination_case_id = Column(Integer, ForeignKey("cca_coordination_cases.id"), nullable=True)
+    department = Column(String(100), nullable=False)
+    purpose = Column(Text, nullable=True)
+    scheduled_at = Column(DateTime, nullable=False)
+    location = Column(String(200), nullable=True)
+    status = Column(String(30), default="Scheduled")  # Scheduled, Confirmed, Completed, Missed, Rescheduled, Cancelled
+    transport_arranged = Column(Boolean, default=False)
+    reminder_sent = Column(Boolean, default=False)
+    notes = Column(Text, nullable=True)
+    created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -999,6 +1059,11 @@ class InfusionReactionEvent(Base):
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=True)
     onset_at = Column(DateTime, default=datetime.utcnow)
+    # Precise per-drug attribution (Gap Analysis PDF item 11: "Reaction Per Drug") -- links to the
+    # exact InfusionMedicationAdministration row that was infusing, when the nurse can identify
+    # one from the treatment order's medication list. medication_running (free text) is kept as a
+    # legacy/fallback field for cases where the drug isn't on the structured list.
+    administration_id = Column(Integer, ForeignKey("cca_infusion_medication_administrations.id"), nullable=True)
     medication_running = Column(String(200), nullable=True)
     symptoms = Column(Text, nullable=False)
     vitals = Column(JSON, nullable=True)
@@ -1052,3 +1117,60 @@ class TreatmentDayCompletion(Base):
     next_labs_required = Column(Text, nullable=True)
     completed_by = Column(String(200))
     completed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class BloodProductAdministration(Base):
+    """Blood Bank/Transfusion (Gap Analysis PDF item 28: "Blood Product") -- documents a unit's
+    transfusion the same way InfusionMedicationAdministration documents a chemo drug: what the
+    nurse transcribed and verified off an already-authorized/crossmatched unit, never a clinical
+    decision the system makes. Two-person crossmatch/compatibility verification (crossmatch_
+    confirmed + second_verifier_name) mirrors the product_label_verified/second_verifier_name
+    pattern already established for medications, since blood products carry the same
+    verify-before-administer requirement. treatment_order_id is nullable the same way it is on
+    InfusionReactionEvent/TreatmentHoldEvent -- available whenever a patient is open in the
+    infusion workspace, not only once a signed chemo order exists."""
+    __tablename__ = "cca_blood_product_administrations"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=True)
+    product_type = Column(String(50), nullable=False)  # PRBC, Platelets, FFP, Cryoprecipitate, Other
+    unit_id = Column(String(100), nullable=False)
+    blood_group = Column(String(20), nullable=True)
+    crossmatch_confirmed = Column(Boolean, default=False)
+    crossmatch_reference = Column(String(200), nullable=True)
+    consent_confirmed = Column(Boolean, default=False)
+    second_verifier_name = Column(String(200), nullable=True)
+    volume = Column(String(100), nullable=True)
+    rate = Column(String(100), nullable=True)
+    status = Column(String(30), default="Pending")  # Pending, InProgress, Paused, Stopped, Completed
+    pre_transfusion_vitals = Column(JSON, nullable=True)
+    start_time = Column(DateTime, nullable=True)
+    end_time = Column(DateTime, nullable=True)
+    administered_by = Column(String(200), nullable=True)
+    administered_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TransfusionFeedback(Base):
+    """Post-transfusion Feedback (Gap Analysis PDF item 29) -- the closing documentation for a
+    blood product administration: how the patient tolerated it and whether a reaction occurred.
+    Deliberately its own record (not folded into BloodProductAdministration) the same way
+    TreatmentDayCompletion is separate from InfusionMedicationAdministration -- this is the
+    nursing/clinical outcome layer sitting on top of the administration record. blood_product_id
+    is nullable so feedback can still be recorded even if the unit wasn't logged through the
+    structured Blood Product flow above."""
+    __tablename__ = "cca_transfusion_feedback"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=True)
+    blood_product_id = Column(Integer, ForeignKey("cca_blood_product_administrations.id"), nullable=True)
+    reaction_occurred = Column(Boolean, default=False)
+    reaction_type = Column(String(100), nullable=True)  # Allergic, Febrile Non-Hemolytic, Hemolytic, TRALI, TACO, Other
+    symptoms = Column(Text, nullable=True)
+    vitals = Column(JSON, nullable=True)
+    action_taken = Column(Text, nullable=True)
+    outcome = Column(Text, nullable=True)
+    feedback_notes = Column(Text, nullable=True)
+    reported_by = Column(String(200))
+    reported_at = Column(DateTime, default=datetime.utcnow)

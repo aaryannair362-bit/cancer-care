@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aivana — Surgical Nurse</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-page: #F1F5F9; --bg-sidebar: #EEF2F6; --bg-surface: #FFFFFF; --bg-card-subtle: #F8FAFC;
+            --ink-900: #0F172A; --ink-800: #1E293B; --ink-700: #334155; --ink-600: #475569; --ink-500: #64748B; --ink-400: #94A3B8; --ink-300: #CBD5E1;
+            --line: #E2E8F0; --line-subtle: #F1F5F9;
+            --brand-primary: #3B82F6; --brand-dark: #1E3A8A; --navy-action: #2A4365; --navy-action-hover: #1E3A8A;
+            --green-badge-bg: #DCFCE7; --green-badge-text: #166534;
+            --amber-badge-bg: #FEF3C7; --amber-badge-text: #92400E;
+            --rose-badge-bg: #FFE4E6; --rose-badge-text: #9F1239;
+            --blue-badge-bg: #E0E7FF; --blue-badge-text: #3730A3;
+            --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px; --radius-full: 9999px;
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05); --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', -apple-system, sans-serif; background: var(--bg-page); color: var(--ink-800); height: 100vh; display: flex; flex-direction: column; overflow: hidden; -webkit-font-smoothing: antialiased; }
+        .topbar { height: 64px; background: var(--bg-surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; flex-shrink: 0; z-index: 20; }
+        .brand-logo { font-size: 20px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; display: flex; align-items: center; gap: 8px; text-decoration: none; }
+        .header-actions { display: flex; align-items: center; gap: 12px; }
+        .role-badge-pill { display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: #F8FAFC; border: 1px solid var(--line); border-radius: var(--radius-full); font-size: 13px; font-weight: 500; color: var(--ink-800); cursor: pointer; }
+        .avatar-pill { width: 38px; height: 38px; border-radius: var(--radius-full); background: #E2E8F0; color: var(--ink-800); display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; border: 1px solid var(--line); cursor: pointer; }
+        .app-body { flex: 1; display: flex; overflow: hidden; }
+        .sidebar { width: 240px; background: var(--bg-sidebar); border-right: 1px solid var(--line); padding: 20px 14px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; overflow-y: auto; }
+        .sidebar-section-title { font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: var(--ink-400); text-transform: uppercase; padding: 10px 12px 6px; }
+        .sidebar-nav-item { display: flex; align-items: center; justify-content: space-between; padding: 11px 14px; border-radius: var(--radius-md); font-size: 13.5px; font-weight: 500; color: var(--ink-700); text-decoration: none; cursor: pointer; }
+        .sidebar-nav-item:hover { background: rgba(255, 255, 255, 0.6); color: var(--ink-900); }
+        .sidebar-nav-item.active { background: #FFFFFF; color: var(--ink-900); font-weight: 600; box-shadow: var(--shadow-sm); border: 1px solid rgba(226, 232, 240, 0.8); }
+        .nav-item-left { display: flex; align-items: center; gap: 10px; }
+        .nav-chevron { color: var(--ink-400); font-size: 12px; }
+        .canvas { flex: 1; overflow-y: auto; padding: 28px 36px; }
+        .view-panel { display: none; }
+        .view-panel.active { display: block; }
+        .page-title { font-size: 26px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; margin-bottom: 4px; }
+        .page-subtitle { font-size: 13.5px; color: var(--ink-500); margin-bottom: 20px; }
+        .section-card { background: var(--bg-surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 20px; box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+        .section-title { font-size: 16px; font-weight: 700; color: var(--ink-900); }
+        .section-sub { font-size: 12px; color: var(--ink-500); margin-top: 2px; }
+        .badge { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: var(--radius-sm); display: inline-flex; align-items: center; }
+        .badge-green { background: var(--green-badge-bg); color: var(--green-badge-text); }
+        .badge-amber { background: var(--amber-badge-bg); color: var(--amber-badge-text); }
+        .badge-rose { background: var(--rose-badge-bg); color: var(--rose-badge-text); }
+        .badge-blue { background: var(--blue-badge-bg); color: var(--blue-badge-text); }
+        .btn-navy { background: var(--navy-action); color: #FFFFFF; font-size: 12.5px; font-weight: 600; padding: 9px 16px; border-radius: var(--radius-sm); border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-navy:hover { background: var(--navy-action-hover); }
+        .btn-outline { background: #FFFFFF; border: 1px solid var(--line); color: var(--ink-700); font-size: 12.5px; font-weight: 600; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-outline:hover { border-color: var(--ink-400); background: #F8FAFC; }
+        .btn-outline.btn-sm, .btn-navy.btn-sm { font-size: 11px; padding: 6px 10px; }
+        .worklist-row { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; margin-bottom: 10px; }
+        .wl-label { font-size: 11px; color: var(--ink-500); text-transform: uppercase; margin-bottom: 2px; }
+        .wl-value { font-size: 13.5px; font-weight: 700; color: var(--ink-900); }
+        .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+        .form-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+        .form-group { display: flex; flex-direction: column; gap: 6px; }
+        .form-label { font-size: 12px; font-weight: 600; color: var(--ink-700); }
+        .form-input, .form-select, .form-textarea { width: 100%; height: 38px; padding: 0 12px; background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; color: var(--ink-900); outline: none; }
+        .form-textarea { height: auto; padding: 10px 12px; }
+        .form-checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-700); margin-bottom: 12px; }
+        .med-card { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 12px 14px; margin-bottom: 8px; }
+        .med-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+        .med-card-title { font-size: 13px; font-weight: 700; color: var(--ink-900); }
+        .med-card-meta { font-size: 12px; color: var(--ink-600); margin-top: 2px; }
+        .med-card-actions { display: flex; gap: 8px; margin-top: 8px; }
+        .empty-hint { font-size: 12.5px; color: var(--ink-500); }
+        .hms-toast { position: fixed; bottom: 24px; right: 24px; background: var(--ink-900); color: #fff; padding: 12px 18px; border-radius: var(--radius-md); font-size: 13px; box-shadow: var(--shadow-md); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 999; max-width: 360px; }
+        .hms-toast--visible { opacity: 1; transform: translateY(0); }
+        .hms-toast--success { background: var(--green-badge-text); }
+        .hms-toast--error { background: var(--rose-badge-text); }
+        .hms-toast--info { background: var(--blue-badge-text); }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <a href="/surgical_nurse.html" class="brand-logo">Aivana</a>
+        <div></div>
+        <div class="header-actions">
+            <div class="role-badge-pill" onclick="location.href='/index.html'"><span>Surgical Nurse</span><span>▾</span></div>
+            <div class="avatar-pill" title="Logged in">N ▾</div>
+        </div>
+    </header>
+    <div class="app-body">
+        <aside class="sidebar">
+            <div class="sidebar-section-title">OPERATING THEATRE</div>
+            <a class="sidebar-nav-item active" id="nav-worklist" onclick="showTab('worklist')"><div class="nav-item-left"><span>🔪</span><span>OR Worklist</span></div><span class="nav-chevron">›</span></a>
+        </aside>
+        <main class="canvas">
+            <div id="view-worklist" class="view-panel active">
+                <h1 class="page-title">OR Worklist</h1>
+                <p class="page-subtitle">Surgical plans scheduled, in progress, or in post-op — document intra-operative monitoring, the operative note, specimen handoff, and any blood transfusion here.</p>
+                <div id="worklist-content"><!-- Populated via JS: loadOrWorklist() --></div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script>
+        const ccaUser = Auth.requirePage(['CCASurgicalNurse', 'Admin']);
+        const CCA_API = '/cca';
+
+        function showTab(tab) {
+            document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.sidebar-nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(`view-${tab}`).classList.add('active');
+            document.getElementById(`nav-${tab}`).classList.add('active');
+            if (tab === 'worklist') loadOrWorklist();
+        }
+
+        async function loadOrWorklist() {
+            const container = document.getElementById('worklist-content');
+            try {
+                const data = await Api.get(`${CCA_API}/patients`);
+                const patients = data.results || data.patients || [];
+                // No cross-patient surgical-plans endpoint exists (unlike the Radiation
+                // Physicist/Technologist worklist) -- surgical plans are few enough per
+                // organization that per-patient lookup is acceptable here.
+                const plansByPatient = await Promise.all(patients.map(async p => {
+                    try {
+                        const r = await Api.get(`${CCA_API}/patients/${p.id}/surgical-plans`);
+                        return { patient: p, plans: (r.surgical_plans || []).filter(pl => ['scheduled', 'performed', 'post_op'].includes(pl.status)) };
+                    } catch (err) { return { patient: p, plans: [] }; }
+                }));
+                const rows = plansByPatient.filter(r => r.plans.length);
+                if (!rows.length) {
+                    container.innerHTML = '<div class="section-card"><p class="empty-hint">No surgical plans currently scheduled, in progress, or in post-op.</p></div>';
+                    return;
+                }
+                container.innerHTML = rows.map(({ patient, plans }) => plans.map(plan => `
+                    <div class="section-card">
+                        <div class="section-head">
+                            <div>
+                                <div class="section-title">${escapeHtml(patient.name)} <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(patient.mrn)}</span></div>
+                                <div class="section-sub">${escapeHtml(plan.procedure)}${plan.anatomical_site ? ' · ' + escapeHtml(plan.anatomical_site) : ''}</div>
+                            </div>
+                            <span class="badge ${plan.status === 'scheduled' ? 'badge-blue' : 'badge-green'}">${escapeHtml(plan.status.replace(/_/g, ' '))}</span>
+                        </div>
+                        <div id="or-monitoring-${plan.id}"></div>
+                        <div class="form-grid-3">
+                            <div class="form-group"><label class="form-label">Vitals</label><input type="text" id="or-mon-vitals-${plan.id}" class="form-input" placeholder="e.g. BP 118/76, pulse 78" /></div>
+                            <div class="form-group"><label class="form-label">Blood loss estimate</label><input type="text" id="or-mon-blood-${plan.id}" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Events / complications</label><input type="text" id="or-mon-events-${plan.id}" class="form-input" /></div>
+                        </div>
+                        <button class="btn-outline btn-sm" onclick="submitOrMonitoring(${plan.id})">+ Add Observation</button>
+
+                        <div style="margin-top:16px;"><div class="wl-label">Specimens</div><div id="or-specimens-${plan.id}"></div></div>
+                        <div class="form-grid-2" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Specimen label</label><input type="text" id="or-spec-label-${plan.id}" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Specimen type</label><input type="text" id="or-spec-type-${plan.id}" class="form-input" /></div>
+                        </div>
+                        <button class="btn-outline btn-sm" onclick="submitOrSpecimen(${plan.id})">+ Label Specimen</button>
+
+                        <div style="margin-top:16px;"><div class="wl-label">Blood Transfusion</div><div id="or-blood-${plan.id}"></div></div>
+                        <div class="form-grid-3" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Product type</label><select id="or-blood-type-${plan.id}" class="form-select"><option>PRBC</option><option>Platelets</option><option>FFP</option><option>Cryoprecipitate</option><option>Other</option></select></div>
+                            <div class="form-group"><label class="form-label">Unit ID</label><input type="text" id="or-blood-unit-${plan.id}" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Blood group</label><input type="text" id="or-blood-group-${plan.id}" class="form-input" /></div>
+                        </div>
+                        <div class="form-checkbox-row"><input type="checkbox" id="or-blood-crossmatch-${plan.id}"/> <label for="or-blood-crossmatch-${plan.id}">Crossmatch/compatibility confirmed</label></div>
+                        <button class="btn-outline btn-sm" onclick="submitOrBloodTransfusion(${plan.id})">+ Record Unit</button>
+                    </div>
+                `).join('')).join('');
+                rows.forEach(({ plans }) => plans.forEach(plan => { loadOrMonitoring(plan.id); loadOrSpecimens(plan.id); loadOrBlood(plan.id); }));
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function loadOrMonitoring(planId) {
+            const el = document.getElementById(`or-monitoring-${planId}`);
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${planId}/intraop-monitoring`);
+                el.innerHTML = (data.results || []).map(o => `
+                    <div class="med-card-meta">${new Date(o.observation_time).toLocaleTimeString()} — ${o.vitals ? escapeHtml(JSON.stringify(o.vitals)) : ''}${o.blood_loss_estimate ? ' · Blood loss: ' + escapeHtml(o.blood_loss_estimate) : ''}${o.events_complications ? ' · ' + escapeHtml(o.events_complications) : ''}</div>
+                `).join('') || '<p class="empty-hint">No observations recorded yet.</p>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitOrMonitoring(planId) {
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${planId}/intraop-monitoring`, {
+                    vitals: { free_text: document.getElementById(`or-mon-vitals-${planId}`).value || null },
+                    blood_loss_estimate: document.getElementById(`or-mon-blood-${planId}`).value || null,
+                    events_complications: document.getElementById(`or-mon-events-${planId}`).value || null,
+                });
+                toast('Observation recorded', 'success');
+                loadOrMonitoring(planId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadOrSpecimens(planId) {
+            const el = document.getElementById(`or-specimens-${planId}`);
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${planId}/specimens`);
+                el.innerHTML = (data.results || []).map(s => `
+                    <div class="med-card">
+                        <div class="med-card-head"><div class="med-card-title">${escapeHtml(s.specimen_label)}</div><span class="badge ${s.status === 'ReceivedByLab' ? 'badge-green' : 'badge-amber'}">${escapeHtml(s.status)}</span></div>
+                        <div class="med-card-actions">
+                            ${s.status === 'Collected' ? `<button class="btn-navy btn-sm" onclick="submitOrSpecimenEvent(${s.id}, 'HandedOff', ${planId})">Hand Off</button>` : ''}
+                            ${s.status === 'HandedOff' ? `<button class="btn-navy btn-sm" onclick="submitOrSpecimenEvent(${s.id}, 'ReceivedByLab', ${planId})">Mark Received by Lab</button>` : ''}
+                        </div>
+                    </div>
+                `).join('') || '<p class="empty-hint">No specimens recorded yet.</p>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitOrSpecimen(planId) {
+            const label = document.getElementById(`or-spec-label-${planId}`).value;
+            if (!label) { toast('Specimen label is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${planId}/specimens`, {
+                    specimen_label: label, specimen_type: document.getElementById(`or-spec-type-${planId}`).value || null,
+                });
+                toast('Specimen labelled and collected', 'success');
+                loadOrSpecimens(planId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitOrSpecimenEvent(specimenId, status, planId) {
+            try {
+                const payload = { status };
+                if (status === 'HandedOff') {
+                    const to = prompt('Handed off to (name):');
+                    if (!to) { toast('A recipient name is required', 'error'); return; }
+                    payload.handed_off_to = to;
+                } else if (status === 'ReceivedByLab') {
+                    const receiver = prompt('Received by lab (name):');
+                    if (!receiver) { toast('A recipient name is required', 'error'); return; }
+                    payload.received_by_lab = receiver;
+                }
+                await Api.post(`${CCA_API}/specimens/${specimenId}/event`, payload);
+                toast('Specimen status updated', 'success');
+                loadOrSpecimens(planId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadOrBlood(planId) {
+            const el = document.getElementById(`or-blood-${planId}`);
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${planId}/blood-transfusions`);
+                el.innerHTML = (data.results || []).map(b => `
+                    <div class="med-card-meta">${escapeHtml(b.product_type)} · Unit ${escapeHtml(b.unit_id)}${b.blood_group ? ' · ' + escapeHtml(b.blood_group) : ''}${b.crossmatch_confirmed ? ' · ✔ Crossmatch confirmed' : ''}</div>
+                `).join('') || '<p class="empty-hint">No blood products recorded yet.</p>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitOrBloodTransfusion(planId) {
+            const unitId = document.getElementById(`or-blood-unit-${planId}`).value;
+            if (!unitId) { toast('Unit ID is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${planId}/blood-transfusions`, {
+                    product_type: document.getElementById(`or-blood-type-${planId}`).value, unit_id: unitId,
+                    blood_group: document.getElementById(`or-blood-group-${planId}`).value || null,
+                    crossmatch_confirmed: document.getElementById(`or-blood-crossmatch-${planId}`).checked,
+                });
+                toast('Blood transfusion recorded', 'success');
+                loadOrBlood(planId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => { loadOrWorklist(); });
+    </script>
+</body>
+</html>

@@ -135,6 +135,8 @@ CCA_ROLES = (
     "CCARadiationOncologist", "CCARadiologist", "CCARadiologyCoordinator", "CCAPathologist",
     "CCALabPhlebotomy", "CCAInfusionNurse", "CCAMDTCoordinator", "CCAExternalMDTSpecialist",
     "CCAPatientLiaison", "CCAFinancialCounsellor", "CCAPharmacist",
+    "CCARadiationPhysicist", "CCASurgicalNurse",
+    "CCAPalliativeCareSpecialist",
 )
 
 
@@ -156,6 +158,27 @@ def is_cca_surgical_oncologist(user: dict) -> bool:
 
 def is_cca_radiation_oncologist(user: dict) -> bool:
     return user.get("role") == "CCARadiationOncologist"
+
+
+def is_cca_radiation_physicist(user: dict) -> bool:
+    return user.get("role") == "CCARadiationPhysicist"
+
+
+def is_cca_palliative_care_specialist(user: dict) -> bool:
+    """Palliative Treatment Orders and Procedures & Notes (Gap Analysis PDF items 30-31) --
+    supportive/comfort care, distinct from the three treating-oncologist modalities in
+    is_cca_oncologist above (this specialty doesn't sign a systemic/surgical/radiation
+    TreatmentPlan, so it's deliberately excluded from that predicate)."""
+    return user.get("role") == "CCAPalliativeCareSpecialist"
+
+
+def is_cca_surgical_nurse(user: dict) -> bool:
+    """The OR-side nurse who documents intra-operative monitoring, specimen labelling/lab
+    handoff, and surgical blood transfusion (Gap Analysis PDF items 24, 26, 27) -- kept
+    separate from CCAInfusionNurse the same way that role is kept separate from the general
+    'Nurse': a different screen set and a different care setting (operating theatre vs.
+    day-care infusion chair)."""
+    return user.get("role") == "CCASurgicalNurse"
 
 
 def is_cca_oncologist(user: dict) -> bool:

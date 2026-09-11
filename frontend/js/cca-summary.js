@@ -45,8 +45,68 @@ function _ccaSummaryEnsureStyles() {
         .cca-sum-timeline-when { font-size:11px; color:var(--ink-500); }
         .cca-sum-timeline-title { font-size:13px; font-weight:600; color:var(--ink-900); margin-top:2px; }
         .cca-sum-timeline-desc { font-size:12.5px; color:var(--ink-600); margin-top:2px; }
+        .cca-sum-scan-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(140px,1fr)); gap:12px; }
+        .cca-sum-scan-tile { cursor:pointer; border:1px solid var(--line); border-radius:var(--radius-md); overflow:hidden; background:var(--bg-card-subtle); text-align:left; }
+        .cca-sum-scan-thumb { width:100%; height:110px; object-fit:cover; display:block; background:#1e293b; }
+        .cca-sum-scan-caption { padding:6px 8px; font-size:11px; color:var(--ink-600); }
+        /* Slide-in in-app document viewer (Patient History "View"/scan thumbnails) -- replaces
+           opening the file in a new browser tab. Injected once by _ccaSummaryEnsureDrawer(). */
+        .cca-doc-drawer-backdrop { position:fixed; inset:0; background:rgba(15,23,32,0.45); z-index:399; opacity:0; pointer-events:none; transition:opacity .2s ease; }
+        .cca-doc-drawer-backdrop.open { opacity:1; pointer-events:auto; }
+        .cca-doc-drawer { position:fixed; top:0; right:-55%; width:50%; min-width:360px; height:100vh; background:var(--bg-surface, #fff); border-left:1px solid var(--line); box-shadow:-10px 0 30px rgba(0,0,0,0.25); z-index:400; display:flex; flex-direction:column; transition:right .3s cubic-bezier(0.16,1,0.3,1); }
+        .cca-doc-drawer.open { right:0; }
+        .cca-doc-drawer-head { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:14px 18px; border-bottom:1px solid var(--line); flex:0 0 auto; }
+        .cca-doc-drawer-title { font-size:13.5px; font-weight:700; color:var(--ink-900); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .cca-doc-drawer-close { background:none; border:none; font-size:20px; line-height:1; cursor:pointer; color:var(--ink-500); flex:0 0 auto; }
+        .cca-doc-drawer-body { flex:1 1 auto; overflow:auto; background:#525659; display:flex; align-items:center; justify-content:center; }
+        .cca-doc-drawer-body iframe { width:100%; height:100%; border:none; background:#fff; }
+        .cca-doc-drawer-body img { max-width:100%; max-height:100%; object-fit:contain; }
+        @media (max-width: 900px) { .cca-doc-drawer { width:100%; right:-100%; min-width:0; } }
     `;
     document.head.appendChild(style);
+}
+
+let _ccaDocDrawerObjectUrl = null;
+
+function _ccaSummaryEnsureDrawer() {
+    if (document.getElementById('cca-doc-drawer')) return;
+    document.body.insertAdjacentHTML('beforeend', `
+        <div id="cca-doc-drawer-backdrop" class="cca-doc-drawer-backdrop" onclick="_ccaSummaryCloseDrawer()"></div>
+        <div id="cca-doc-drawer" class="cca-doc-drawer">
+            <div class="cca-doc-drawer-head">
+                <div id="cca-doc-drawer-title" class="cca-doc-drawer-title"></div>
+                <button type="button" class="cca-doc-drawer-close" onclick="_ccaSummaryCloseDrawer()" aria-label="Close">×</button>
+            </div>
+            <div id="cca-doc-drawer-body" class="cca-doc-drawer-body"></div>
+        </div>
+    `);
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') _ccaSummaryCloseDrawer();
+    });
+}
+
+function _ccaSummaryOpenDrawer(title, blob) {
+    _ccaSummaryEnsureDrawer();
+    if (_ccaDocDrawerObjectUrl) { URL.revokeObjectURL(_ccaDocDrawerObjectUrl); _ccaDocDrawerObjectUrl = null; }
+    const url = URL.createObjectURL(blob);
+    _ccaDocDrawerObjectUrl = url;
+    document.getElementById('cca-doc-drawer-title').textContent = title;
+    const body = document.getElementById('cca-doc-drawer-body');
+    body.innerHTML = (blob.type || '').startsWith('image/')
+        ? `<img src="${url}" alt="${escapeHtml(title)}" />`
+        : `<iframe src="${url}" title="${escapeHtml(title)}"></iframe>`;
+    document.getElementById('cca-doc-drawer').classList.add('open');
+    document.getElementById('cca-doc-drawer-backdrop').classList.add('open');
+}
+
+function _ccaSummaryCloseDrawer() {
+    const drawer = document.getElementById('cca-doc-drawer');
+    const backdrop = document.getElementById('cca-doc-drawer-backdrop');
+    if (drawer) drawer.classList.remove('open');
+    if (backdrop) backdrop.classList.remove('open');
+    if (_ccaDocDrawerObjectUrl) { URL.revokeObjectURL(_ccaDocDrawerObjectUrl); _ccaDocDrawerObjectUrl = null; }
+    const body = document.getElementById('cca-doc-drawer-body');
+    if (body) body.innerHTML = '';
 }
 
 function _ccaSummaryBadge(status) {
@@ -78,11 +138,18 @@ function _ccaSummaryDocCondition(d) {
 async function _ccaSummaryOpenDocument(patientId, documentId, filename) {
     try {
         const blob = await Api.blob(`/cca/patients/${patientId}/documents/${documentId}/file`);
-        const url = URL.createObjectURL(blob);
-        window.open(url, '_blank');
-        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        _ccaSummaryOpenDrawer(filename, blob);
     } catch (err) {
         toast(`Could not open ${filename}: ${apiErrorMessage(err)}`, 'error');
+    }
+}
+
+async function _ccaSummaryOpenScanImage(patientId, documentId, pageNumber, caption) {
+    try {
+        const blob = await Api.blob(`/cca/patients/${patientId}/documents/${documentId}/pages/${pageNumber}/image`);
+        _ccaSummaryOpenDrawer(caption, blob);
+    } catch (err) {
+        toast(`Could not open scan: ${apiErrorMessage(err)}`, 'error');
     }
 }
 
@@ -168,6 +235,50 @@ async function renderCaseSummaryPanel(containerId, patientId, options = {}) {
             `).join('') : '<p class="cca-sum-empty">No documents uploaded yet for this patient.</p>'}
         </div>`;
 
+    const scans = summary.scans || [];
+    const scansSection = `
+        <div class="section-card">
+            <div class="section-title" style="margin-bottom:12px;">Scans (X-ray / MRI / CT / Imaging)</div>
+            ${scans.length ? `
+                <div class="cca-sum-scan-grid">
+                    ${scans.map((s, i) => {
+                        const filenameLabel = s.document_filename || 'Scan';
+                        const captionText = `${filenameLabel} · page ${s.page_number}`;
+                        const hasImage = !!s.image_url;
+                        const clickHandler = hasImage
+                            ? `_ccaSummaryOpenScanImage(${Number(patientId)}, ${Number(s.document_id)}, ${Number(s.page_number)}, '${escapeHtml(captionText).replace(/'/g, "\\'")}')`
+                            : (s.file_url ? `_ccaSummaryOpenDocument(${Number(patientId)}, ${Number(s.document_id)}, '${escapeHtml(filenameLabel).replace(/'/g, "\\'")}')` : '');
+                        return `
+                            <button type="button" class="cca-sum-scan-tile" ${clickHandler ? `onclick="${clickHandler}"` : 'disabled'} style="${clickHandler ? '' : 'cursor:default; opacity:0.6;'}">
+                                <img class="cca-sum-scan-thumb" id="cca-scan-thumb-${i}" alt="${escapeHtml(filenameLabel)} page ${s.page_number}" />
+                                <div class="cca-sum-scan-caption">${escapeHtml(filenameLabel)} · p.${s.page_number}${s.uploaded_at ? ' · ' + fmtDateTime(s.uploaded_at) : ''}</div>
+                            </button>
+                        `;
+                    }).join('')}
+                </div>
+            ` : '<p class="cca-sum-empty">No scans (X-ray/MRI/CT/imaging) identified from uploaded documents yet.</p>'}
+        </div>`;
+
+    const radiationCourses = summary.radiation || [];
+    const radiationSection = radiationCourses.length ? `
+        <div class="section-card">
+            <div class="section-title" style="margin-bottom:12px;">Radiation Therapy</div>
+            ${radiationCourses.map(course => `
+                <div style="margin-bottom:10px;">
+                    <div class="cca-sum-row-sub" style="margin-bottom:6px;">${escapeHtml(course.diagnosis || 'Radiation course')}${course.technique ? ' · ' + escapeHtml(course.technique) : ''}</div>
+                    ${(course.phases || []).map(p => `
+                        <div class="cca-sum-row">
+                            <div class="cca-sum-row-main">
+                                <div class="cca-sum-row-title">Phase ${p.phase_number} — ${escapeHtml(p.label)}</div>
+                                <div class="cca-sum-row-sub">${escapeHtml(p.treatment_site)} · ${p.total_prescribed_dose_gy} Gy / ${p.number_of_fractions} fractions · ${p.delivered_fractions}/${p.number_of_fractions} delivered</div>
+                            </div>
+                            ${_ccaSummaryBadge(p.rt_sub_status)}
+                        </div>
+                    `).join('') || '<p class="cca-sum-empty">No dose phases prescribed yet.</p>'}
+                </div>
+            `).join('')}
+        </div>` : '';
+
     const factEntries = Object.entries(summary.clinical_facts || {}).filter(([type]) => !hideMedications || type !== 'MEDICATION');
     const factsSection = `
         <div class="section-card">
@@ -248,8 +359,20 @@ async function renderCaseSummaryPanel(containerId, patientId, options = {}) {
             `).join('') : '<p class="cca-sum-empty">No journey events recorded yet.</p>'}
         </div>`;
 
-    container.innerHTML = header + vitalsSection + documentsSection + factsSection + ordersSection + resultsSection + encountersSection + journeySection +
+    container.innerHTML = header + vitalsSection + documentsSection + scansSection + radiationSection + factsSection + ordersSection + resultsSection + encountersSection + journeySection +
         `<p style="font-size:11.5px; color:var(--ink-500); margin-top:-8px;">${escapeHtml(summary.disclaimer)}</p>`;
+
+    // Scan thumbnails are served behind auth (same as the document "View" file endpoint), so
+    // they can't be plain <img src="..."> -- fetched as authenticated blobs and hydrated in
+    // after the fact, same pattern _ccaSummaryOpenDocument already uses for the full viewer.
+    scans.forEach((s, i) => {
+        if (!s.image_url) return;
+        const img = document.getElementById(`cca-scan-thumb-${i}`);
+        if (!img) return;
+        Api.blob(`/cca/patients/${patientId}/documents/${s.document_id}/pages/${s.page_number}/image`)
+            .then((blob) => { img.src = URL.createObjectURL(blob); })
+            .catch(() => { /* thumbnail best-effort -- the tile's own click handler still opens the full viewer */ });
+    });
 }
 
 /**
