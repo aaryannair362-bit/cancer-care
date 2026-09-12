@@ -186,6 +186,10 @@ ADDITIVE_COLUMNS = [
     ("cca_infusion_reaction_events", "future_rechallenge_decision", "VARCHAR(50)"),
     ("cca_infusion_reaction_events", "future_precautions", "TEXT"),
     ("cca_infusion_reaction_events", "rechallenge_decided_by", "VARCHAR(200)"),
+    # Safety/dataflow-critical follow-up round: Physics QA waiver mechanism (SCR-PHY-008)
+    # and RTT toxicity linkage into the shared ToxicityEvent record (RTT-050).
+    ("cca_radiation_phases", "physics_qa_waived_items", "JSON"),
+    ("cca_radiation_fractions", "toxicity_event_id", "INTEGER"),
 ]
 
 

@@ -31,6 +31,7 @@ from .models_cca import (
 from .models_cca_oncology_ext import (
     TreatmentOrderDrugLine, RadiationPrescription, CCARadiationPhase, RadiationFraction,
     RadiationInterruption, RadiationOnTreatmentVisit,
+    RadiationDiscrepancyRecord, RadiationPreTreatmentVerification,
 )
 from .cca_engine import calculate_bsa
 
@@ -151,6 +152,18 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
                     ).all()
                 ]
                 if phase_ids:
+                    # Safety/dataflow-critical follow-up round -- RadiationPreTreatmentVerification
+                    # is keyed by fraction_id, no patient_id of its own, so it must be deleted via
+                    # fraction_ids before RadiationFraction itself is deleted below.
+                    fraction_ids = [
+                        row.id for row in db.query(RadiationFraction.id).filter(
+                            RadiationFraction.phase_id.in_(phase_ids)
+                        ).all()
+                    ]
+                    if fraction_ids:
+                        db.query(RadiationPreTreatmentVerification).filter(
+                            RadiationPreTreatmentVerification.fraction_id.in_(fraction_ids)
+                        ).delete(synchronize_session=False)
                     db.query(RadiationFraction).filter(
                         RadiationFraction.phase_id.in_(phase_ids)
                     ).delete(synchronize_session=False)
@@ -161,6 +174,11 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
                     ).delete(synchronize_session=False)
                     db.query(RadiationOnTreatmentVisit).filter(
                         RadiationOnTreatmentVisit.phase_id.in_(phase_ids)
+                    ).delete(synchronize_session=False)
+                    # Safety/dataflow-critical follow-up round -- keyed by phase_id, same
+                    # reasoning as RadiationInterruption/RadiationOnTreatmentVisit above.
+                    db.query(RadiationDiscrepancyRecord).filter(
+                        RadiationDiscrepancyRecord.phase_id.in_(phase_ids)
                     ).delete(synchronize_session=False)
                     db.query(CCARadiationPhase).filter(
                         CCARadiationPhase.id.in_(phase_ids)

@@ -28,6 +28,7 @@ from ..models_cca import ResponseAssessment, ToxicityEvent, TreatmentPlan
 from ..models_cca_oncology_ext import (
     CCARadiationPhase, OncologyRecordExtension, RadiationFraction, RadiationPrescription,
     RadiationInterruption, RadiationOnTreatmentVisit,
+    RadiationDiscrepancyRecord, RadiationPreTreatmentVerification,
     Regimen, RegimenDrugLine, SurgicalPlan, TreatmentPlanPhase,
     SurgicalIntraOpMonitoring, SurgicalOperativeNote, SurgicalSpecimen, SurgicalBloodTransfusion,
     ClinicalProcedureNote, PalliativeTreatmentOrder,
@@ -66,6 +67,8 @@ _PHYSICS_QA_CHECKLIST_KEYS = [
     "target_oar_coverage_review", "machine_deliverability_review",
 ]
 _PHYSICS_QA_DECISIONS = ("Approved", "Rejected / Replan Required")
+# Safety/dataflow-critical follow-up round (reference SCR-PHY-007/008).
+_DISCREPANCY_SEVERITIES = ("Minor", "Major", "Critical")
 # RT Delivery (Product 1 vs Product 2 gap report, Batch 5) -- Product 1's own interruption
 # category is a free, unvalidated string; we validate against the gap report's own named
 # categories to keep the field meaningful without inventing an unbacked taxonomy.
@@ -157,7 +160,8 @@ def _rt_phase_out(p: CCARadiationPhase) -> dict:
         "physicist_signer_email": p.physicist_signer_email, "physicist_signer_role": p.physicist_signer_role,
         "physicist_signed_at": p.physicist_signed_at.isoformat() if p.physicist_signed_at else None,
         "physics_qa_checklist": p.physics_qa_checklist, "physics_qa_decision": p.physics_qa_decision,
-        "physics_qa_note": p.physics_qa_note, "physics_qa_decided_by": p.physics_qa_decided_by,
+        "physics_qa_note": p.physics_qa_note, "physics_qa_waived_items": p.physics_qa_waived_items or [],
+        "physics_qa_decided_by": p.physics_qa_decided_by,
         "physics_qa_decided_at": p.physics_qa_decided_at.isoformat() if p.physics_qa_decided_at else None,
         "physician_signer_email": p.physician_signer_email, "physician_signer_role": p.physician_signer_role,
         "physician_signed_at": p.physician_signed_at.isoformat() if p.physician_signed_at else None,
@@ -175,7 +179,7 @@ def _rt_fraction_out(f: RadiationFraction) -> dict:
         "variance_or_toxicity": f.variance_or_toxicity,
         "image_guidance_performed": f.image_guidance_performed, "setup_variation": f.setup_variation,
         "verified_by": f.verified_by, "dose_match_confirmed": f.dose_match_confirmed,
-        "dose_mismatch_note": f.dose_mismatch_note,
+        "dose_mismatch_note": f.dose_mismatch_note, "toxicity_event_id": f.toxicity_event_id,
         "recorded_by": f.recorded_by, "recorded_at": f.recorded_at.isoformat() if f.recorded_at else None,
     }
 
@@ -395,10 +399,83 @@ def get_physics_qa(phase_id: int, db: Session = Depends(get_cca_db), current_use
     return {
         "physics_qa": {
             "checklist": phase.physics_qa_checklist, "decision": phase.physics_qa_decision,
-            "note": phase.physics_qa_note, "decided_by": phase.physics_qa_decided_by,
+            "note": phase.physics_qa_note, "waived_items": phase.physics_qa_waived_items or [],
+            "decided_by": phase.physics_qa_decided_by,
             "decided_at": phase.physics_qa_decided_at.isoformat() if phase.physics_qa_decided_at else None,
         }
     }
+
+
+def _discrepancy_out(d: RadiationDiscrepancyRecord) -> dict:
+    return {
+        "id": d.id, "phase_id": d.phase_id, "category": d.category, "severity": d.severity,
+        "description": d.description, "root_cause": d.root_cause, "resolution": d.resolution,
+        "status": d.status, "raised_by": d.raised_by, "raised_at": d.raised_at.isoformat() if d.raised_at else None,
+        "closed_by": d.closed_by, "closed_at": d.closed_at.isoformat() if d.closed_at else None,
+    }
+
+
+@router.get("/radiation-phases/{phase_id}/discrepancies")
+def list_discrepancies(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    phase, _rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    rows = db.query(RadiationDiscrepancyRecord).filter(RadiationDiscrepancyRecord.phase_id == phase.id).order_by(RadiationDiscrepancyRecord.id.desc()).all()
+    return {"discrepancies": [_discrepancy_out(d) for d in rows]}
+
+
+@router.post("/radiation-phases/{phase_id}/discrepancies", status_code=201)
+async def raise_discrepancy(phase_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Physics QA Discrepancy Record (SCR-PHY-007) -- safety/dataflow-critical follow-up
+    round. An OPEN discrepancy blocks record_physics_qa's Approved decision above."""
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may raise a discrepancy")
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    body = await request.json()
+    category = (body.get("category") or "").strip()
+    severity = body.get("severity")
+    description = (body.get("description") or "").strip()
+    if not category:
+        raise HTTPException(422, "category is required")
+    if severity not in _DISCREPANCY_SEVERITIES:
+        raise HTTPException(422, f"severity must be one of {_DISCREPANCY_SEVERITIES}")
+    if not description:
+        raise HTTPException(422, "description is required")
+    discrepancy = RadiationDiscrepancyRecord(
+        phase_id=phase.id, category=category, severity=severity, description=description,
+        root_cause=body.get("root_cause"), raised_by=_actor(current_user),
+    )
+    db.add(discrepancy)
+    publish(
+        db, "RADIATION_DISCREPANCY_RAISED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Physics QA discrepancy raised", category="TREATMENT",
+        description=f"{_actor(current_user)} raised a {severity} discrepancy on phase {phase.phase_number}: {category}.",
+        prescription_id=rx.id, phase_id=phase.id,
+    )
+    db.commit()
+    db.refresh(discrepancy)
+    return {"status": "success", "discrepancy": _discrepancy_out(discrepancy)}
+
+
+@router.post("/radiation-discrepancies/{id}/close")
+async def close_discrepancy(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may close a discrepancy")
+    discrepancy = db.query(RadiationDiscrepancyRecord).filter(RadiationDiscrepancyRecord.id == id).first()
+    if not discrepancy:
+        raise HTTPException(404, "Discrepancy not found")
+    _get_org_radiation_phase(db, discrepancy.phase_id, _org_id(current_user))
+    if discrepancy.status == "CLOSED":
+        raise HTTPException(409, "This discrepancy is already closed")
+    body = await request.json()
+    resolution = (body.get("resolution") or "").strip()
+    if not resolution:
+        raise HTTPException(422, "resolution is required to close a discrepancy")
+    discrepancy.resolution = resolution
+    discrepancy.status = "CLOSED"
+    discrepancy.closed_by = _actor(current_user)
+    discrepancy.closed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(discrepancy)
+    return {"status": "success", "discrepancy": _discrepancy_out(discrepancy)}
 
 
 @router.post("/radiation-phases/{phase_id}/physics-qa")
@@ -427,14 +504,27 @@ async def record_physics_qa(phase_id: int, request: Request, db: Session = Depen
     if not note:
         raise HTTPException(422, "A note is required to record a Physics QA decision")
     checklist = body.get("checklist") or {}
+    waived_items = body.get("waived_items") or []
     if decision == "Approved":
-        missing = [k for k in _PHYSICS_QA_CHECKLIST_KEYS if not checklist.get(k)]
+        # Discrepancy Record gate (SCR-PHY-007) -- QA cannot pass while an open discrepancy
+        # exists on this phase, safety/dataflow-critical follow-up round.
+        open_discrepancy = db.query(RadiationDiscrepancyRecord).filter(
+            RadiationDiscrepancyRecord.phase_id == phase.id, RadiationDiscrepancyRecord.status == "OPEN"
+        ).first()
+        if open_discrepancy:
+            raise HTTPException(409, f"Cannot approve Physics QA while discrepancy #{open_discrepancy.id} is still OPEN")
+        waived_keys = {w.get("item") for w in waived_items if w.get("item")}
+        for w in waived_items:
+            if not (w.get("item") and w.get("waived_by") and w.get("reason")):
+                raise HTTPException(422, "Each waived item requires item, waived_by and reason")
+        missing = [k for k in _PHYSICS_QA_CHECKLIST_KEYS if not checklist.get(k) and k not in waived_keys]
         if missing:
-            raise HTTPException(422, f"All checklist items must be confirmed to approve -- missing: {', '.join(missing)}")
+            raise HTTPException(422, f"All checklist items must be confirmed or explicitly waived to approve -- missing: {', '.join(missing)}")
 
     phase.physics_qa_checklist = checklist
     phase.physics_qa_decision = decision
     phase.physics_qa_note = note
+    phase.physics_qa_waived_items = waived_items
     phase.physics_qa_decided_by = _actor(current_user)
     phase.physics_qa_decided_at = datetime.utcnow()
     publish(
@@ -604,6 +694,53 @@ async def record_radiation_otv(phase_id: int, request: Request, db: Session = De
     return {"status": "success", "otv": _rt_otv_out(otv)}
 
 
+def _pretreatment_verification_out(v: RadiationPreTreatmentVerification) -> dict:
+    return {
+        "id": v.id, "fraction_id": v.fraction_id, "identity_reverified": bool(v.identity_reverified),
+        "site_laterality_confirmed": bool(v.site_laterality_confirmed),
+        "expected_fraction_number": v.expected_fraction_number, "confirmed_fraction_number": v.confirmed_fraction_number,
+        "fraction_number_mismatch": bool(v.fraction_number_mismatch), "mismatch_note": v.mismatch_note,
+        "verified_by": v.verified_by, "verified_at": v.verified_at.isoformat() if v.verified_at else None,
+    }
+
+
+@router.post("/radiation-fractions/{fraction_id}/pretreatment-verification", status_code=201)
+async def record_pretreatment_verification(fraction_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Pre-Treatment Verification (reference SCR-RTT-002) -- the daily gate before a fraction
+    may be recorded as delivered: identity/site re-check plus an explicit expected-vs-
+    confirmed fraction-number check (RTT-020's hard stop is enforced here on a mismatch,
+    unless explicitly overridden with a note -- a count comparison, not a computed dose
+    check). Safety/dataflow-critical follow-up round."""
+    if not (is_cca_radiologist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Radiologist may record a pre-treatment verification")
+    fraction = db.query(RadiationFraction).filter(RadiationFraction.id == fraction_id).first()
+    if not fraction:
+        raise HTTPException(404, "Radiation fraction not found")
+    _get_org_radiation_phase(db, fraction.phase_id, _org_id(current_user))
+    if fraction.status == "delivered":
+        raise HTTPException(409, "This fraction is already delivered")
+    body = await request.json()
+    identity_reverified = bool(body.get("identity_reverified", False))
+    site_confirmed = bool(body.get("site_laterality_confirmed", False))
+    confirmed_number = body.get("confirmed_fraction_number")
+    if confirmed_number is None:
+        raise HTTPException(422, "confirmed_fraction_number is required")
+    mismatch = int(confirmed_number) != fraction.fraction_number
+    if mismatch and not (body.get("mismatch_note") or "").strip():
+        raise HTTPException(422, "mismatch_note is required when confirmed_fraction_number does not match the expected fraction number")
+    if not (identity_reverified and site_confirmed):
+        raise HTTPException(422, "identity_reverified and site_laterality_confirmed must both be true before delivery")
+    verification = RadiationPreTreatmentVerification(
+        fraction_id=fraction.id, identity_reverified=identity_reverified, site_laterality_confirmed=site_confirmed,
+        expected_fraction_number=fraction.fraction_number, confirmed_fraction_number=confirmed_number,
+        fraction_number_mismatch=mismatch, mismatch_note=body.get("mismatch_note"), verified_by=_actor(current_user),
+    )
+    db.add(verification)
+    db.commit()
+    db.refresh(verification)
+    return {"status": "success", "verification": _pretreatment_verification_out(verification)}
+
+
 @router.post("/radiation-fractions/{fraction_id}/event")
 async def record_radiation_fraction_event(fraction_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     """Recording an actual delivered/missed/rescheduled fraction is the Radiation
@@ -626,6 +763,14 @@ async def record_radiation_fraction_event(fraction_id: int, request: Request, db
     if fraction.status == "delivered" and status_value == "delivered":
         raise HTTPException(409, f"Fraction {fraction.fraction_number} is already recorded as delivered")
     if status_value == "delivered":
+        # Pre-Treatment Verification gate (reference SCR-RTT-002, safety/dataflow-critical
+        # follow-up round) -- a fraction cannot be recorded delivered without the daily
+        # identity/site/fraction-number check having been performed first.
+        verified = db.query(RadiationPreTreatmentVerification).filter(
+            RadiationPreTreatmentVerification.fraction_id == fraction.id
+        ).order_by(RadiationPreTreatmentVerification.id.desc()).first()
+        if not verified:
+            raise HTTPException(409, "Pre-treatment verification is required before this fraction can be recorded as delivered")
         # Product 1's rt_fraction_safety() computes and blocks on a delivered-vs-prescribed
         # dose tolerance -- standing repo rule forbids that. dose_match_confirmed is the
         # non-computed substitute: the RTT's own attestation, never a system comparison.
@@ -643,6 +788,21 @@ async def record_radiation_fraction_event(fraction_id: int, request: Request, db
         fraction.on_treatment_review_note = body["on_treatment_review_note"]
     if body.get("variance_or_toxicity"):
         fraction.variance_or_toxicity = body["variance_or_toxicity"]
+    # RTT-observed toxicity now feeds the shared longitudinal ToxicityEvent record (reference
+    # RTT-050) rather than sitting only in the free-text field above -- safety/dataflow-
+    # critical follow-up round. term/grade are the RTT's own typed observation, never
+    # computed; baseline_value is a fixed literal, matching every other ToxicityEvent writer
+    # in this codebase (e.g. cca_seed.py's own seed data).
+    toxicity_term = body.get("toxicity_term")
+    toxicity_grade = body.get("toxicity_grade")
+    if toxicity_term and toxicity_grade is not None:
+        tox = ToxicityEvent(
+            patient_id=rx.patient_id, term=toxicity_term, grade=int(toxicity_grade),
+            baseline_value="Grade 0 (Baseline)",
+        )
+        db.add(tox)
+        db.flush()
+        fraction.toxicity_event_id = tox.id
     if body.get("setup_variation"):
         fraction.setup_variation = body["setup_variation"]
     if body.get("verified_by"):

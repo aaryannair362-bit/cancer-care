@@ -121,6 +121,10 @@ class CCARadiationPhase(Base):
     physics_qa_note = Column(Text, nullable=True)
     physics_qa_decided_by = Column(String(200), nullable=True)
     physics_qa_decided_at = Column(DateTime, nullable=True)
+    # Waiver mechanism (reference SCR-PHY-008, safety/dataflow-critical follow-up round) --
+    # an unmet checklist item may be approved anyway only with a recorded authority and
+    # reason, never silently. [{"item": key, "waived_by": actor, "reason": text}, ...].
+    physics_qa_waived_items = Column(JSON, nullable=True)
     physician_signer_email = Column(String(200), nullable=True)
     physician_signer_role = Column(String(50), nullable=True)
     physician_signed_at = Column(DateTime, nullable=True)
@@ -165,8 +169,53 @@ class RadiationFraction(Base):
     # comparison. dose_mismatch_note is required only when the RTT flags a mismatch.
     dose_match_confirmed = Column(Boolean, nullable=True)
     dose_mismatch_note = Column(Text, nullable=True)
+    # RTT-observed toxicity now feeds the shared longitudinal ToxicityEvent record (reference
+    # RTT-050: "so the RO sees a continuous record rather than parallel logs") instead of
+    # sitting only in variance_or_toxicity's free text -- safety/dataflow-critical follow-up
+    # round. Nullable: variance_or_toxicity alone remains valid for a non-toxicity variance.
+    toxicity_event_id = Column(Integer, ForeignKey("cca_toxicity_events.id"), nullable=True)
     recorded_by = Column(String(200), nullable=True)
     recorded_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RadiationDiscrepancyRecord(Base):
+    """Physics QA Discrepancy Record (reference SCR-PHY-007) -- structured, with a status
+    that gates QA approval: record_physics_qa refuses to record an Approved decision while
+    an OPEN discrepancy of this severity exists on the phase (see that endpoint). category/
+    root_cause/resolution are all physicist-typed narrative, never computed."""
+    __tablename__ = "cca_radiation_discrepancy_records"
+    id = Column(Integer, primary_key=True)
+    phase_id = Column(Integer, ForeignKey("cca_radiation_phases.id"), nullable=False)
+    category = Column(String(100), nullable=False)
+    severity = Column(String(30), nullable=False)  # Minor, Major, Critical
+    description = Column(Text, nullable=False)
+    root_cause = Column(Text, nullable=True)
+    resolution = Column(Text, nullable=True)
+    status = Column(String(30), default="OPEN")  # OPEN, CLOSED
+    raised_by = Column(String(200))
+    raised_at = Column(DateTime, default=datetime.utcnow)
+    closed_by = Column(String(200), nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+
+
+class RadiationPreTreatmentVerification(Base):
+    """Pre-Treatment Verification (reference SCR-RTT-002) -- the daily gate before a
+    fraction may be recorded as delivered: identity/site re-check plus an explicit
+    expected-vs-confirmed fraction-number check (RTT-020's hard stop on mismatch -- a plain
+    count comparison the RTT performs and attests to, not a system computation).
+    record_radiation_fraction_event requires one of these to exist for a fraction before
+    accepting a 'delivered' status."""
+    __tablename__ = "cca_radiation_pretreatment_verifications"
+    id = Column(Integer, primary_key=True)
+    fraction_id = Column(Integer, ForeignKey("cca_radiation_fractions.id"), nullable=False)
+    identity_reverified = Column(Boolean, default=False)
+    site_laterality_confirmed = Column(Boolean, default=False)
+    expected_fraction_number = Column(Integer, nullable=False)
+    confirmed_fraction_number = Column(Integer, nullable=False)
+    fraction_number_mismatch = Column(Boolean, default=False)
+    mismatch_note = Column(Text, nullable=True)
+    verified_by = Column(String(200))
+    verified_at = Column(DateTime, default=datetime.utcnow)
 
 
 class RadiationInterruption(Base):

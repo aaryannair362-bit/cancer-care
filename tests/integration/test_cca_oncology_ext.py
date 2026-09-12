@@ -225,6 +225,9 @@ def test_fraction_events_persist_variance_and_only_radiologist_may_record(client
     assert body["status"] == "missed"
     assert body["interruption_reason"] == "Patient unwell, rescheduled by radiotherapy team"
 
+    client.post(f"/api/cca/radiation-fractions/{fractions[1]['id']}/pretreatment-verification", headers=radiologist_headers, json={
+        "identity_reverified": True, "site_laterality_confirmed": True, "confirmed_fraction_number": fractions[1]["fraction_number"],
+    })
     reviewed = client.post(f"/api/cca/radiation-fractions/{fractions[1]['id']}/event", headers=radiologist_headers, json={
         "status": "delivered", "on_treatment_review_note": "Skin reaction Grade 1, tolerating well",
         "variance_or_toxicity": "Grade 1 erythema noted",
@@ -246,6 +249,9 @@ def test_phase_cannot_complete_until_all_fractions_delivered(client, auth_header
     fractions = client.get(f"/api/cca/radiation-phases/{phase['id']}/fractions", headers=onc_headers).json()["fractions"]
     radiologist_headers = auth_headers(radiologist)
     for f in fractions:
+        client.post(f"/api/cca/radiation-fractions/{f['id']}/pretreatment-verification", headers=radiologist_headers, json={
+            "identity_reverified": True, "site_laterality_confirmed": True, "confirmed_fraction_number": f["fraction_number"],
+        })
         client.post(f"/api/cca/radiation-fractions/{f['id']}/event", headers=radiologist_headers, json={"status": "delivered"})
 
     completed = client.post(f"/api/cca/radiation-phases/{phase['id']}/complete", headers=onc_headers)
@@ -276,7 +282,11 @@ def test_phase_can_be_interrupted_and_resumed(client, auth_headers, db_session, 
 
     # Enter on_treatment via a fraction event, then interrupt and resume.
     fractions = client.get(f"/api/cca/radiation-phases/{phase['id']}/fractions", headers=onc_headers).json()["fractions"]
-    client.post(f"/api/cca/radiation-fractions/{fractions[0]['id']}/event", headers=auth_headers(radiologist), json={"status": "delivered"})
+    radiologist_headers = auth_headers(radiologist)
+    client.post(f"/api/cca/radiation-fractions/{fractions[0]['id']}/pretreatment-verification", headers=radiologist_headers, json={
+        "identity_reverified": True, "site_laterality_confirmed": True, "confirmed_fraction_number": fractions[0]["fraction_number"],
+    })
+    client.post(f"/api/cca/radiation-fractions/{fractions[0]['id']}/event", headers=radiologist_headers, json={"status": "delivered"})
 
     missing_reason = client.post(f"/api/cca/radiation-phases/{phase['id']}/transition", headers=onc_headers, json={"status": "interrupted"})
     assert missing_reason.status_code == 422

@@ -91,6 +91,15 @@ def _first_fraction_id(client, onc_headers, phase_id):
     return fractions[0]["id"], fractions[1]["id"]
 
 
+def _verify_pretreatment(client, rtt_headers, fraction_id, fraction_number):
+    """Pre-Treatment Verification (safety/dataflow-critical follow-up round, reference
+    SCR-RTT-002) is now a hard precondition for recording a fraction as delivered."""
+    r = client.post(f"/api/cca/radiation-fractions/{fraction_id}/pretreatment-verification", headers=rtt_headers, json={
+        "identity_reverified": True, "site_laterality_confirmed": True, "confirmed_fraction_number": fraction_number,
+    })
+    assert r.status_code == 201, r.text
+
+
 # ---------------------------------------------------------------------------
 # Fraction delivery
 # ---------------------------------------------------------------------------
@@ -98,6 +107,7 @@ def _first_fraction_id(client, onc_headers, phase_id):
 def test_duplicate_delivery_is_rejected(client, onc_headers, physicist_headers, rtt_headers, patient):
     phase_id = _create_phase_treatment_ready(client, onc_headers, physicist_headers, patient.id)
     admin_id, _ = _first_fraction_id(client, onc_headers, phase_id)
+    _verify_pretreatment(client, rtt_headers, admin_id, 1)
 
     first = client.post(f"/api/cca/radiation-fractions/{admin_id}/event", headers=rtt_headers, json={"status": "delivered"})
     assert first.status_code == 200, first.text
@@ -109,6 +119,7 @@ def test_duplicate_delivery_is_rejected(client, onc_headers, physicist_headers, 
 def test_delivery_captures_image_guidance_setup_and_verifier(client, onc_headers, physicist_headers, rtt_headers, patient):
     phase_id = _create_phase_treatment_ready(client, onc_headers, physicist_headers, patient.id)
     admin_id, _ = _first_fraction_id(client, onc_headers, phase_id)
+    _verify_pretreatment(client, rtt_headers, admin_id, 1)
 
     delivered = client.post(f"/api/cca/radiation-fractions/{admin_id}/event", headers=rtt_headers, json={
         "status": "delivered", "image_guidance_performed": True, "setup_variation": "Minor shift, adjusted per protocol.",
@@ -125,6 +136,7 @@ def test_delivery_captures_image_guidance_setup_and_verifier(client, onc_headers
 def test_dose_mismatch_requires_a_note(client, onc_headers, physicist_headers, rtt_headers, patient):
     phase_id = _create_phase_treatment_ready(client, onc_headers, physicist_headers, patient.id)
     admin_id, _ = _first_fraction_id(client, onc_headers, phase_id)
+    _verify_pretreatment(client, rtt_headers, admin_id, 1)
 
     missing_note = client.post(f"/api/cca/radiation-fractions/{admin_id}/event", headers=rtt_headers, json={
         "status": "delivered", "dose_match_confirmed": False,
@@ -154,6 +166,7 @@ def test_cancelled_is_a_valid_fraction_status(client, onc_headers, physicist_hea
 def test_interruption_requires_reason_and_valid_category(client, onc_headers, physicist_headers, rtt_headers, patient):
     phase_id = _create_phase_treatment_ready(client, onc_headers, physicist_headers, patient.id)
     admin_id, _ = _first_fraction_id(client, onc_headers, phase_id)
+    _verify_pretreatment(client, rtt_headers, admin_id, 1)
     client.post(f"/api/cca/radiation-fractions/{admin_id}/event", headers=rtt_headers, json={"status": "delivered"})
 
     missing_reason = client.post(f"/api/cca/radiation-phases/{phase_id}/transition", headers=onc_headers, json={"status": "interrupted"})
@@ -176,6 +189,7 @@ def test_rtt_may_also_record_and_resume_an_interruption(client, onc_headers, phy
     Technologist -- not RO-only."""
     phase_id = _create_phase_treatment_ready(client, onc_headers, physicist_headers, patient.id)
     admin_id, _ = _first_fraction_id(client, onc_headers, phase_id)
+    _verify_pretreatment(client, rtt_headers, admin_id, 1)
     client.post(f"/api/cca/radiation-fractions/{admin_id}/event", headers=rtt_headers, json={"status": "delivered"})
 
     interrupted = client.post(f"/api/cca/radiation-phases/{phase_id}/transition", headers=rtt_headers, json={
@@ -197,6 +211,7 @@ def test_rtt_may_also_record_and_resume_an_interruption(client, onc_headers, phy
 def test_nurse_cannot_record_an_interruption(client, onc_headers, physicist_headers, rtt_headers, patient, make_user, auth_headers, oncologist):
     phase_id = _create_phase_treatment_ready(client, onc_headers, physicist_headers, patient.id)
     admin_id, _ = _first_fraction_id(client, onc_headers, phase_id)
+    _verify_pretreatment(client, rtt_headers, admin_id, 1)
     client.post(f"/api/cca/radiation-fractions/{admin_id}/event", headers=rtt_headers, json={"status": "delivered"})
 
     nurse = make_user(email="nurse@rt-delivery-test.com", role="CCAInfusionNurse", organization_id=oncologist.organization_id)
@@ -219,6 +234,7 @@ def test_otv_requires_at_least_one_delivered_fraction(client, onc_headers, physi
     assert too_soon.status_code == 409
 
     admin_id, _ = _first_fraction_id(client, onc_headers, phase_id)
+    _verify_pretreatment(client, rtt_headers, admin_id, 1)
     client.post(f"/api/cca/radiation-fractions/{admin_id}/event", headers=rtt_headers, json={"status": "delivered"})
 
     ok = client.post(f"/api/cca/radiation-phases/{phase_id}/otv", headers=onc_headers, json={
@@ -231,6 +247,7 @@ def test_otv_requires_at_least_one_delivered_fraction(client, onc_headers, physi
 def test_otv_requires_all_three_fields(client, onc_headers, physicist_headers, rtt_headers, patient):
     phase_id = _create_phase_treatment_ready(client, onc_headers, physicist_headers, patient.id)
     admin_id, _ = _first_fraction_id(client, onc_headers, phase_id)
+    _verify_pretreatment(client, rtt_headers, admin_id, 1)
     client.post(f"/api/cca/radiation-fractions/{admin_id}/event", headers=rtt_headers, json={"status": "delivered"})
 
     missing_plan = client.post(f"/api/cca/radiation-phases/{phase_id}/otv", headers=onc_headers, json={
@@ -242,10 +259,12 @@ def test_otv_requires_all_three_fields(client, onc_headers, physicist_headers, r
 def test_otv_list_returns_multiple_visits(client, onc_headers, physicist_headers, rtt_headers, patient):
     phase_id = _create_phase_treatment_ready(client, onc_headers, physicist_headers, patient.id)
     admin_id, second_id = _first_fraction_id(client, onc_headers, phase_id)
+    _verify_pretreatment(client, rtt_headers, admin_id, 1)
     client.post(f"/api/cca/radiation-fractions/{admin_id}/event", headers=rtt_headers, json={"status": "delivered"})
     client.post(f"/api/cca/radiation-phases/{phase_id}/otv", headers=onc_headers, json={
         "assessment": "Visit 1.", "toxicity_summary": "None.", "plan": "Continue.",
     })
+    _verify_pretreatment(client, rtt_headers, second_id, 2)
     client.post(f"/api/cca/radiation-fractions/{second_id}/event", headers=rtt_headers, json={"status": "delivered"})
     client.post(f"/api/cca/radiation-phases/{phase_id}/otv", headers=onc_headers, json={
         "assessment": "Visit 2.", "toxicity_summary": "Mild erythema.", "plan": "Continue, review skin weekly.",
