@@ -284,7 +284,7 @@
                         <div><div class="wl-label">Arrival</div><span class="badge ${r.arrival_status === 'Arrived' ? 'badge-green' : 'badge-amber'}">${escapeHtml(r.arrival_status)}</span></div>
                         <div><div class="wl-label">Chair / Bed</div><div class="wl-value" style="font-size:13px;">${escapeHtml(r.chair_bed || '—')}</div></div>
                         <div>
-                          <div class="wl-label">Gates</div>
+                          <div class="wl-label">Gates ${renderReadinessBadge(r.gates)}</div>
                           ${renderGateStrip(r.gates)}
                           ${r.flags.length ? `<div style="margin-top:4px;">${r.flags.map(f => `<span class="badge badge-rose" style="margin-right:4px;">${escapeHtml(f)}</span>`).join('')}</div>` : ''}
                         </div>
@@ -306,6 +306,18 @@
         }
 
         const GATE_DOT_COLOR = { green: '#16A34A', amber: '#D97706', red: '#E11D48', grey: '#CBD5E1' };
+        // Treatment Readiness consolidation (final gap-closing round, item 15) -- mirrors
+        // GET /treatment-sessions/{id}/readiness's own reduction exactly (any red gate ->
+        // ESCALATE, any amber/grey -> HOLD, else READY), computed client-side here since the
+        // gates are already fetched per queue row -- avoids an extra round-trip per patient.
+        function renderReadinessBadge(gates) {
+            if (!gates) return '';
+            const statuses = Object.values(gates).map(g => g.status);
+            const state = statuses.includes('red') ? 'ESCALATE' : (statuses.some(s => s === 'amber' || s === 'grey') ? 'HOLD' : 'READY');
+            const badgeClass = state === 'READY' ? 'badge-green' : (state === 'ESCALATE' ? 'badge-rose' : 'badge-amber');
+            return `<span class="badge ${badgeClass}" style="margin-left:6px;">${state}</span>`;
+        }
+
         function renderGateStrip(gates) {
             if (!gates) return '';
             const order = [['identity', 'ID'], ['consent', 'Consent'], ['clearance', 'Clear'], ['product', 'Product'], ['access', 'Access'], ['verification', 'Verify']];

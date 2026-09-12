@@ -5138,6 +5138,37 @@ def _day_care_gate_status(db: Session, session: TreatmentSession, order: Optiona
     }
 
 
+@router.get("/treatment-sessions/{session_id}/readiness")
+def get_treatment_readiness(session_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Treatment Readiness consolidation (gap review item 15) -- previously the readiness
+    signal was scattered across PreTreatmentSafetyCheck/PharmacyReadiness/TreatmentClearance
+    with no single explicit state. This reduces the same already-computed gate strip
+    (_day_care_gate_status, reference SCR-MAR-001) to one READY/HOLD/ESCALATE verdict --
+    no new storage, no new clinical judgment, just the existing gates' own colors reduced to
+    a single state: any red gate means ESCALATE, any amber/grey (not yet ready) means HOLD,
+    all green means READY."""
+    session = db.query(TreatmentSession).filter(TreatmentSession.id == session_id).first()
+    if not session:
+        raise HTTPException(404, "Treatment session not found")
+    _check_patient_in_org(db, session.patient_id, _org_id(current_user))
+    order = db.query(TreatmentOrder).filter(
+        TreatmentOrder.treatment_session_id == session.id, TreatmentOrder.status != "CANCELLED"
+    ).order_by(TreatmentOrder.id.desc()).first()
+    gates = _day_care_gate_status(db, session, order)
+    blocking = [name for name, g in gates.items() if g["status"] == "red"]
+    pending = [name for name, g in gates.items() if g["status"] in ("amber", "grey")]
+    if blocking:
+        state = "ESCALATE"
+    elif pending:
+        state = "HOLD"
+    else:
+        state = "READY"
+    return {
+        "session_id": session.id, "state": state, "blocking_gates": blocking, "pending_gates": pending,
+        "gates": gates,
+    }
+
+
 @router.patch("/treatment/queue/{session_id}/arrival")
 async def update_queue_arrival(
     session_id: int, request: Request, db: Session = Depends(get_cca_db),
