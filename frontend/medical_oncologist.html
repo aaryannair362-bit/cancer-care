@@ -273,6 +273,7 @@
             <a class="sidebar-nav-item" id="nav-procedurenotes" onclick="showTab('procedurenotes')"><div class="nav-item-left"><span>🩻</span><span>Procedures &amp; Notes</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-completion" onclick="showTab('completion')"><div class="nav-item-left"><span>🏁</span><span>Treatment Completion</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-oraltherapy" onclick="showTab('oraltherapy')"><div class="nav-item-left"><span>💊</span><span>Oral Therapy</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-surveillance" onclick="showTab('surveillance')"><div class="nav-item-left"><span>🔭</span><span>Surveillance</span></div><span class="nav-chevron">›</span></a>
 
             <div class="sidebar-section-title">CLINICAL INTELLIGENCE / COORDINATION</div>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
@@ -476,6 +477,13 @@
                 <div id="oraltherapy-content"><!-- Populated via JS: loadOralTherapyPrescribingView() --></div>
             </div>
 
+            <!-- ===== SURVEILLANCE / SURVIVORSHIP (Product 1 vs Product 2 gap report, Batch 8) ===== -->
+            <div id="view-surveillance" class="view-panel">
+                <h1 class="page-title">Surveillance / Survivorship</h1>
+                <p class="page-subtitle">Post-treatment follow-up — plans, visits, investigations, late effects, recurrence re-entry, recall, and referrals.</p>
+                <div id="surveillance-content"><!-- Populated via JS: loadSurveillanceView() --></div>
+            </div>
+
             <!-- ===== NEXUS: real 13(+1)-section clinical brief (renderNexusBrief, cca-summary.js)
                  above a coordination-task board that is still static/mock ===== -->
             <div id="view-nexus" class="view-panel">
@@ -616,6 +624,7 @@
             if (tab === 'procedurenotes') loadProcedureNotesView();
             if (tab === 'completion') loadTreatmentCompletionView();
             if (tab === 'oraltherapy') loadOralTherapyPrescribingView();
+            if (tab === 'surveillance') loadSurveillanceView();
             if (tab === 'guideline') loadGuidelinePathway();
             if (tab === 'staging') loadStagingWorkspace();
             if (tab === 'mdt') loadMdtWorkspace();
@@ -2131,6 +2140,252 @@
                 await Api.post(`${CCA_API}/oral-therapy-prescriptions/${rxId}/sign`, {});
                 toast('Oral therapy prescription signed', 'success');
                 loadOralTherapyPrescribingView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---------------------------------------------------------------
+        // Surveillance / Survivorship (Product 1 vs Product 2 gap report, Batch 8;
+        // worklist/dashboard follow-up round for the org-wide worklist/recall/timeline)
+        // ---------------------------------------------------------------
+        let currentSurveillancePlanId = null;
+
+        async function renderSurveillanceWorklistCard() {
+            try {
+                const data = await Api.get(`${CCA_API}/surveillance-plans/worklist`);
+                const rows = data.worklist || [];
+                return `
+                    <div class="section-card">
+                        <div class="section-head"><div class="section-title">Surveillance Worklist</div><span class="badge badge-blue">${rows.length} active</span></div>
+                        ${rows.length ? rows.map(r => `
+                            <div class="mdt-case-row" style="cursor:pointer;" onclick="currentPatientId=${r.patient_id}; currentSurveillancePlanId=${r.plan_id}; loadSurveillanceView();">
+                                <div><div style="font-size:13.5px; font-weight:600;">${escapeHtml(r.patient_name || '—')} <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(r.mrn || '')}</span></div><div style="font-size:12px; color:var(--ink-500);">${escapeHtml(r.current_phase || '—')} · Next review ${r.next_review_date || '—'}</div></div>
+                                <div style="display:flex; gap:6px;">
+                                    ${r.overdue ? `<span class="badge badge-rose">${Math.abs(r.days_until_due)}d overdue</span>` : (r.days_until_due != null ? `<span class="badge badge-blue">${r.days_until_due}d until due</span>` : '')}
+                                    ${r.active_late_effects ? `<span class="badge badge-amber">${r.active_late_effects} late effect(s)</span>` : ''}
+                                </div>
+                            </div>
+                        `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No active surveillance plans.</p>'}
+                    </div>
+                `;
+            } catch (err) { return `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function renderRecallQueueCard() {
+            try {
+                const data = await Api.get(`${CCA_API}/surveillance-recall-queue`);
+                const rows = data.recall_queue || [];
+                return `
+                    <div class="section-card">
+                        <div class="section-head"><div class="section-title">Lost-to-Follow-up / Recall Queue</div><span class="badge badge-blue">${rows.length} open</span></div>
+                        ${rows.length ? rows.map(r => `
+                            <div class="checklist-row" style="display:block;">
+                                <strong>${escapeHtml(r.patient_name || '—')}</strong> · ${escapeHtml(r.mrn || '')} — ${r.days_overdue != null ? r.days_overdue + 'd overdue' : 'due date not set'} · ${r.attempt_count} attempt(s)
+                                <button class="btn-outline btn-sm" style="margin-left:8px;" onclick="logRecallAttemptPrompt(${r.id})">Log Attempt</button>
+                                <button class="btn-outline btn-sm" onclick="closeRecallEntry(${r.id})">Close</button>
+                            </div>
+                        `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No open recall entries.</p>'}
+                    </div>
+                `;
+            } catch (err) { return ''; }
+        }
+
+        async function loadSurveillanceView() {
+            const container = document.getElementById('surveillance-content');
+            const worklistCard = await renderSurveillanceWorklistCard();
+            const recallCard = await renderRecallQueueCard();
+            if (!currentPatientId) { container.innerHTML = worklistCard + recallCard + '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient above, or from Patients, to open their surveillance plan.</p></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/surveillance-plans`);
+                const plans = data.surveillance_plans || [];
+                const active = plans.find(p => p.id === currentSurveillancePlanId) || plans.find(p => p.status === 'ACTIVE') || plans[0];
+                currentSurveillancePlanId = active ? active.id : null;
+
+                const listSection = `
+                    <div class="section-card">
+                        <div class="section-title">Plans For This Patient</div>
+                        ${plans.length ? plans.map(p => `
+                            <div class="mdt-case-row" style="cursor:pointer;" onclick="currentSurveillancePlanId=${p.id}; loadSurveillanceView();">
+                                <div><div style="font-size:13.5px; font-weight:600;">${escapeHtml(p.current_phase || 'Surveillance Plan')}</div><div style="font-size:12px; color:var(--ink-500);">Next review ${p.next_review_date || '—'}</div></div>
+                                <span class="badge ${p.status === 'ACTIVE' ? 'badge-green' : p.status === 'DRAFT' ? 'badge-amber' : 'badge-blue'}">${escapeHtml(p.status)}</span>
+                            </div>
+                        `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No surveillance plan yet.</p>'}
+                        <button class="btn-outline" style="margin-top:10px;" onclick="showCreateSurveillancePlanForm()">+ New Surveillance Plan</button>
+                    </div>
+                    <div id="surveillance-create-form"></div>
+                `;
+
+                if (!active) { container.innerHTML = worklistCard + recallCard + listSection; return; }
+
+                const detail = await Api.get(`${CCA_API}/surveillance-plans/${active.id}`);
+                const p = detail.surveillance_plan;
+                const timelineData = await Api.get(`${CCA_API}/patients/${currentPatientId}/surveillance-timeline`);
+
+                container.innerHTML = `
+                    ${worklistCard}
+                    ${recallCard}
+                    ${listSection}
+                    <div class="section-card">
+                        <div class="section-head">
+                            <div><div class="section-title">${escapeHtml(p.current_phase || 'Surveillance Plan')}</div><div class="section-sub">${escapeHtml(p.surveillance_intent || '')}</div></div>
+                            <span class="badge ${p.status === 'ACTIVE' ? 'badge-green' : 'badge-amber'}">${escapeHtml(p.status)}</span>
+                        </div>
+                        <div class="grid-3">
+                            <div><div class="onc-col-label">Follow-up Frequency</div><div class="onc-col-value" style="font-size:13px;">${escapeHtml(p.follow_up_frequency || '—')}</div></div>
+                            <div><div class="onc-col-label">Next Review</div><div class="onc-col-value" style="font-size:13px;">${p.next_review_date || '—'}</div></div>
+                            <div><div class="onc-col-label">Responsible Clinician</div><div class="onc-col-value" style="font-size:13px;">${escapeHtml(p.responsible_clinician || '—')}</div></div>
+                        </div>
+                        ${p.status === 'DRAFT' ? `<button class="btn-navy" style="margin-top:12px;" onclick="activateSurveillancePlan(${p.id})">Activate Plan</button>` : ''}
+                    </div>
+
+                    <div class="section-card">
+                        <div class="section-title">Follow-up Visits</div>
+                        ${detail.visits.map(v => `<div class="checklist-row" style="display:block;"><strong>${escapeHtml(v.disease_status || 'Visit')}</strong> — ${escapeHtml(v.status)} ${v.status === 'DRAFT' ? `<button class="btn-outline btn-sm" style="margin-left:8px;" onclick="signSurveillanceVisit(${v.id})">Sign</button>` : ''}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No visits recorded.</p>'}
+                        <div class="form-group" style="margin-top:10px;"><label class="form-label">Interval History</label><textarea id="surv-visit-history" class="form-textarea" rows="2"></textarea></div>
+                        <div class="form-group"><label class="form-label">Disease Status</label><input type="text" id="surv-visit-status" class="form-input" placeholder="No evidence of disease" /></div>
+                        <button class="btn-outline" onclick="submitSurveillanceVisit()">Add Visit</button>
+                    </div>
+
+                    <div class="section-card">
+                        <div class="section-title">Surveillance Investigations</div>
+                        ${detail.investigations.map(i => `<div class="checklist-row" style="display:block;"><strong>${escapeHtml(i.investigation)}</strong> — ${escapeHtml(i.status)} ${i.result_summary ? '· ' + escapeHtml(i.result_summary) : ''}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No investigations planned.</p>'}
+                        <div class="form-grid-2" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Investigation</label><input type="text" id="surv-inv-name" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Frequency</label><input type="text" id="surv-inv-freq" class="form-input" /></div>
+                        </div>
+                        <button class="btn-outline" onclick="submitSurveillanceInvestigation()">Add Investigation</button>
+                    </div>
+
+                    <div class="section-card">
+                        <div class="section-title">Late Effects Register</div>
+                        ${detail.late_effects.map(l => `<div class="checklist-row" style="display:block;"><strong>${escapeHtml(l.late_effect)}</strong> — ${escapeHtml(l.status)}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No late effects recorded.</p>'}
+                        <div class="form-group" style="margin-top:10px;"><label class="form-label">Late Effect</label><input type="text" id="surv-le-name" class="form-input" /></div>
+                        <button class="btn-outline" onclick="submitLateEffect()">Add Late Effect</button>
+                    </div>
+
+                    <div class="section-card">
+                        <div class="section-title">Recurrence Suspicion / Re-entry</div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Trigger</label>
+                                <select id="surv-recur-trigger" class="form-select">
+                                    <option>Symptom</option><option>Imaging Finding</option><option>Biomarker Rise</option><option>Clinical Exam</option><option>Patient-Reported</option><option>Other</option>
+                                </select>
+                            </div>
+                            <div class="form-group"><label class="form-label">Urgency</label>
+                                <select id="surv-recur-urgency" class="form-select"><option>Routine</option><option>Urgent</option><option>Emergency</option></select>
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Detail</label><textarea id="surv-recur-detail" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-danger" onclick="submitRecurrenceSuspicion()">Raise Recurrence Suspicion</button>
+                    </div>
+
+                    <div class="section-card">
+                        <div class="section-title">Timeline</div>
+                        ${(timelineData.timeline || []).slice(0, 15).map(e => `<div class="checklist-row" style="display:block;"><strong>${escapeHtml(e.category)}</strong> — ${escapeHtml(e.event)} ${e.date ? '· ' + escapeHtml(e.date) : ''}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No events yet.</p>'}
+                    </div>
+                `;
+            } catch (err) { container.innerHTML = worklistCard + recallCard + `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        function showCreateSurveillancePlanForm() {
+            document.getElementById('surveillance-create-form').innerHTML = `
+                <div class="section-card">
+                    <div class="section-title">New Surveillance Plan</div>
+                    <div class="form-group"><label class="form-label">Surveillance Intent</label><textarea id="surv-intent" class="form-textarea" rows="2"></textarea></div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Follow-up Frequency</label><input type="text" id="surv-freq" class="form-input" placeholder="Every 3 months" /></div>
+                        <div class="form-group"><label class="form-label">Next Review Date</label><input type="date" id="surv-next-review" class="form-input" /></div>
+                    </div>
+                    <button class="btn-navy" onclick="submitCreateSurveillancePlan()">Create Draft</button>
+                </div>
+            `;
+        }
+
+        async function submitCreateSurveillancePlan() {
+            try {
+                const res = await Api.post(`${CCA_API}/surveillance-plans`, {
+                    patient_id: currentPatientId, surveillance_intent: document.getElementById('surv-intent').value,
+                    follow_up_frequency: document.getElementById('surv-freq').value,
+                    next_review_date: document.getElementById('surv-next-review').value || null,
+                });
+                currentSurveillancePlanId = res.surveillance_plan.id;
+                toast('Surveillance plan drafted', 'success');
+                loadSurveillanceView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function activateSurveillancePlan(id) {
+            try {
+                await Api.post(`${CCA_API}/surveillance-plans/${id}/activate`, {});
+                toast('Plan activated', 'success');
+                loadSurveillanceView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitSurveillanceVisit() {
+            try {
+                await Api.post(`${CCA_API}/surveillance-plans/${currentSurveillancePlanId}/visits`, {
+                    interval_history: document.getElementById('surv-visit-history').value,
+                    disease_status: document.getElementById('surv-visit-status').value,
+                });
+                loadSurveillanceView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function signSurveillanceVisit(visitId) {
+            try {
+                await Api.post(`${CCA_API}/surveillance-visits/${visitId}/sign`, {});
+                loadSurveillanceView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitSurveillanceInvestigation() {
+            try {
+                await Api.post(`${CCA_API}/surveillance-plans/${currentSurveillancePlanId}/investigations`, {
+                    investigation: document.getElementById('surv-inv-name').value,
+                    frequency: document.getElementById('surv-inv-freq').value,
+                });
+                loadSurveillanceView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitLateEffect() {
+            try {
+                await Api.post(`${CCA_API}/surveillance-plans/${currentSurveillancePlanId}/late-effects`, {
+                    late_effect: document.getElementById('surv-le-name').value,
+                });
+                loadSurveillanceView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitRecurrenceSuspicion() {
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/recurrence-suspicion`, {
+                    trigger: document.getElementById('surv-recur-trigger').value,
+                    trigger_detail: document.getElementById('surv-recur-detail').value,
+                    urgency: document.getElementById('surv-recur-urgency').value,
+                });
+                toast('Recurrence suspicion raised', 'success');
+                loadSurveillanceView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function logRecallAttemptPrompt(entryId) {
+            const method = prompt('Contact method (e.g. Phone, SMS, Email):');
+            if (!method) return;
+            const outcome = prompt('Outcome (e.g. No answer, Reached -- rebooked):');
+            if (!outcome) return;
+            try {
+                await Api.post(`${CCA_API}/recall-entries/${entryId}/log-attempt`, { method, outcome });
+                toast('Attempt logged', 'success');
+                loadSurveillanceView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function closeRecallEntry(entryId) {
+            try {
+                await Api.post(`${CCA_API}/recall-entries/${entryId}/close`, {});
+                toast('Recall entry closed', 'success');
+                loadSurveillanceView();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

@@ -6604,6 +6604,34 @@ def activate_surveillance_plan(id: int, db: Session = Depends(get_cca_db), curre
     return {"status": "success", "surveillance_plan": _surveillance_plan_dict(plan)}
 
 
+@router.get("/surveillance-plans/worklist")
+def surveillance_worklist(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """The Surveillance / Survivorship Worklist (reference SCR-SURV-001, worklist/dashboard
+    follow-up round) -- every active plan across the organization, with days-until/overdue
+    against next_review_date shown as plain date arithmetic (never a clinical judgment).
+    Registered before the /{id} route below so "worklist" is never swallowed as an id path
+    parameter."""
+    org_id = _org_id(current_user)
+    today = datetime.utcnow().date()
+    rows = db.query(SurveillancePlan).join(
+        CCAPatient, CCAPatient.id == SurveillancePlan.patient_id
+    ).filter(CCAPatient.organization_id == org_id, SurveillancePlan.status == "ACTIVE").order_by(SurveillancePlan.next_review_date.asc().nullslast()).all()
+
+    results = []
+    for p in rows:
+        patient = db.query(CCAPatient).filter(CCAPatient.id == p.patient_id).first()
+        days_until_due = (p.next_review_date - today).days if p.next_review_date else None
+        late_effect_count = db.query(LateEffectRecord).filter(LateEffectRecord.plan_id == p.id, LateEffectRecord.status.in_(["Active", "Monitoring"])).count()
+        results.append({
+            "plan_id": p.id, "patient_id": p.patient_id, "patient_name": patient.name if patient else None,
+            "mrn": patient.mrn if patient else None, "current_phase": p.current_phase,
+            "next_review_date": p.next_review_date.isoformat() if p.next_review_date else None,
+            "days_until_due": days_until_due, "overdue": bool(days_until_due is not None and days_until_due < 0),
+            "active_late_effects": late_effect_count,
+        })
+    return {"worklist": results, "total": len(results)}
+
+
 @router.get("/surveillance-plans/{id}")
 def get_surveillance_plan(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     plan = db.query(SurveillancePlan).filter(SurveillancePlan.id == id).first()
@@ -6622,7 +6650,8 @@ def get_surveillance_plan(id: int, db: Session = Depends(get_cca_db), current_us
 
 @router.get("/patients/{patient_id}/surveillance-plans")
 def list_surveillance_plans(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
-    """The Surveillance / Survivorship Worklist (SCR-SURV-001), scoped to one patient."""
+    """Every surveillance plan on record for one patient (see the org-wide
+    GET /surveillance-plans/worklist above for the actual SCR-SURV-001 screen)."""
     _get_org_patient(db, patient_id, _org_id(current_user))
     rows = db.query(SurveillancePlan).filter(SurveillancePlan.patient_id == patient_id).order_by(SurveillancePlan.id.desc()).all()
     return {"surveillance_plans": [_surveillance_plan_dict(p) for p in rows]}
@@ -6985,6 +7014,54 @@ async def update_referral_status(
     db.commit()
     db.refresh(row)
     return {"status": "success", "referral": _survivorship_referral_dict(row)}
+
+
+@router.get("/surveillance-recall-queue")
+def surveillance_recall_queue(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Lost-to-Follow-up / Recall Queue (reference SCR-SURV-008, worklist/dashboard
+    follow-up round) -- every open recall entry across the organization, not just one
+    plan's own entries. days_overdue is plain date arithmetic against a clinician-set due
+    date, never a computed clinical risk score."""
+    org_id = _org_id(current_user)
+    today = datetime.utcnow().date()
+    rows = db.query(SurveillanceRecallEntry).join(
+        SurveillancePlan, SurveillancePlan.id == SurveillanceRecallEntry.plan_id
+    ).join(
+        CCAPatient, CCAPatient.id == SurveillanceRecallEntry.patient_id
+    ).filter(CCAPatient.organization_id == org_id, SurveillanceRecallEntry.status == "Open").order_by(SurveillanceRecallEntry.follow_up_due_date.asc().nullslast()).all()
+
+    results = []
+    for r in rows:
+        patient = db.query(CCAPatient).filter(CCAPatient.id == r.patient_id).first()
+        days_overdue = (today - r.follow_up_due_date).days if r.follow_up_due_date else None
+        results.append({
+            **_recall_entry_dict(r),
+            "patient_name": patient.name if patient else None, "mrn": patient.mrn if patient else None,
+            "days_overdue": days_overdue, "attempt_count": len(r.contact_attempts or []),
+        })
+    return {"recall_queue": results, "total": len(results)}
+
+
+@router.get("/patients/{patient_id}/surveillance-timeline")
+def surveillance_timeline(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Surveillance Timeline / Dashboard (reference SCR-SURV-010, worklist/dashboard
+    follow-up round) -- one chronological view assembled from the existing structured
+    records (visits, investigations, late effects, recurrence events, referrals), never a
+    second copy of that data."""
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    events = []
+    for v in db.query(SurveillanceVisit).filter(SurveillanceVisit.patient_id == patient_id).all():
+        events.append({"date": v.signed_at.isoformat() if v.signed_at else None, "event": "Surveillance follow-up visit", "category": "Visit", "disease_status": v.disease_status, "source": f"visit:{v.id}"})
+    for i in db.query(SurveillanceInvestigation).filter(SurveillanceInvestigation.patient_id == patient_id).all():
+        events.append({"date": i.due_date.isoformat() if i.due_date else None, "event": f"{i.investigation} ({i.status})", "category": "Investigation", "disease_status": None, "result_summary": i.result_summary, "source": f"investigation:{i.id}"})
+    for l in db.query(LateEffectRecord).filter(LateEffectRecord.patient_id == patient_id).all():
+        events.append({"date": l.onset_date.isoformat() if l.onset_date else None, "event": f"Late effect: {l.late_effect}", "category": "Late Effect", "disease_status": None, "source": f"late_effect:{l.id}"})
+    for e in db.query(RecurrenceSuspicionEvent).filter(RecurrenceSuspicionEvent.patient_id == patient_id).all():
+        events.append({"date": e.date_identified.isoformat() if e.date_identified else None, "event": f"Recurrence suspicion: {e.trigger}", "category": "Recurrence", "disease_status": e.status, "source": f"recurrence:{e.id}"})
+    for r in db.query(SurvivorshipReferral).filter(SurvivorshipReferral.patient_id == patient_id).all():
+        events.append({"date": r.referral_date.isoformat() if r.referral_date else None, "event": f"Referral: {r.domain} ({r.status})", "category": "Referral", "disease_status": None, "source": f"referral:{r.id}"})
+    events.sort(key=lambda e: e["date"] or "", reverse=True)
+    return {"timeline": events, "total": len(events)}
 
 
 # ---------------------------------------------------------
