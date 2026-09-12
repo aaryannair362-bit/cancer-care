@@ -19,6 +19,11 @@ from .models_cca import (
     TreatmentDayCompletion, BloodProductAdministration, TransfusionFeedback,
     PharmacyVerification, PharmacyPreparation, PharmacyRelease,
     InfusionIndependentVerification,
+    TreatmentCompletion, ModalityCompletionRecord, CumulativeExposureRecord,
+    TreatmentCompletionHandoff, TreatmentSummary, TreatmentSummaryDistribution,
+    SurveillancePlan, SurveillanceVisit, SurveillanceInvestigation, LateEffectRecord,
+    SurvivorshipCarePlanDocument, RecurrenceSuspicionEvent, SurveillanceRecallEntry,
+    SurvivorshipReferral,
 )
 from .models_cca_oncology_ext import (
     TreatmentOrderDrugLine, RadiationPrescription, CCARadiationPhase, RadiationFraction,
@@ -51,6 +56,17 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             ).all()
         ]
         child_models_by_patient = [
+            # Treatment Completion universe (Batch 7) -- children before their
+            # TreatmentCompletion/TreatmentSummary parents, both of which are themselves
+            # deleted here too since they carry their own patient_id.
+            TreatmentSummaryDistribution, TreatmentSummary,
+            ModalityCompletionRecord, CumulativeExposureRecord, TreatmentCompletionHandoff,
+            TreatmentCompletion,
+            # Surveillance / Survivorship universe (Batch 8) -- children before their
+            # SurveillancePlan parent, all with their own patient_id.
+            SurveillanceVisit, SurveillanceInvestigation, LateEffectRecord,
+            SurvivorshipCarePlanDocument, RecurrenceSuspicionEvent, SurveillanceRecallEntry,
+            SurvivorshipReferral, SurveillancePlan,
             # Day Care / Treatment Order / Pharmacy universe (Phases 1-7 and Batches 1-2 of the
             # Product 1 vs Product 2 gap-closing initiative) -- previously entirely missing from
             # this reset, so repeated demo/reset calls accumulated stale TreatmentOrder rows that

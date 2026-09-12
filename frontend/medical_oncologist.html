@@ -271,6 +271,7 @@
             <a class="sidebar-nav-item" id="nav-careplan" onclick="showTab('careplan')"><div class="nav-item-left"><span>📋</span><span>Care Plan</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-treatmentplan" onclick="showTab('treatmentplan')"><div class="nav-item-left"><span>💊</span><span>Treatment Plan</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-procedurenotes" onclick="showTab('procedurenotes')"><div class="nav-item-left"><span>🩻</span><span>Procedures &amp; Notes</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-completion" onclick="showTab('completion')"><div class="nav-item-left"><span>🏁</span><span>Treatment Completion</span></div><span class="nav-chevron">›</span></a>
 
             <div class="sidebar-section-title">CLINICAL INTELLIGENCE / COORDINATION</div>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
@@ -460,6 +461,13 @@
                 <div id="procedurenotes-content"><!-- Populated via JS: loadProcedureNotesView() --></div>
             </div>
 
+            <!-- ===== TREATMENT COMPLETION (Product 1 vs Product 2 gap report, Batch 7) ===== -->
+            <div id="view-completion" class="view-panel">
+                <h1 class="page-title">Treatment Completion</h1>
+                <p class="page-subtitle">End-of-treatment clinical review, modality reconciliation, and the Cancer Treatment Summary — closes out a course of care and hands off to what comes next.</p>
+                <div id="completion-content"><!-- Populated via JS: loadTreatmentCompletionView() --></div>
+            </div>
+
             <!-- ===== NEXUS: real 13(+1)-section clinical brief (renderNexusBrief, cca-summary.js)
                  above a coordination-task board that is still static/mock ===== -->
             <div id="view-nexus" class="view-panel">
@@ -598,6 +606,7 @@
             if (tab === 'careplan') loadCarePlanView();
             if (tab === 'treatmentplan') loadTreatmentPlanView();
             if (tab === 'procedurenotes') loadProcedureNotesView();
+            if (tab === 'completion') loadTreatmentCompletionView();
             if (tab === 'guideline') loadGuidelinePathway();
             if (tab === 'staging') loadStagingWorkspace();
             if (tab === 'mdt') loadMdtWorkspace();
@@ -1754,6 +1763,260 @@
                     </div>
                 `).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No version history.</p>';
             } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        // ---------------------------------------------------------------
+        // Treatment Completion (Product 1 vs Product 2 gap report, Batch 7: C.23)
+        // ---------------------------------------------------------------
+        let currentCompletionId = null;
+        const COMPLETION_STATUS_BADGE = { DRAFT: 'badge-amber', SIGNED: 'badge-green', AMENDED: 'badge-blue' };
+
+        async function loadTreatmentCompletionView() {
+            const container = document.getElementById('completion-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/treatment-completions`);
+                const completions = data.treatment_completions || [];
+                const active = completions.find(c => !currentCompletionId || c.id === currentCompletionId) || completions[0];
+                currentCompletionId = active ? active.id : null;
+
+                const listSection = `
+                    <div class="section-card">
+                        <div class="section-title">Completions On Record</div>
+                        ${completions.length ? completions.map(c => `
+                            <div class="mdt-case-row" style="cursor:pointer;" onclick="currentCompletionId=${c.id}; loadTreatmentCompletionView();">
+                                <div><div style="font-size:13.5px; font-weight:600;">${escapeHtml(c.completion_type || 'Completion')} — ${escapeHtml(c.next_care_phase || '')}</div><div style="font-size:12px; color:var(--ink-500);">${c.treatment_end_date || '—'}</div></div>
+                                <span class="badge ${COMPLETION_STATUS_BADGE[c.status] || 'badge-blue'}">${escapeHtml(c.status)}</span>
+                            </div>
+                        `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No treatment completion review yet.</p>'}
+                        <button class="btn-outline" style="margin-top:10px;" onclick="showCreateCompletionForm()">+ New Completion Review</button>
+                    </div>
+                    <div id="completion-create-form"></div>
+                `;
+
+                if (!active) { container.innerHTML = listSection; return; }
+
+                const detail = await Api.get(`${CCA_API}/treatment-completions/${active.id}`);
+                const c = detail.treatment_completion;
+                const canSign = c.status === 'DRAFT';
+                container.innerHTML = `
+                    ${listSection}
+                    <div class="section-card">
+                        <div class="section-head">
+                            <div><div class="section-title">${escapeHtml(c.completion_type || 'Completion Review')}</div><div class="section-sub">${escapeHtml(c.reason || '')}</div></div>
+                            <span class="badge ${COMPLETION_STATUS_BADGE[c.status] || 'badge-blue'}">${escapeHtml(c.status)}</span>
+                        </div>
+                        <div class="grid-3">
+                            <div><div class="onc-col-label">Disease Status</div><div class="onc-col-value" style="font-size:13px;">${escapeHtml(c.disease_status_at_completion || '—')}</div></div>
+                            <div><div class="onc-col-label">Next Care Phase</div><div class="onc-col-value" style="font-size:13px;">${escapeHtml(c.next_care_phase || '—')}</div></div>
+                            <div><div class="onc-col-label">Signed By</div><div class="onc-col-value" style="font-size:13px;">${escapeHtml(c.signed_by || 'Not yet signed')}</div></div>
+                        </div>
+                        ${canSign ? `<button class="btn-navy" style="margin-top:12px;" onclick="signTreatmentCompletionSubmit()">✍️ Sign Completion Review</button>` : ''}
+                        <div id="completion-action-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                    </div>
+
+                    <div class="section-card">
+                        <div class="section-title">Modality Reconciliation</div>
+                        ${detail.modality_records.map(m => `
+                            <div class="checklist-row" style="display:block;"><strong>${escapeHtml(m.modality)}</strong>: planned ${escapeHtml(m.planned_value || '—')} vs actual ${escapeHtml(m.actual_value || '—')} ${m.completed ? '✅' : ''} ${m.unresolved_discrepancy ? `<div style="color:var(--rose-badge-text);">${escapeHtml(m.unresolved_discrepancy)}</div>` : ''}</div>
+                        `).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No modality records yet.</p>'}
+                        <div class="form-grid-2" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Modality</label><input type="text" id="mr-modality" class="form-input" placeholder="Systemic / Radiation / Surgery / Oral" /></div>
+                            <div class="form-group"><label class="form-label">Completed?</label><select id="mr-completed" class="form-select"><option value="false">No</option><option value="true">Yes</option></select></div>
+                            <div class="form-group"><label class="form-label">Planned</label><input type="text" id="mr-planned" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Actual</label><input type="text" id="mr-actual" class="form-input" /></div>
+                        </div>
+                        <button class="btn-outline" onclick="submitModalityRecord()">Add Modality Record</button>
+                    </div>
+
+                    <div class="section-card">
+                        <div class="section-title">Cumulative Exposure &amp; Late-Effect Baseline</div>
+                        ${detail.exposure_records.map(e => `
+                            <div class="checklist-row" style="display:block;"><strong>${escapeHtml(e.agent_or_modality)}</strong>: ${escapeHtml(e.actual_cumulative_exposure || '—')} ${escapeHtml(e.unit || '')} — ${escapeHtml(e.late_effect_domain || '')}</div>
+                        `).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No exposure records yet.</p>'}
+                        <div class="form-grid-2" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Agent / Modality</label><input type="text" id="er-agent" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Cumulative Exposure</label><input type="text" id="er-exposure" class="form-input" placeholder="e.g. as recorded on the administration record" /></div>
+                            <div class="form-group"><label class="form-label">Unit</label><input type="text" id="er-unit" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Late-Effect Domain</label><input type="text" id="er-domain" class="form-input" /></div>
+                        </div>
+                        <button class="btn-outline" onclick="submitExposureRecord()">Add Exposure Record</button>
+                    </div>
+
+                    <div class="section-card">
+                        <div class="section-title">Completion Handoff</div>
+                        ${detail.handoffs.map(h => `
+                            <div class="checklist-row" style="display:block;">
+                                <strong>${escapeHtml(h.destination)}</strong> — ${escapeHtml(h.owner)} <span class="badge ${h.acceptance_status === 'Accepted' ? 'badge-green' : 'badge-amber'}">${escapeHtml(h.acceptance_status)}</span>
+                                ${h.acceptance_status !== 'Accepted' ? `<button class="btn-outline" style="margin-left:8px;" onclick="acceptHandoffSubmit(${h.id})">Accept</button>` : ''}
+                            </div>
+                        `).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No handoffs yet.</p>'}
+                        <div class="form-grid-2" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Destination</label><input type="text" id="ho-destination" class="form-input" placeholder="Surveillance / Survivorship / Palliative Care / Primary Care" /></div>
+                            <div class="form-group"><label class="form-label">Owner</label><input type="text" id="ho-owner" class="form-input" /></div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Handoff Summary</label><textarea id="ho-summary" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-outline" onclick="submitHandoff()">Create Handoff</button>
+                    </div>
+
+                    ${await renderTreatmentSummaryCard(active.id)}
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        function showCreateCompletionForm() {
+            document.getElementById('completion-create-form').innerHTML = `
+                <div class="section-card">
+                    <div class="section-title">New Treatment Completion Review</div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Completion Type</label>
+                            <select id="tc-type" class="form-select">
+                                <option value="Completed as Planned">Completed as Planned</option>
+                                <option value="Discontinued -- Toxicity">Discontinued — Toxicity</option>
+                                <option value="Discontinued -- Progression">Discontinued — Progression</option>
+                                <option value="Discontinued -- Patient Choice">Discontinued — Patient Choice</option>
+                                <option value="Discontinued -- Other">Discontinued — Other</option>
+                            </select>
+                        </div>
+                        <div class="form-group"><label class="form-label">Next Care Phase</label>
+                            <select id="tc-nextphase" class="form-select">
+                                <option value="Surveillance">Surveillance</option>
+                                <option value="Survivorship">Survivorship</option>
+                                <option value="Palliative">Palliative</option>
+                                <option value="Hospice">Hospice</option>
+                                <option value="Transferred">Transferred</option>
+                            </select>
+                        </div>
+                        <div class="form-group"><label class="form-label">Disease Status at Completion</label><input type="text" id="tc-diseasestatus" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Treatment End Date</label><input type="date" id="tc-enddate" class="form-input" /></div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:14px;"><label class="form-label">Reason (required)</label><textarea id="tc-reason" class="form-textarea" rows="2"></textarea></div>
+                    <button class="btn-navy" onclick="submitCreateCompletion()">Create Draft</button>
+                    <div id="tc-create-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                </div>
+            `;
+        }
+
+        async function submitCreateCompletion() {
+            const reason = document.getElementById('tc-reason').value.trim();
+            if (!reason) { toast('Reason is required', 'error'); return; }
+            try {
+                const res = await Api.post(`${CCA_API}/treatment-completions`, {
+                    patient_id: currentPatientId,
+                    completion_type: document.getElementById('tc-type').value,
+                    next_care_phase: document.getElementById('tc-nextphase').value,
+                    disease_status_at_completion: document.getElementById('tc-diseasestatus').value,
+                    treatment_end_date: document.getElementById('tc-enddate').value || null,
+                    reason,
+                });
+                currentCompletionId = res.treatment_completion.id;
+                toast('Treatment completion review drafted', 'success');
+                loadTreatmentCompletionView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function signTreatmentCompletionSubmit() {
+            try {
+                await Api.post(`${CCA_API}/treatment-completions/${currentCompletionId}/sign`, {});
+                toast('Treatment completion review signed', 'success');
+                loadTreatmentCompletionView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitModalityRecord() {
+            try {
+                await Api.post(`${CCA_API}/treatment-completions/${currentCompletionId}/modality-records`, {
+                    modality: document.getElementById('mr-modality').value,
+                    completed: document.getElementById('mr-completed').value === 'true',
+                    planned_value: document.getElementById('mr-planned').value,
+                    actual_value: document.getElementById('mr-actual').value,
+                });
+                loadTreatmentCompletionView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitExposureRecord() {
+            try {
+                await Api.post(`${CCA_API}/treatment-completions/${currentCompletionId}/exposure-records`, {
+                    agent_or_modality: document.getElementById('er-agent').value,
+                    actual_cumulative_exposure: document.getElementById('er-exposure').value,
+                    unit: document.getElementById('er-unit').value,
+                    late_effect_domain: document.getElementById('er-domain').value,
+                });
+                loadTreatmentCompletionView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitHandoff() {
+            try {
+                await Api.post(`${CCA_API}/treatment-completions/${currentCompletionId}/handoffs`, {
+                    destination: document.getElementById('ho-destination').value,
+                    owner: document.getElementById('ho-owner').value,
+                    handoff_summary: document.getElementById('ho-summary').value,
+                });
+                loadTreatmentCompletionView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function acceptHandoffSubmit(handoffId) {
+            try {
+                await Api.post(`${CCA_API}/treatment-completion-handoffs/${handoffId}/accept`, {});
+                loadTreatmentCompletionView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function renderTreatmentSummaryCard(completionId) {
+            try {
+                let summary = null;
+                try {
+                    // No direct "get summary by completion" endpoint -- upsert doubles as get-or-create.
+                    const res = await Api.post(`${CCA_API}/treatment-completions/${completionId}/summary`, {});
+                    summary = res.treatment_summary;
+                } catch (e) { return ''; }
+                window.currentSummaryId = summary.id;
+                const canEdit = summary.status !== 'FINALIZED';
+                return `
+                    <div class="section-card">
+                        <div class="section-head">
+                            <div class="section-title">Cancer Treatment Summary</div>
+                            <span class="badge ${summary.status === 'FINALIZED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(summary.status)}</span>
+                        </div>
+                        <div class="section-sub" style="margin-bottom:10px;">Diagnosis/staging/treatment/response/toxicity data below is assembled live from the patient's existing record — not re-typed.</div>
+                        <div class="grid-3">
+                            <div><div class="onc-col-label">Primary Site</div><div class="onc-col-value" style="font-size:13px;">${escapeHtml((summary.diagnosis_staging_snapshot || {}).site || '—')}</div></div>
+                            <div><div class="onc-col-label">Stage</div><div class="onc-col-value" style="font-size:13px;">${escapeHtml((summary.diagnosis_staging_snapshot || {}).confirmed_stage || '—')}</div></div>
+                            <div><div class="onc-col-label">Significant Toxicities</div><div class="onc-col-value" style="font-size:13px;">${(summary.significant_toxicities || []).length}</div></div>
+                        </div>
+                        ${canEdit ? `
+                        <div class="form-group" style="margin:12px 0;"><label class="form-label">Clinician Synthesis</label><textarea id="ts-synthesis" class="form-textarea" rows="3">${escapeHtml(summary.clinician_synthesis || '')}</textarea></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Outstanding Issues</label><textarea id="ts-outstanding" class="form-textarea" rows="2">${escapeHtml(summary.outstanding_issues || '')}</textarea></div>
+                        <button class="btn-outline" onclick="submitTreatmentSummaryDraft()">Save Draft</button>
+                        <button class="btn-navy" onclick="finalizeTreatmentSummarySubmit()">Sign / Finalize Summary</button>
+                        ` : `<div style="margin:12px 0; white-space:pre-wrap;">${escapeHtml(summary.clinician_synthesis || '')}</div>`}
+                        <div id="ts-action-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                    </div>
+                `;
+            } catch (err) { return ''; }
+        }
+
+        async function submitTreatmentSummaryDraft() {
+            try {
+                await Api.post(`${CCA_API}/treatment-completions/${currentCompletionId}/summary`, {
+                    clinician_synthesis: document.getElementById('ts-synthesis').value,
+                    outstanding_issues: document.getElementById('ts-outstanding').value,
+                });
+                toast('Treatment summary draft saved', 'success');
+                loadTreatmentCompletionView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function finalizeTreatmentSummarySubmit() {
+            try {
+                await submitTreatmentSummaryDraft();
+                await Api.post(`${CCA_API}/treatment-summaries/${window.currentSummaryId}/finalize`, {});
+                toast('Cancer Treatment Summary finalized', 'success');
+                loadTreatmentCompletionView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
         // ---------------------------------------------------------------

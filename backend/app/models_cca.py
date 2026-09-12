@@ -1328,3 +1328,339 @@ class TransfusionFeedback(Base):
     feedback_notes = Column(Text, nullable=True)
     reported_by = Column(String(200))
     reported_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Treatment Completion (Product 1 vs Product 2 gap report, Batch 7: C.23) -- the
+# end-of-treatment reconciliation the report found "not meaningfully represented" in
+# this codebase. One TreatmentCompletion per completed/discontinued course of care, with
+# the Cancer Treatment Summary's many "read-only/derived" fields computed at read time
+# (see routers/cca.py's _treatment_summary_dict) from the existing diagnosis/staging/
+# treatment/toxicity/response tables rather than duplicated here -- one source of truth,
+# per the gap report's own cross-module "Interoperability" requirement. Nothing here
+# computes a dose, threshold, or clinical judgment.
+# ---------------------------------------------------------------------------
+
+class TreatmentCompletion(Base):
+    """The End-of-Treatment Clinical Review (SCR-CMP-002) -- the clinician's own record
+    that a course of cancer treatment has ended, why, and what comes next.
+    cancer_episode_ref is a free-text/label reference: this codebase has no formal Cancer
+    Episode entity yet (gap report item 5, out of scope for this batch), so there is
+    nothing to foreign-key to."""
+    __tablename__ = "cca_treatment_completions"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    cancer_episode_ref = Column(String(200), nullable=True)
+    treatment_plan_id = Column(Integer, ForeignKey("cca_treatment_plans.id"), nullable=True)
+    treatment_intent = Column(String(50), nullable=True)
+    treatment_start_date = Column(Date, nullable=True)
+    treatment_end_date = Column(Date, nullable=True)
+    # Completed as Planned, Discontinued -- Toxicity, Discontinued -- Progression,
+    # Discontinued -- Patient Choice, Discontinued -- Other
+    completion_type = Column(String(50), nullable=True)
+    reason = Column(Text, nullable=False)
+    disease_status_at_completion = Column(String(100), nullable=True)
+    residual_toxicities = Column(Text, nullable=True)
+    ongoing_supportive_needs = Column(Text, nullable=True)
+    next_care_phase = Column(String(50), nullable=True)  # Surveillance, Survivorship, Palliative, Hospice, Transferred
+    next_review_date = Column(Date, nullable=True)
+    status = Column(String(30), default="DRAFT")  # DRAFT, SIGNED, AMENDED
+    signed_by = Column(String(200), nullable=True)
+    signed_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ModalityCompletionRecord(Base):
+    """One row per treatment modality being reconciled at completion (SCR-CMP-004) --
+    planned vs actually-delivered course for systemic/radiation/surgery/oral therapy.
+    planned_value/actual_value are clinician-typed summaries (e.g. "6 cycles" / "5 cycles,
+    cycle 6 omitted"), never computed off the underlying order/fraction tables."""
+    __tablename__ = "cca_modality_completion_records"
+    id = Column(Integer, primary_key=True)
+    completion_id = Column(Integer, ForeignKey("cca_treatment_completions.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    modality = Column(String(50), nullable=False)  # Systemic, Radiation, Surgery, Oral/Continuous
+    planned_value = Column(String(200), nullable=True)
+    actual_value = Column(String(200), nullable=True)
+    start_date = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)
+    completed = Column(Boolean, default=False)
+    variance = Column(Text, nullable=True)
+    authorized_modification_source = Column(String(200), nullable=True)
+    unresolved_discrepancy = Column(Text, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CumulativeExposureRecord(Base):
+    """Cumulative Exposure & Late-Effect Baseline (SCR-CMP-005). actual_cumulative_exposure
+    is always a clinician/pharmacy-sourced value typed in here (e.g. read off the existing
+    administration/fraction records), never computed by this table (standing repo rule)."""
+    __tablename__ = "cca_cumulative_exposure_records"
+    id = Column(Integer, primary_key=True)
+    completion_id = Column(Integer, ForeignKey("cca_treatment_completions.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    agent_or_modality = Column(String(200), nullable=False)
+    exposure_metric = Column(String(100), nullable=True)
+    actual_cumulative_exposure = Column(String(100), nullable=True)
+    unit = Column(String(50), nullable=True)
+    source_reference = Column(String(255), nullable=True)
+    late_effect_domain = Column(String(100), nullable=True)
+    monitoring_plan = Column(Text, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TreatmentCompletionHandoff(Base):
+    """Treatment Completion Handoff (SCR-CMP-006) -- to Surveillance, Survivorship,
+    Palliative Care, primary care, or another service."""
+    __tablename__ = "cca_treatment_completion_handoffs"
+    id = Column(Integer, primary_key=True)
+    completion_id = Column(Integer, ForeignKey("cca_treatment_completions.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    destination = Column(String(100), nullable=False)
+    handoff_summary = Column(Text, nullable=False)
+    outstanding_investigations = Column(Text, nullable=True)
+    owner = Column(String(200), nullable=False)
+    due_date = Column(Date, nullable=True)
+    receiving_clinician = Column(String(200), nullable=True)
+    acceptance_status = Column(String(30), default="Pending")  # Pending, Accepted
+    accepted_by = Column(String(200), nullable=True)
+    accepted_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TreatmentSummary(Base):
+    """The Cancer Treatment Summary document (SCR-CMP-003) -- the clinician's synthesis
+    narrative plus a status. Every "read-only/derived" field the reference spec lists
+    (diagnosis/staging snapshot, systemic therapy planned-vs-actual, RT prescribed-vs-
+    delivered, surgery planned-vs-actual, final pathology, response history, toxicities,
+    cumulative exposure, ongoing medications, follow-up plan, care-team contacts) is
+    computed at read time by routers/cca.py's _treatment_summary_dict from the existing
+    diagnosis/staging/treatment/toxicity/response tables -- never duplicated here, so
+    there is exactly one place any of that underlying data can ever be edited."""
+    __tablename__ = "cca_treatment_summaries"
+    id = Column(Integer, primary_key=True)
+    completion_id = Column(Integer, ForeignKey("cca_treatment_completions.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    clinician_synthesis = Column(Text, nullable=True)
+    outstanding_issues = Column(Text, nullable=True)
+    status = Column(String(30), default="DRAFT")  # DRAFT, FINALIZED
+    signed_by = Column(String(200), nullable=True)
+    signed_at = Column(DateTime, nullable=True)
+    issued_to_patient_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TreatmentSummaryDistribution(Base):
+    """Treatment Summary Distribution & Acknowledgement (SCR-CMP-007) -- who the
+    finalized summary was sent to and whether they acknowledged it."""
+    __tablename__ = "cca_treatment_summary_distributions"
+    id = Column(Integer, primary_key=True)
+    summary_id = Column(Integer, ForeignKey("cca_treatment_summaries.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    recipient = Column(String(200), nullable=False)
+    recipient_role = Column(String(100), nullable=True)
+    document_version = Column(Integer, default=1)
+    method = Column(String(50), nullable=True)  # Printed, Portal, Email, Referral Letter
+    sent_at = Column(DateTime, default=datetime.utcnow)
+    acknowledgement_required = Column(Boolean, default=False)
+    acknowledged_at = Column(DateTime, nullable=True)
+    status = Column(String(30), default="Sent")  # Sent, Acknowledged, Reissued
+    reissue_reason = Column(Text, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Surveillance / Survivorship (Product 1 vs Product 2 gap report, Batch 8: C.24) --
+# completely missing before this batch. One SurveillancePlan per patient's follow-up
+# programme after active treatment, with visits/investigations/late-effects/referrals
+# hanging off it. Like TreatmentSummary above, the patient-facing
+# SurvivorshipCarePlanDocument's "derived" fields are computed at read time (see
+# routers/cca.py's _survivorship_derived) rather than duplicated. Nothing here computes a
+# dose, threshold, or clinical judgment -- every status/grade/priority is a clinician's own
+# typed choice.
+# ---------------------------------------------------------------------------
+
+class SurveillancePlan(Base):
+    """Surveillance / Survivorship Care Plan (SCR-SURV-003) -- the governing record for a
+    patient's post-treatment follow-up programme. cancer_episode_ref mirrors
+    TreatmentCompletion's own free-text reference (no formal Cancer Episode entity yet,
+    gap report item 5, out of scope for this batch)."""
+    __tablename__ = "cca_surveillance_plans"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    cancer_episode_ref = Column(String(200), nullable=True)
+    completion_id = Column(Integer, ForeignKey("cca_treatment_completions.id"), nullable=True)
+    surveillance_intent = Column(Text, nullable=True)
+    follow_up_frequency = Column(String(100), nullable=True)
+    duration_of_surveillance = Column(String(100), nullable=True)
+    late_effect_monitoring_plan = Column(Text, nullable=True)
+    recurrence_red_flags = Column(Text, nullable=True)
+    responsible_clinician = Column(String(200), nullable=True)
+    primary_care_handoff_required = Column(Boolean, nullable=True)
+    current_phase = Column(String(100), nullable=True)  # e.g. "Year 1", "Year 2-5", "Long-term"
+    next_review_date = Column(Date, nullable=True)
+    status = Column(String(30), default="DRAFT")  # DRAFT, ACTIVE, SUPERSEDED
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SurveillanceVisit(Base):
+    """Surveillance Follow-up Visit (SCR-SURV-002) -- one clinical encounter within a
+    SurveillancePlan."""
+    __tablename__ = "cca_surveillance_visits"
+    id = Column(Integer, primary_key=True)
+    plan_id = Column(Integer, ForeignKey("cca_surveillance_plans.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    interval_history = Column(Text, nullable=True)
+    red_flag_symptoms = Column(JSON, nullable=True)
+    examination = Column(Text, nullable=True)
+    late_effects_reviewed = Column(Text, nullable=True)
+    results_reviewed = Column(Text, nullable=True)
+    disease_status = Column(String(100), nullable=True)
+    health_maintenance = Column(Text, nullable=True)
+    next_review_interval = Column(String(100), nullable=True)
+    status = Column(String(30), default="DRAFT")  # DRAFT, SIGNED
+    signed_by = Column(String(200), nullable=True)
+    signed_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SurveillanceInvestigation(Base):
+    """Surveillance Investigation Planner row (SCR-SURV-004). Links to the existing unified
+    CCAOrder/CCAResult tables when an investigation is actually raised/resulted, rather than
+    duplicating that lifecycle here -- this table is only the surveillance-specific plan
+    (what's due, when, why)."""
+    __tablename__ = "cca_surveillance_investigations"
+    id = Column(Integer, primary_key=True)
+    plan_id = Column(Integer, ForeignKey("cca_surveillance_plans.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    investigation = Column(String(200), nullable=False)
+    rationale = Column(Text, nullable=True)
+    frequency = Column(String(100), nullable=True)
+    due_date = Column(Date, nullable=True)
+    status = Column(String(30), default="Due")  # Due, Ordered, Resulted, Overdue, Cancelled
+    linked_order_id = Column(Integer, ForeignKey("cca_orders.id"), nullable=True)
+    linked_result_id = Column(Integer, ForeignKey("cca_results.id"), nullable=True)
+    result_summary = Column(Text, nullable=True)
+    next_due = Column(Date, nullable=True)
+    owner = Column(String(200), nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class LateEffectRecord(Base):
+    """Late Effects Register (SCR-SURV-005) -- longitudinal tracking of a late/chronic
+    treatment effect, independent of any single visit. plan_id is nullable: a late effect
+    can be logged before a formal SurveillancePlan exists yet."""
+    __tablename__ = "cca_late_effect_records"
+    id = Column(Integer, primary_key=True)
+    plan_id = Column(Integer, ForeignKey("cca_surveillance_plans.id"), nullable=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    late_effect = Column(String(200), nullable=False)
+    onset_date = Column(Date, nullable=True)
+    severity_grade = Column(String(50), nullable=True)
+    attribution = Column(String(100), nullable=True)
+    status = Column(String(30), default="Active")  # Active, Resolved, Monitoring
+    intervention = Column(Text, nullable=True)
+    owner = Column(String(200), nullable=True)
+    last_reviewed = Column(Date, nullable=True)
+    next_review = Column(Date, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SurvivorshipCarePlanDocument(Base):
+    """Patient Survivorship Care Plan (SCR-SURV-006) -- the patient-facing document. Its
+    "derived" fields (diagnosis/treatment summary, care-team contacts, treatments received,
+    ongoing medications, late effects to watch, follow-up schedule, planned tests, red-flag
+    symptoms, next appointments) are computed at read time by routers/cca.py's
+    _survivorship_derived, reusing the same underlying data as TreatmentSummary rather than
+    re-entering it -- gap report's own "Interoperability" cross-module requirement."""
+    __tablename__ = "cca_survivorship_care_plan_documents"
+    id = Column(Integer, primary_key=True)
+    plan_id = Column(Integer, ForeignKey("cca_surveillance_plans.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    language = Column(String(50), nullable=True)
+    template_version = Column(String(30), nullable=True)
+    interpreter_governance_note = Column(Text, nullable=True)
+    education_delivered = Column(String(50), nullable=True)  # Full, Partial, Not Yet
+    comprehension_teach_back = Column(String(50), nullable=True)  # Confirmed, Partial, Not Confirmed
+    date_issued = Column(Date, nullable=True)
+    reissue_reason = Column(Text, nullable=True)
+    status = Column(String(30), default="DRAFT")  # DRAFT, ISSUED
+    issued_by = Column(String(200), nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RecurrenceSuspicionEvent(Base):
+    """Recurrence Suspicion / Re-entry (SCR-SURV-007) -- the trigger for the gap report's
+    "re-entry into active oncology" requirement. Actioning this (see
+    routers/cca.py's action_recurrence_suspicion) sets CCAPatient.journey_state back to an
+    active-treatment label, the same lightweight display-label mechanism the demo clock
+    endpoints already use (journey_state has never been a strict enum in this codebase --
+    see routers/cca.py's existing demo_advance_clock)."""
+    __tablename__ = "cca_recurrence_suspicion_events"
+    id = Column(Integer, primary_key=True)
+    plan_id = Column(Integer, ForeignKey("cca_surveillance_plans.id"), nullable=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    trigger = Column(String(100), nullable=False)  # Symptom, Imaging Finding, Biomarker Rise, Clinical Exam, Patient-Reported, Other
+    trigger_detail = Column(Text, nullable=False)
+    date_identified = Column(Date, nullable=True)
+    urgency = Column(String(30), nullable=True)  # Routine, Urgent, Emergency
+    immediate_actions = Column(Text, nullable=True)
+    re_entry_destination = Column(String(100), nullable=True)  # Medical Oncology, Surgical Oncology, Radiation Oncology, MDT
+    same_episode_or_new_primary = Column(String(30), nullable=True)  # Same Episode, Possible New Primary, Undetermined
+    status = Column(String(30), default="OPEN")  # OPEN, ACTIONED
+    actioned_by = Column(String(200), nullable=True)
+    actioned_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SurveillanceRecallEntry(Base):
+    """Lost-to-Follow-up / Recall Queue (SCR-SURV-008) -- structurally mirrors
+    CCACoordinationCase's contact/communication_status shape (Nurse Navigation) rather than
+    inventing a parallel convention, since both are "we need to reach this patient" workflows."""
+    __tablename__ = "cca_surveillance_recall_entries"
+    id = Column(Integer, primary_key=True)
+    plan_id = Column(Integer, ForeignKey("cca_surveillance_plans.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    follow_up_due_date = Column(Date, nullable=True)
+    risk_priority = Column(String(30), nullable=True)  # Low, Medium, High
+    preferred_contact = Column(String(100), nullable=True)
+    contact_attempts = Column(JSON, nullable=True)  # [{date, method, outcome}, ...]
+    barrier = Column(Text, nullable=True)
+    next_attempt_date = Column(Date, nullable=True)
+    escalation_level = Column(String(30), nullable=True)
+    outcome = Column(String(100), nullable=True)
+    status = Column(String(30), default="Open")  # Open, Closed
+    owner = Column(String(200), nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SurvivorshipReferral(Base):
+    """Survivorship Referrals & Support (SCR-SURV-009)."""
+    __tablename__ = "cca_survivorship_referrals"
+    id = Column(Integer, primary_key=True)
+    plan_id = Column(Integer, ForeignKey("cca_surveillance_plans.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    domain = Column(String(100), nullable=False)  # Psychosocial, Nutrition, Rehabilitation, Fertility, Financial, Other
+    need_reason = Column(Text, nullable=True)
+    service_provider = Column(String(200), nullable=True)
+    priority = Column(String(30), nullable=True)
+    referral_date = Column(Date, nullable=True)
+    appointment_date = Column(Date, nullable=True)
+    status = Column(String(30), default="Referred")  # Referred, Scheduled, Attended, Declined, Cancelled
+    outcome = Column(Text, nullable=True)
+    follow_up_owner = Column(String(200), nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)

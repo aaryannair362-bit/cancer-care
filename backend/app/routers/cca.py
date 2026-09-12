@@ -30,7 +30,7 @@ from .. import drug_matcher
 from ..document_pages import process_document_pages
 from ..models_cca_oncology_ext import (
     CCARadiationPhase, RadiationFraction, RadiationPrescription,
-    Regimen, RegimenDrugLine, TreatmentOrderDrugLine,
+    Regimen, RegimenDrugLine, TreatmentOrderDrugLine, SurgicalPlan,
 )
 from ..models_cca import (
     CCAPatient, CCAConsent, CCAQueueEvent, CCAEncounter, CCAIntakeAssessment,
@@ -46,6 +46,11 @@ from ..models_cca import (
     TreatmentHoldEvent, InfusionReactionEvent, ExtravasationEvent, TreatmentDayCompletion,
     BloodProductAdministration, TransfusionFeedback,
     PharmacyVerification, PharmacyPreparation, PharmacyRelease, InfusionIndependentVerification,
+    TreatmentCompletion, ModalityCompletionRecord, CumulativeExposureRecord,
+    TreatmentCompletionHandoff, TreatmentSummary, TreatmentSummaryDistribution,
+    SurveillancePlan, SurveillanceVisit, SurveillanceInvestigation, LateEffectRecord,
+    SurvivorshipCarePlanDocument, RecurrenceSuspicionEvent, SurveillanceRecallEntry,
+    SurvivorshipReferral,
 )
 from ..cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
@@ -5722,6 +5727,982 @@ def search_patient_records_and_knowledge(
         "citations": citations,
         "disclaimer": "AI Search results synthesize verified patient facts and guidelines. Any action proposal requires explicit clinician acceptance."
     }
+
+
+# ---------------------------------------------------------
+# Treatment Completion (Product 1 vs Product 2 gap report, Batch 7: C.23) --
+# end-of-treatment clinical review, modality reconciliation, cumulative exposure,
+# handoff, and the Cancer Treatment Summary document. See TreatmentCompletion's
+# docstring in models_cca.py for why the summary's "derived" fields are computed here
+# at read time rather than stored a second time.
+# ---------------------------------------------------------
+
+def _treatment_completion_dict(c: TreatmentCompletion) -> dict:
+    return {
+        "id": c.id, "patient_id": c.patient_id, "cancer_episode_ref": c.cancer_episode_ref,
+        "treatment_plan_id": c.treatment_plan_id, "treatment_intent": c.treatment_intent,
+        "treatment_start_date": c.treatment_start_date.isoformat() if c.treatment_start_date else None,
+        "treatment_end_date": c.treatment_end_date.isoformat() if c.treatment_end_date else None,
+        "completion_type": c.completion_type, "reason": c.reason,
+        "disease_status_at_completion": c.disease_status_at_completion,
+        "residual_toxicities": c.residual_toxicities, "ongoing_supportive_needs": c.ongoing_supportive_needs,
+        "next_care_phase": c.next_care_phase,
+        "next_review_date": c.next_review_date.isoformat() if c.next_review_date else None,
+        "status": c.status, "signed_by": c.signed_by,
+        "signed_at": c.signed_at.isoformat() if c.signed_at else None,
+        "created_by": c.created_by, "created_at": c.created_at.isoformat() if c.created_at else None,
+    }
+
+
+def _modality_record_dict(m: ModalityCompletionRecord) -> dict:
+    return {
+        "id": m.id, "completion_id": m.completion_id, "modality": m.modality,
+        "planned_value": m.planned_value, "actual_value": m.actual_value,
+        "start_date": m.start_date.isoformat() if m.start_date else None,
+        "end_date": m.end_date.isoformat() if m.end_date else None,
+        "completed": bool(m.completed), "variance": m.variance,
+        "authorized_modification_source": m.authorized_modification_source,
+        "unresolved_discrepancy": m.unresolved_discrepancy,
+    }
+
+
+def _exposure_record_dict(e: CumulativeExposureRecord) -> dict:
+    return {
+        "id": e.id, "completion_id": e.completion_id, "agent_or_modality": e.agent_or_modality,
+        "exposure_metric": e.exposure_metric, "actual_cumulative_exposure": e.actual_cumulative_exposure,
+        "unit": e.unit, "source_reference": e.source_reference,
+        "late_effect_domain": e.late_effect_domain, "monitoring_plan": e.monitoring_plan,
+    }
+
+
+def _completion_handoff_dict(h: TreatmentCompletionHandoff) -> dict:
+    return {
+        "id": h.id, "completion_id": h.completion_id, "destination": h.destination,
+        "handoff_summary": h.handoff_summary, "outstanding_investigations": h.outstanding_investigations,
+        "owner": h.owner, "due_date": h.due_date.isoformat() if h.due_date else None,
+        "receiving_clinician": h.receiving_clinician, "acceptance_status": h.acceptance_status,
+        "accepted_by": h.accepted_by, "accepted_at": h.accepted_at.isoformat() if h.accepted_at else None,
+    }
+
+
+def _treatment_summary_derived(db: Session, patient_id: int) -> dict:
+    """The Cancer Treatment Summary's "read-only/derived" section (SCR-CMP-003) --
+    a read-time aggregation over existing tables, never a second copy of this data.
+    Every value here is exactly what's already on record elsewhere; this function only
+    picks the most recent/relevant rows for display."""
+    # Reuses the same verified-ClinicalFact-derived context the Staging workspace and
+    # Treatment Plan view already show -- CCACancerDiagnosis itself is demo-seed-only and
+    # never populated by real clinical workflow (see _get_cancer_context's own docstring),
+    # so it is not a reliable source for this summary either.
+    cancer_context = _get_cancer_context(db, patient_id)
+    treatment_plans = db.query(TreatmentPlan).filter(TreatmentPlan.patient_id == patient_id).all()
+    treatment_orders = db.query(TreatmentOrder).filter(TreatmentOrder.patient_id == patient_id).all()
+    radiation = db.query(RadiationPrescription).filter(RadiationPrescription.patient_id == patient_id).all()
+    surgeries = db.query(SurgicalPlan).filter(SurgicalPlan.patient_id == patient_id).all()
+    final_pathology = db.query(CCAResult).filter(
+        CCAResult.patient_id == patient_id, CCAResult.result_type == "PATHOLOGY",
+        CCAResult.report_status == "Finalized",
+    ).order_by(CCAResult.id.desc()).first()
+    toxicities = db.query(ToxicityEvent).filter(ToxicityEvent.patient_id == patient_id).order_by(ToxicityEvent.id.desc()).all()
+    responses = db.query(ResponseAssessment).filter(ResponseAssessment.patient_id == patient_id).order_by(ResponseAssessment.id.desc()).all()
+
+    return {
+        "diagnosis_staging_snapshot": cancer_context,
+        "treatment_intent_and_plan_history": [
+            {"id": p.id, "modality": p.modality, "protocol_name": p.protocol_name, "status": p.status, "version_no": p.version_no}
+            for p in treatment_plans
+        ],
+        "systemic_therapy": [
+            {"id": o.id, "status": o.status, "version_no": o.version_no, "signed_at": o.signed_at.isoformat() if o.signed_at else None}
+            for o in treatment_orders
+        ],
+        "radiotherapy": [
+            {"id": r.id, "diagnosis": r.diagnosis, "intent": r.intent, "modality": r.modality, "signed_at": r.signed_at.isoformat() if r.signed_at else None}
+            for r in radiation
+        ],
+        "surgery": [
+            {"id": s.id, "procedure": s.procedure, "performed_procedure": s.performed_procedure, "status": s.status, "performed_date": s.performed_date.isoformat() if s.performed_date else None}
+            for s in surgeries
+        ],
+        "final_pathology": {
+            "id": final_pathology.id, "impression": final_pathology.impression,
+            "structured_report": final_pathology.structured_report,
+        } if final_pathology else None,
+        "response_history": [
+            {"id": r.id, "framework": r.framework, "response_category": r.response_category, "recorded_at": r.recorded_at.isoformat() if r.recorded_at else None}
+            for r in responses
+        ],
+        "significant_toxicities": [
+            {"id": t.id, "term": t.term, "grade": t.grade, "ongoing": bool(t.ongoing)}
+            for t in toxicities if t.grade and t.grade >= 3
+        ],
+    }
+
+
+def _treatment_summary_dict(db: Session, s: TreatmentSummary) -> dict:
+    out = {
+        "id": s.id, "completion_id": s.completion_id, "patient_id": s.patient_id,
+        "clinician_synthesis": s.clinician_synthesis, "outstanding_issues": s.outstanding_issues,
+        "status": s.status, "signed_by": s.signed_by,
+        "signed_at": s.signed_at.isoformat() if s.signed_at else None,
+        "issued_to_patient_at": s.issued_to_patient_at.isoformat() if s.issued_to_patient_at else None,
+    }
+    out.update(_treatment_summary_derived(db, s.patient_id))
+    return out
+
+
+@router.post("/treatment-completions")
+async def create_treatment_completion(
+    request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    """Drafts an End-of-Treatment Clinical Review (SCR-CMP-002). Starts DRAFT; only
+    /sign moves it to SIGNED, matching TreatmentPlan/TreatmentOrder's own draft->signed
+    convention in this router."""
+    org_id = _org_id(current_user)
+    body = await request.json()
+    patient_id = _require_patient_id(body)
+    _get_org_patient(db, patient_id, org_id)
+    _require_clinician(current_user)
+    reason = (body.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(422, "reason is required")
+    actor = _actor(current_user)
+
+    def _parse_date(key):
+        value = body.get(key)
+        return datetime.fromisoformat(value).date() if value else None
+
+    completion = TreatmentCompletion(
+        patient_id=patient_id, cancer_episode_ref=body.get("cancer_episode_ref"),
+        treatment_plan_id=body.get("treatment_plan_id"), treatment_intent=body.get("treatment_intent"),
+        treatment_start_date=_parse_date("treatment_start_date"), treatment_end_date=_parse_date("treatment_end_date"),
+        completion_type=body.get("completion_type"), reason=reason,
+        disease_status_at_completion=body.get("disease_status_at_completion"),
+        residual_toxicities=body.get("residual_toxicities"), ongoing_supportive_needs=body.get("ongoing_supportive_needs"),
+        next_care_phase=body.get("next_care_phase"), next_review_date=_parse_date("next_review_date"),
+        created_by=actor,
+    )
+    db.add(completion)
+    db.commit()
+    db.refresh(completion)
+    publish(
+        db, "TREATMENT_COMPLETION_DRAFTED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title="Treatment Completion review drafted", category="TREATMENT_COMPLETION",
+        description=f"{actor} drafted an end-of-treatment clinical review.",
+    )
+    db.commit()
+    return {"status": "success", "treatment_completion": _treatment_completion_dict(completion)}
+
+
+@router.get("/treatment-completions/{id}")
+def get_treatment_completion(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    completion = db.query(TreatmentCompletion).filter(TreatmentCompletion.id == id).first()
+    if not completion:
+        raise HTTPException(404, "Treatment completion not found")
+    _check_patient_in_org(db, completion.patient_id, _org_id(current_user))
+    return {
+        "treatment_completion": _treatment_completion_dict(completion),
+        "modality_records": [_modality_record_dict(m) for m in db.query(ModalityCompletionRecord).filter(ModalityCompletionRecord.completion_id == id).all()],
+        "exposure_records": [_exposure_record_dict(e) for e in db.query(CumulativeExposureRecord).filter(CumulativeExposureRecord.completion_id == id).all()],
+        "handoffs": [_completion_handoff_dict(h) for h in db.query(TreatmentCompletionHandoff).filter(TreatmentCompletionHandoff.completion_id == id).all()],
+    }
+
+
+@router.get("/patients/{patient_id}/treatment-completions")
+def list_treatment_completions(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """The Treatment Completion Worklist (SCR-CMP-001), scoped to one patient."""
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(TreatmentCompletion).filter(TreatmentCompletion.patient_id == patient_id).order_by(TreatmentCompletion.id.desc()).all()
+    return {"treatment_completions": [_treatment_completion_dict(c) for c in rows]}
+
+
+@router.post("/treatment-completions/{id}/modality-records")
+async def add_modality_completion_record(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    """Adds one row to Modality Completion Reconciliation (SCR-CMP-004)."""
+    completion = db.query(TreatmentCompletion).filter(TreatmentCompletion.id == id).first()
+    if not completion:
+        raise HTTPException(404, "Treatment completion not found")
+    _check_patient_in_org(db, completion.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    modality = (body.get("modality") or "").strip()
+    if not modality:
+        raise HTTPException(422, "modality is required")
+
+    def _parse_date(key):
+        value = body.get(key)
+        return datetime.fromisoformat(value).date() if value else None
+
+    record = ModalityCompletionRecord(
+        completion_id=id, patient_id=completion.patient_id, modality=modality,
+        planned_value=body.get("planned_value"), actual_value=body.get("actual_value"),
+        start_date=_parse_date("start_date"), end_date=_parse_date("end_date"),
+        completed=bool(body.get("completed", False)), variance=body.get("variance"),
+        authorized_modification_source=body.get("authorized_modification_source"),
+        unresolved_discrepancy=body.get("unresolved_discrepancy"), created_by=_actor(current_user),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "modality_record": _modality_record_dict(record)}
+
+
+@router.post("/treatment-completions/{id}/exposure-records")
+async def add_cumulative_exposure_record(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    """Adds one row to Cumulative Exposure & Late-Effect Baseline (SCR-CMP-005)."""
+    completion = db.query(TreatmentCompletion).filter(TreatmentCompletion.id == id).first()
+    if not completion:
+        raise HTTPException(404, "Treatment completion not found")
+    _check_patient_in_org(db, completion.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    agent = (body.get("agent_or_modality") or "").strip()
+    if not agent:
+        raise HTTPException(422, "agent_or_modality is required")
+    record = CumulativeExposureRecord(
+        completion_id=id, patient_id=completion.patient_id, agent_or_modality=agent,
+        exposure_metric=body.get("exposure_metric"), actual_cumulative_exposure=body.get("actual_cumulative_exposure"),
+        unit=body.get("unit"), source_reference=body.get("source_reference"),
+        late_effect_domain=body.get("late_effect_domain"), monitoring_plan=body.get("monitoring_plan"),
+        created_by=_actor(current_user),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "exposure_record": _exposure_record_dict(record)}
+
+
+@router.post("/treatment-completions/{id}/sign")
+def sign_treatment_completion(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    completion = db.query(TreatmentCompletion).filter(TreatmentCompletion.id == id).first()
+    if not completion:
+        raise HTTPException(404, "Treatment completion not found")
+    _check_patient_in_org(db, completion.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    if completion.status == "SIGNED":
+        raise HTTPException(409, "This treatment completion review is already signed")
+    actor = _actor(current_user)
+    completion.status = "SIGNED"
+    completion.signed_by = actor
+    completion.signed_at = datetime.utcnow()
+    publish(
+        db, "TREATMENT_COMPLETION_SIGNED", patient_id=completion.patient_id, actor=actor, role=current_user.get("role"),
+        title="Treatment Completion review signed", category="TREATMENT_COMPLETION",
+        description=f"{actor} signed the end-of-treatment clinical review.",
+    )
+    db.commit()
+    db.refresh(completion)
+    return {"status": "success", "treatment_completion": _treatment_completion_dict(completion)}
+
+
+@router.post("/treatment-completions/{id}/handoffs")
+async def create_completion_handoff(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    """Treatment Completion Handoff (SCR-CMP-006) -- to Surveillance, Survivorship,
+    Palliative Care, primary care, or another service."""
+    completion = db.query(TreatmentCompletion).filter(TreatmentCompletion.id == id).first()
+    if not completion:
+        raise HTTPException(404, "Treatment completion not found")
+    _check_patient_in_org(db, completion.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    destination = (body.get("destination") or "").strip()
+    handoff_summary = (body.get("handoff_summary") or "").strip()
+    owner = (body.get("owner") or "").strip()
+    if not (destination and handoff_summary and owner):
+        raise HTTPException(422, "destination, handoff_summary and owner are required")
+
+    def _parse_date(key):
+        value = body.get(key)
+        return datetime.fromisoformat(value).date() if value else None
+
+    handoff = TreatmentCompletionHandoff(
+        completion_id=id, patient_id=completion.patient_id, destination=destination,
+        handoff_summary=handoff_summary, outstanding_investigations=body.get("outstanding_investigations"),
+        owner=owner, due_date=_parse_date("due_date"), receiving_clinician=body.get("receiving_clinician"),
+        created_by=_actor(current_user),
+    )
+    db.add(handoff)
+    db.commit()
+    db.refresh(handoff)
+    return {"status": "success", "handoff": _completion_handoff_dict(handoff)}
+
+
+@router.post("/treatment-completion-handoffs/{id}/accept")
+def accept_completion_handoff(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    handoff = db.query(TreatmentCompletionHandoff).filter(TreatmentCompletionHandoff.id == id).first()
+    if not handoff:
+        raise HTTPException(404, "Handoff not found")
+    _check_patient_in_org(db, handoff.patient_id, _org_id(current_user))
+    if handoff.acceptance_status == "Accepted":
+        raise HTTPException(409, "This handoff is already accepted")
+    handoff.acceptance_status = "Accepted"
+    handoff.accepted_by = _actor(current_user)
+    handoff.accepted_at = datetime.utcnow()
+    db.commit()
+    db.refresh(handoff)
+    return {"status": "success", "handoff": _completion_handoff_dict(handoff)}
+
+
+@router.post("/treatment-completions/{id}/summary")
+async def upsert_treatment_summary(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    """Drafts or updates the Cancer Treatment Summary (SCR-CMP-003) for a Treatment
+    Completion. One summary per completion -- repeated calls update the same DRAFT row
+    until it's finalized (a finalized summary can only be superseded by drafting a new
+    TreatmentCompletion + summary, matching how TreatmentSummary has no in-place edit
+    after FINALIZED)."""
+    completion = db.query(TreatmentCompletion).filter(TreatmentCompletion.id == id).first()
+    if not completion:
+        raise HTTPException(404, "Treatment completion not found")
+    _check_patient_in_org(db, completion.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+
+    summary = db.query(TreatmentSummary).filter(TreatmentSummary.completion_id == id).first()
+    if summary and summary.status == "FINALIZED":
+        raise HTTPException(409, "This Treatment Summary is already finalized")
+    if not summary:
+        summary = TreatmentSummary(completion_id=id, patient_id=completion.patient_id, created_by=_actor(current_user))
+        db.add(summary)
+    summary.clinician_synthesis = body.get("clinician_synthesis", summary.clinician_synthesis)
+    summary.outstanding_issues = body.get("outstanding_issues", summary.outstanding_issues)
+    db.commit()
+    db.refresh(summary)
+    return {"status": "success", "treatment_summary": _treatment_summary_dict(db, summary)}
+
+
+@router.get("/treatment-summaries/{id}")
+def get_treatment_summary(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    summary = db.query(TreatmentSummary).filter(TreatmentSummary.id == id).first()
+    if not summary:
+        raise HTTPException(404, "Treatment summary not found")
+    _check_patient_in_org(db, summary.patient_id, _org_id(current_user))
+    return {"treatment_summary": _treatment_summary_dict(db, summary)}
+
+
+@router.post("/treatment-summaries/{id}/finalize")
+def finalize_treatment_summary(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    summary = db.query(TreatmentSummary).filter(TreatmentSummary.id == id).first()
+    if not summary:
+        raise HTTPException(404, "Treatment summary not found")
+    _check_patient_in_org(db, summary.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    if summary.status == "FINALIZED":
+        raise HTTPException(409, "This Treatment Summary is already finalized")
+    if not (summary.clinician_synthesis or "").strip():
+        raise HTTPException(409, "Cannot finalize: clinician_synthesis is required")
+    actor = _actor(current_user)
+    summary.status = "FINALIZED"
+    summary.signed_by = actor
+    summary.signed_at = datetime.utcnow()
+    publish(
+        db, "TREATMENT_SUMMARY_FINALIZED", patient_id=summary.patient_id, actor=actor, role=current_user.get("role"),
+        title="Cancer Treatment Summary finalized", category="TREATMENT_COMPLETION",
+        description=f"{actor} finalized the Cancer Treatment Summary.",
+    )
+    db.commit()
+    db.refresh(summary)
+    return {"status": "success", "treatment_summary": _treatment_summary_dict(db, summary)}
+
+
+@router.post("/treatment-summaries/{id}/distributions")
+async def record_summary_distribution(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    """Treatment Summary Distribution & Acknowledgement (SCR-CMP-007). Requires the
+    summary to be FINALIZED first -- a draft summary is not yet something to distribute."""
+    summary = db.query(TreatmentSummary).filter(TreatmentSummary.id == id).first()
+    if not summary:
+        raise HTTPException(404, "Treatment summary not found")
+    _check_patient_in_org(db, summary.patient_id, _org_id(current_user))
+    if summary.status != "FINALIZED":
+        raise HTTPException(409, "Only a finalized Treatment Summary can be distributed")
+    body = await request.json()
+    recipient = (body.get("recipient") or "").strip()
+    if not recipient:
+        raise HTTPException(422, "recipient is required")
+    distribution = TreatmentSummaryDistribution(
+        summary_id=id, patient_id=summary.patient_id, recipient=recipient,
+        recipient_role=body.get("recipient_role"), method=body.get("method"),
+        acknowledgement_required=bool(body.get("acknowledgement_required", False)),
+        created_by=_actor(current_user),
+    )
+    db.add(distribution)
+    db.commit()
+    db.refresh(distribution)
+    return {"status": "success", "distribution": {
+        "id": distribution.id, "summary_id": distribution.summary_id, "recipient": distribution.recipient,
+        "recipient_role": distribution.recipient_role, "method": distribution.method,
+        "sent_at": distribution.sent_at.isoformat() if distribution.sent_at else None,
+        "acknowledgement_required": bool(distribution.acknowledgement_required),
+        "status": distribution.status,
+    }}
+
+
+@router.post("/treatment-summary-distributions/{id}/acknowledge")
+def acknowledge_summary_distribution(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    distribution = db.query(TreatmentSummaryDistribution).filter(TreatmentSummaryDistribution.id == id).first()
+    if not distribution:
+        raise HTTPException(404, "Distribution not found")
+    _check_patient_in_org(db, distribution.patient_id, _org_id(current_user))
+    if distribution.status == "Acknowledged":
+        raise HTTPException(409, "This distribution is already acknowledged")
+    distribution.status = "Acknowledged"
+    distribution.acknowledged_at = datetime.utcnow()
+    db.commit()
+    return {"status": "success"}
+
+
+# ---------------------------------------------------------
+# Surveillance / Survivorship (Product 1 vs Product 2 gap report, Batch 8: C.24) --
+# completely missing before this batch. See SurveillancePlan's docstring in models_cca.py
+# for the overall shape; _survivorship_derived reuses _treatment_summary_derived's
+# aggregation (Batch 7) rather than re-deriving diagnosis/treatment history a second way.
+# ---------------------------------------------------------
+
+def _surveillance_plan_dict(p: SurveillancePlan) -> dict:
+    return {
+        "id": p.id, "patient_id": p.patient_id, "cancer_episode_ref": p.cancer_episode_ref,
+        "completion_id": p.completion_id, "surveillance_intent": p.surveillance_intent,
+        "follow_up_frequency": p.follow_up_frequency, "duration_of_surveillance": p.duration_of_surveillance,
+        "late_effect_monitoring_plan": p.late_effect_monitoring_plan, "recurrence_red_flags": p.recurrence_red_flags,
+        "responsible_clinician": p.responsible_clinician,
+        "primary_care_handoff_required": p.primary_care_handoff_required,
+        "current_phase": p.current_phase,
+        "next_review_date": p.next_review_date.isoformat() if p.next_review_date else None,
+        "status": p.status, "created_by": p.created_by,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
+def _surveillance_visit_dict(v: SurveillanceVisit) -> dict:
+    return {
+        "id": v.id, "plan_id": v.plan_id, "interval_history": v.interval_history,
+        "red_flag_symptoms": v.red_flag_symptoms, "examination": v.examination,
+        "late_effects_reviewed": v.late_effects_reviewed, "results_reviewed": v.results_reviewed,
+        "disease_status": v.disease_status, "health_maintenance": v.health_maintenance,
+        "next_review_interval": v.next_review_interval, "status": v.status,
+        "signed_by": v.signed_by, "signed_at": v.signed_at.isoformat() if v.signed_at else None,
+    }
+
+
+def _surveillance_investigation_dict(i: SurveillanceInvestigation) -> dict:
+    return {
+        "id": i.id, "plan_id": i.plan_id, "investigation": i.investigation, "rationale": i.rationale,
+        "frequency": i.frequency, "due_date": i.due_date.isoformat() if i.due_date else None,
+        "status": i.status, "linked_order_id": i.linked_order_id, "linked_result_id": i.linked_result_id,
+        "result_summary": i.result_summary, "next_due": i.next_due.isoformat() if i.next_due else None,
+        "owner": i.owner,
+    }
+
+
+def _late_effect_dict(l: LateEffectRecord) -> dict:
+    return {
+        "id": l.id, "plan_id": l.plan_id, "late_effect": l.late_effect,
+        "onset_date": l.onset_date.isoformat() if l.onset_date else None,
+        "severity_grade": l.severity_grade, "attribution": l.attribution, "status": l.status,
+        "intervention": l.intervention, "owner": l.owner,
+        "last_reviewed": l.last_reviewed.isoformat() if l.last_reviewed else None,
+        "next_review": l.next_review.isoformat() if l.next_review else None,
+    }
+
+
+def _recall_entry_dict(r: SurveillanceRecallEntry) -> dict:
+    return {
+        "id": r.id, "plan_id": r.plan_id,
+        "follow_up_due_date": r.follow_up_due_date.isoformat() if r.follow_up_due_date else None,
+        "risk_priority": r.risk_priority, "preferred_contact": r.preferred_contact,
+        "contact_attempts": r.contact_attempts or [], "barrier": r.barrier,
+        "next_attempt_date": r.next_attempt_date.isoformat() if r.next_attempt_date else None,
+        "escalation_level": r.escalation_level, "outcome": r.outcome, "status": r.status, "owner": r.owner,
+    }
+
+
+def _survivorship_referral_dict(r: SurvivorshipReferral) -> dict:
+    return {
+        "id": r.id, "plan_id": r.plan_id, "domain": r.domain, "need_reason": r.need_reason,
+        "service_provider": r.service_provider, "priority": r.priority,
+        "referral_date": r.referral_date.isoformat() if r.referral_date else None,
+        "appointment_date": r.appointment_date.isoformat() if r.appointment_date else None,
+        "status": r.status, "outcome": r.outcome, "follow_up_owner": r.follow_up_owner,
+    }
+
+
+def _recurrence_event_dict(e: RecurrenceSuspicionEvent) -> dict:
+    return {
+        "id": e.id, "plan_id": e.plan_id, "patient_id": e.patient_id, "trigger": e.trigger,
+        "trigger_detail": e.trigger_detail, "date_identified": e.date_identified.isoformat() if e.date_identified else None,
+        "urgency": e.urgency, "immediate_actions": e.immediate_actions,
+        "re_entry_destination": e.re_entry_destination, "same_episode_or_new_primary": e.same_episode_or_new_primary,
+        "status": e.status, "actioned_by": e.actioned_by,
+        "actioned_at": e.actioned_at.isoformat() if e.actioned_at else None,
+    }
+
+
+def _survivorship_derived(db: Session, patient_id: int, plan: SurveillancePlan) -> dict:
+    """The Patient Survivorship Care Plan's "derived" section (SCR-SURV-006) -- reuses
+    _treatment_summary_derived's diagnosis/treatment aggregation (Batch 7) and adds the
+    late-effects/follow-up/red-flag content specific to surveillance, all read-time, never
+    duplicated storage."""
+    base = _treatment_summary_derived(db, patient_id)
+    late_effects = db.query(LateEffectRecord).filter(
+        LateEffectRecord.patient_id == patient_id, LateEffectRecord.status.in_(["Active", "Monitoring"])
+    ).all()
+    planned_tests = db.query(SurveillanceInvestigation).filter(SurveillanceInvestigation.plan_id == plan.id).all()
+    return {
+        "diagnosis_and_treatment_summary": base["diagnosis_staging_snapshot"],
+        "treatments_received": base["treatment_intent_and_plan_history"],
+        "late_effects_to_watch": [{"late_effect": l.late_effect, "status": l.status} for l in late_effects],
+        "follow_up_schedule": {"frequency": plan.follow_up_frequency, "next_review_date": plan.next_review_date.isoformat() if plan.next_review_date else None},
+        "planned_tests_and_rationale": [{"investigation": i.investigation, "rationale": i.rationale, "next_due": i.next_due.isoformat() if i.next_due else None} for i in planned_tests],
+        "red_flag_symptoms": plan.recurrence_red_flags,
+        "next_appointments": plan.next_review_date.isoformat() if plan.next_review_date else None,
+    }
+
+
+@router.post("/surveillance-plans")
+async def create_surveillance_plan(
+    request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    org_id = _org_id(current_user)
+    body = await request.json()
+    patient_id = _require_patient_id(body)
+    _get_org_patient(db, patient_id, org_id)
+    _require_clinician(current_user)
+
+    def _parse_date(key):
+        value = body.get(key)
+        return datetime.fromisoformat(value).date() if value else None
+
+    plan = SurveillancePlan(
+        patient_id=patient_id, cancer_episode_ref=body.get("cancer_episode_ref"),
+        completion_id=body.get("completion_id"), surveillance_intent=body.get("surveillance_intent"),
+        follow_up_frequency=body.get("follow_up_frequency"), duration_of_surveillance=body.get("duration_of_surveillance"),
+        late_effect_monitoring_plan=body.get("late_effect_monitoring_plan"),
+        recurrence_red_flags=body.get("recurrence_red_flags"), responsible_clinician=body.get("responsible_clinician"),
+        primary_care_handoff_required=body.get("primary_care_handoff_required"),
+        current_phase=body.get("current_phase"), next_review_date=_parse_date("next_review_date"),
+        created_by=_actor(current_user),
+    )
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+    return {"status": "success", "surveillance_plan": _surveillance_plan_dict(plan)}
+
+
+@router.post("/surveillance-plans/{id}/activate")
+def activate_surveillance_plan(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = db.query(SurveillancePlan).filter(SurveillancePlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Surveillance plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    if plan.status != "DRAFT":
+        raise HTTPException(409, f"Only a DRAFT plan can be activated (current status: {plan.status})")
+    # Never more than one ACTIVE plan per patient at a time -- matches TreatmentPlan's own
+    # supersede-on-activation convention.
+    for other in db.query(SurveillancePlan).filter(SurveillancePlan.patient_id == plan.patient_id, SurveillancePlan.status == "ACTIVE").all():
+        other.status = "SUPERSEDED"
+    plan.status = "ACTIVE"
+    actor = _actor(current_user)
+    publish(
+        db, "SURVEILLANCE_PLAN_ACTIVATED", patient_id=plan.patient_id, actor=actor, role=current_user.get("role"),
+        title="Surveillance / Survivorship plan activated", category="SURVEILLANCE",
+        description=f"{actor} activated a surveillance/survivorship care plan.",
+    )
+    db.commit()
+    db.refresh(plan)
+    return {"status": "success", "surveillance_plan": _surveillance_plan_dict(plan)}
+
+
+@router.get("/surveillance-plans/{id}")
+def get_surveillance_plan(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = db.query(SurveillancePlan).filter(SurveillancePlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Surveillance plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    return {
+        "surveillance_plan": _surveillance_plan_dict(plan),
+        "visits": [_surveillance_visit_dict(v) for v in db.query(SurveillanceVisit).filter(SurveillanceVisit.plan_id == id).order_by(SurveillanceVisit.id.desc()).all()],
+        "investigations": [_surveillance_investigation_dict(i) for i in db.query(SurveillanceInvestigation).filter(SurveillanceInvestigation.plan_id == id).all()],
+        "late_effects": [_late_effect_dict(l) for l in db.query(LateEffectRecord).filter(LateEffectRecord.plan_id == id).all()],
+        "recall_entries": [_recall_entry_dict(r) for r in db.query(SurveillanceRecallEntry).filter(SurveillanceRecallEntry.plan_id == id).all()],
+        "referrals": [_survivorship_referral_dict(r) for r in db.query(SurvivorshipReferral).filter(SurvivorshipReferral.plan_id == id).all()],
+    }
+
+
+@router.get("/patients/{patient_id}/surveillance-plans")
+def list_surveillance_plans(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """The Surveillance / Survivorship Worklist (SCR-SURV-001), scoped to one patient."""
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(SurveillancePlan).filter(SurveillancePlan.patient_id == patient_id).order_by(SurveillancePlan.id.desc()).all()
+    return {"surveillance_plans": [_surveillance_plan_dict(p) for p in rows]}
+
+
+@router.post("/surveillance-plans/{id}/visits")
+async def add_surveillance_visit(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    plan = db.query(SurveillancePlan).filter(SurveillancePlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Surveillance plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    visit = SurveillanceVisit(
+        plan_id=id, patient_id=plan.patient_id, interval_history=body.get("interval_history"),
+        red_flag_symptoms=body.get("red_flag_symptoms"), examination=body.get("examination"),
+        late_effects_reviewed=body.get("late_effects_reviewed"), results_reviewed=body.get("results_reviewed"),
+        disease_status=body.get("disease_status"), health_maintenance=body.get("health_maintenance"),
+        next_review_interval=body.get("next_review_interval"), created_by=_actor(current_user),
+    )
+    db.add(visit)
+    db.commit()
+    db.refresh(visit)
+    return {"status": "success", "visit": _surveillance_visit_dict(visit)}
+
+
+@router.post("/surveillance-visits/{id}/sign")
+def sign_surveillance_visit(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    visit = db.query(SurveillanceVisit).filter(SurveillanceVisit.id == id).first()
+    if not visit:
+        raise HTTPException(404, "Surveillance visit not found")
+    _check_patient_in_org(db, visit.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    if visit.status == "SIGNED":
+        raise HTTPException(409, "This visit is already signed")
+    visit.status = "SIGNED"
+    visit.signed_by = _actor(current_user)
+    visit.signed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(visit)
+    return {"status": "success", "visit": _surveillance_visit_dict(visit)}
+
+
+@router.post("/surveillance-plans/{id}/investigations")
+async def add_surveillance_investigation(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    plan = db.query(SurveillancePlan).filter(SurveillancePlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Surveillance plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    investigation = (body.get("investigation") or "").strip()
+    if not investigation:
+        raise HTTPException(422, "investigation is required")
+
+    def _parse_date(key):
+        value = body.get(key)
+        return datetime.fromisoformat(value).date() if value else None
+
+    row = SurveillanceInvestigation(
+        plan_id=id, patient_id=plan.patient_id, investigation=investigation, rationale=body.get("rationale"),
+        frequency=body.get("frequency"), due_date=_parse_date("due_date"), owner=body.get("owner"),
+        created_by=_actor(current_user),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "investigation": _surveillance_investigation_dict(row)}
+
+
+@router.post("/surveillance-investigations/{id}/update")
+async def update_surveillance_investigation(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    row = db.query(SurveillanceInvestigation).filter(SurveillanceInvestigation.id == id).first()
+    if not row:
+        raise HTTPException(404, "Surveillance investigation not found")
+    _check_patient_in_org(db, row.patient_id, _org_id(current_user))
+    body = await request.json()
+    if "status" in body:
+        row.status = body["status"]
+    if "result_summary" in body:
+        row.result_summary = body["result_summary"]
+    if "linked_order_id" in body:
+        row.linked_order_id = body["linked_order_id"]
+    if "linked_result_id" in body:
+        row.linked_result_id = body["linked_result_id"]
+    if body.get("next_due"):
+        row.next_due = datetime.fromisoformat(body["next_due"]).date()
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "investigation": _surveillance_investigation_dict(row)}
+
+
+@router.post("/surveillance-plans/{id}/late-effects")
+async def add_late_effect(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    plan = db.query(SurveillancePlan).filter(SurveillancePlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Surveillance plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    late_effect = (body.get("late_effect") or "").strip()
+    if not late_effect:
+        raise HTTPException(422, "late_effect is required")
+    row = LateEffectRecord(
+        plan_id=id, patient_id=plan.patient_id, late_effect=late_effect,
+        severity_grade=body.get("severity_grade"), attribution=body.get("attribution"),
+        intervention=body.get("intervention"), owner=body.get("owner"), created_by=_actor(current_user),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "late_effect": _late_effect_dict(row)}
+
+
+@router.post("/late-effect-records/{id}/review")
+async def review_late_effect(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    row = db.query(LateEffectRecord).filter(LateEffectRecord.id == id).first()
+    if not row:
+        raise HTTPException(404, "Late effect record not found")
+    _check_patient_in_org(db, row.patient_id, _org_id(current_user))
+    body = await request.json()
+    if "status" in body:
+        row.status = body["status"]
+    row.last_reviewed = datetime.utcnow().date()
+    if body.get("next_review"):
+        row.next_review = datetime.fromisoformat(body["next_review"]).date()
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "late_effect": _late_effect_dict(row)}
+
+
+@router.post("/surveillance-plans/{id}/survivorship-document")
+async def upsert_survivorship_document(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    """Get-or-create/update the Patient Survivorship Care Plan draft (SCR-SURV-006), same
+    upsert convention as Batch 7's /treatment-completions/{id}/summary."""
+    plan = db.query(SurveillancePlan).filter(SurveillancePlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Surveillance plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+
+    doc = db.query(SurvivorshipCarePlanDocument).filter(SurvivorshipCarePlanDocument.plan_id == id).first()
+    if doc and doc.status == "ISSUED":
+        raise HTTPException(409, "This survivorship care plan document is already issued")
+    if not doc:
+        doc = SurvivorshipCarePlanDocument(plan_id=id, patient_id=plan.patient_id, created_by=_actor(current_user))
+        db.add(doc)
+    for field in ("language", "template_version", "interpreter_governance_note", "education_delivered", "comprehension_teach_back"):
+        if field in body:
+            setattr(doc, field, body[field])
+    db.commit()
+    db.refresh(doc)
+    out = {
+        "id": doc.id, "plan_id": doc.plan_id, "language": doc.language, "template_version": doc.template_version,
+        "education_delivered": doc.education_delivered, "comprehension_teach_back": doc.comprehension_teach_back,
+        "status": doc.status, "date_issued": doc.date_issued.isoformat() if doc.date_issued else None,
+    }
+    out.update(_survivorship_derived(db, plan.patient_id, plan))
+    return {"status": "success", "survivorship_document": out}
+
+
+@router.post("/survivorship-documents/{id}/issue")
+def issue_survivorship_document(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    doc = db.query(SurvivorshipCarePlanDocument).filter(SurvivorshipCarePlanDocument.id == id).first()
+    if not doc:
+        raise HTTPException(404, "Survivorship care plan document not found")
+    _check_patient_in_org(db, doc.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    if doc.status == "ISSUED":
+        raise HTTPException(409, "This document is already issued")
+    if not (doc.education_delivered or "").strip():
+        raise HTTPException(409, "Cannot issue: education_delivered must be recorded first")
+    doc.status = "ISSUED"
+    doc.issued_by = _actor(current_user)
+    doc.date_issued = datetime.utcnow().date()
+    db.commit()
+    return {"status": "success", "id": doc.id, "status_value": doc.status}
+
+
+@router.post("/patients/{patient_id}/recurrence-suspicion")
+async def create_recurrence_suspicion(
+    patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    trigger = (body.get("trigger") or "").strip()
+    trigger_detail = (body.get("trigger_detail") or "").strip()
+    if not (trigger and trigger_detail):
+        raise HTTPException(422, "trigger and trigger_detail are required")
+    event = RecurrenceSuspicionEvent(
+        patient_id=patient_id, plan_id=body.get("plan_id"), trigger=trigger, trigger_detail=trigger_detail,
+        date_identified=datetime.utcnow().date(), urgency=body.get("urgency"),
+        immediate_actions=body.get("immediate_actions"), re_entry_destination=body.get("re_entry_destination"),
+        same_episode_or_new_primary=body.get("same_episode_or_new_primary"), created_by=_actor(current_user),
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    publish(
+        db, "RECURRENCE_SUSPICION_RAISED", patient_id=patient_id, actor=_actor(current_user), role=current_user.get("role"),
+        title="Recurrence suspicion raised", category="SURVEILLANCE",
+        description=f"{_actor(current_user)} raised a recurrence suspicion: {trigger}.",
+    )
+    db.commit()
+    return {"status": "success", "recurrence_event": _recurrence_event_dict(event)}
+
+
+@router.post("/recurrence-suspicion-events/{id}/action")
+def action_recurrence_suspicion(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Actions a recurrence suspicion -- the gap report's "re-entry into active oncology"
+    hook. journey_state is a display label only (see SurveillancePlan's docstring), never a
+    strict enum this endpoint has to validate transitions against."""
+    event = db.query(RecurrenceSuspicionEvent).filter(RecurrenceSuspicionEvent.id == id).first()
+    if not event:
+        raise HTTPException(404, "Recurrence suspicion event not found")
+    patient = _get_org_patient(db, event.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    if event.status == "ACTIONED":
+        raise HTTPException(409, "This event is already actioned")
+    actor = _actor(current_user)
+    event.status = "ACTIONED"
+    event.actioned_by = actor
+    event.actioned_at = datetime.utcnow()
+    patient.journey_state = "UnderInvestigation"
+    publish(
+        db, "RECURRENCE_SUSPICION_ACTIONED", patient_id=event.patient_id, actor=actor, role=current_user.get("role"),
+        title="Recurrence suspicion actioned -- re-entering active oncology", category="SURVEILLANCE",
+        description=f"{actor} actioned a recurrence suspicion, re-entering the patient into active oncology.",
+    )
+    db.commit()
+    db.refresh(event)
+    return {"status": "success", "recurrence_event": _recurrence_event_dict(event)}
+
+
+@router.post("/surveillance-plans/{id}/recall-entries")
+async def add_recall_entry(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    plan = db.query(SurveillancePlan).filter(SurveillancePlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Surveillance plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    body = await request.json()
+
+    def _parse_date(key):
+        value = body.get(key)
+        return datetime.fromisoformat(value).date() if value else None
+
+    row = SurveillanceRecallEntry(
+        plan_id=id, patient_id=plan.patient_id, follow_up_due_date=_parse_date("follow_up_due_date"),
+        risk_priority=body.get("risk_priority"), preferred_contact=body.get("preferred_contact"),
+        owner=body.get("owner"), created_by=_actor(current_user),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "recall_entry": _recall_entry_dict(row)}
+
+
+@router.post("/recall-entries/{id}/log-attempt")
+async def log_recall_attempt(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    row = db.query(SurveillanceRecallEntry).filter(SurveillanceRecallEntry.id == id).first()
+    if not row:
+        raise HTTPException(404, "Recall entry not found")
+    _check_patient_in_org(db, row.patient_id, _org_id(current_user))
+    body = await request.json()
+    method = (body.get("method") or "").strip()
+    outcome = (body.get("outcome") or "").strip()
+    if not (method and outcome):
+        raise HTTPException(422, "method and outcome are required")
+    attempts = list(row.contact_attempts or [])
+    attempts.append({"date": datetime.utcnow().isoformat(), "method": method, "outcome": outcome, "by": _actor(current_user)})
+    row.contact_attempts = attempts
+    row.barrier = body.get("barrier", row.barrier)
+    if body.get("next_attempt_date"):
+        row.next_attempt_date = datetime.fromisoformat(body["next_attempt_date"]).date()
+    if body.get("escalation_level"):
+        row.escalation_level = body["escalation_level"]
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "recall_entry": _recall_entry_dict(row)}
+
+
+@router.post("/recall-entries/{id}/close")
+async def close_recall_entry(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    row = db.query(SurveillanceRecallEntry).filter(SurveillanceRecallEntry.id == id).first()
+    if not row:
+        raise HTTPException(404, "Recall entry not found")
+    _check_patient_in_org(db, row.patient_id, _org_id(current_user))
+    body = await request.json()
+    row.status = "Closed"
+    row.outcome = body.get("outcome", row.outcome)
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "recall_entry": _recall_entry_dict(row)}
+
+
+@router.post("/surveillance-plans/{id}/referrals")
+async def add_survivorship_referral(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    plan = db.query(SurveillancePlan).filter(SurveillancePlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Surveillance plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    body = await request.json()
+    domain = (body.get("domain") or "").strip()
+    if not domain:
+        raise HTTPException(422, "domain is required")
+
+    def _parse_date(key):
+        value = body.get(key)
+        return datetime.fromisoformat(value).date() if value else None
+
+    row = SurvivorshipReferral(
+        plan_id=id, patient_id=plan.patient_id, domain=domain, need_reason=body.get("need_reason"),
+        service_provider=body.get("service_provider"), priority=body.get("priority"),
+        referral_date=_parse_date("referral_date"), follow_up_owner=body.get("follow_up_owner"),
+        created_by=_actor(current_user),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "referral": _survivorship_referral_dict(row)}
+
+
+@router.post("/survivorship-referrals/{id}/update-status")
+async def update_referral_status(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    row = db.query(SurvivorshipReferral).filter(SurvivorshipReferral.id == id).first()
+    if not row:
+        raise HTTPException(404, "Referral not found")
+    _check_patient_in_org(db, row.patient_id, _org_id(current_user))
+    body = await request.json()
+    if "status" in body:
+        row.status = body["status"]
+    if "outcome" in body:
+        row.outcome = body["outcome"]
+    if body.get("appointment_date"):
+        row.appointment_date = datetime.fromisoformat(body["appointment_date"]).date()
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "referral": _survivorship_referral_dict(row)}
 
 
 # ---------------------------------------------------------
