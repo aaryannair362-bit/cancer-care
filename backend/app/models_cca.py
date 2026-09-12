@@ -1730,6 +1730,11 @@ class OralTherapyPrescription(Base):
     # draft time, so a clinician can still start drafting before it's decided.
     missed_dose_instruction = Column(Text, nullable=True)
     vomited_dose_instruction = Column(Text, nullable=True)
+    # Monitoring-overdue refill gate (reference ORL-060, safety/dataflow-critical follow-up
+    # round) -- set by a clinician/pharmacist review (OralTherapyReview), read by
+    # dispense_oral_therapy to block a refill past this date without an explicit override.
+    # A date, never a computed "time since last dose" calculation.
+    next_monitoring_due_date = Column(Date, nullable=True)
     # DRAFT -> SIGNED -> DISPENSED -> ACTIVE -> ON_HOLD / DISCONTINUED / COMPLETED
     status = Column(String(30), default="DRAFT")
     supersedes_id = Column(Integer, ForeignKey("cca_oral_therapy_prescriptions.id"), nullable=True)
@@ -1777,6 +1782,10 @@ class OralTherapyDispensing(Base):
     checked_by = Column(String(200), nullable=True)
     collected_by = Column(String(200), nullable=True)
     returned_unused_quantity = Column(String(100), nullable=True)
+    # Recorded only when dispensing proceeds past an overdue monitoring due date (ORL-060,
+    # safety/dataflow-critical follow-up round) -- an explicit clinician override, never
+    # silently bypassed.
+    monitoring_override_reason = Column(Text, nullable=True)
     status = Column(String(30), default="Dispensed")
     dispensed_at = Column(DateTime, default=datetime.utcnow)
 

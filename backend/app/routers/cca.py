@@ -6871,7 +6871,9 @@ def _oral_rx_dict(rx: OralTherapyPrescription) -> dict:
         "days_on_off": rx.days_on_off, "start_date": rx.start_date.isoformat() if rx.start_date else None,
         "planned_duration_or_cycles": rx.planned_duration_or_cycles, "food_instruction": rx.food_instruction,
         "handling_precautions": rx.handling_precautions, "missed_dose_instruction": rx.missed_dose_instruction,
-        "vomited_dose_instruction": rx.vomited_dose_instruction, "status": rx.status,
+        "vomited_dose_instruction": rx.vomited_dose_instruction,
+        "next_monitoring_due_date": rx.next_monitoring_due_date.isoformat() if rx.next_monitoring_due_date else None,
+        "status": rx.status,
         "supersedes_id": rx.supersedes_id, "signer_email": rx.signer_email,
         "signed_at": rx.signed_at.isoformat() if rx.signed_at else None, "created_by": rx.created_by,
     }
@@ -6892,6 +6894,7 @@ def _oral_dispensing_dict(d: OralTherapyDispensing) -> dict:
         "batch_lot": d.batch_lot, "expiry_date": d.expiry_date.isoformat() if d.expiry_date else None,
         "days_supply": d.days_supply, "dispensed_by": d.dispensed_by, "checked_by": d.checked_by,
         "collected_by": d.collected_by, "returned_unused_quantity": d.returned_unused_quantity,
+        "monitoring_override_reason": d.monitoring_override_reason,
         "status": d.status, "dispensed_at": d.dispensed_at.isoformat() if d.dispensed_at else None,
     }
 
@@ -6974,6 +6977,8 @@ async def update_oral_therapy_prescription(
             setattr(rx, field, body[field])
     if body.get("start_date"):
         rx.start_date = datetime.fromisoformat(body["start_date"]).date()
+    if body.get("next_monitoring_due_date"):
+        rx.next_monitoring_due_date = datetime.fromisoformat(body["next_monitoring_due_date"]).date()
     db.commit()
     db.refresh(rx)
     return {"status": "success", "prescription": _oral_rx_dict(rx)}
@@ -7075,11 +7080,18 @@ async def dispense_oral_therapy(
     if not counselled:
         raise HTTPException(409, "Cannot dispense: counselling has not been recorded for this prescription")
     body = await request.json()
+    # Monitoring-overdue refill gate (reference ORL-060, safety/dataflow-critical follow-up
+    # round) -- a plain date comparison against a clinician-set due date, blocked unless
+    # explicitly overridden with a reason.
+    override_reason = (body.get("monitoring_override_reason") or "").strip()
+    if rx.next_monitoring_due_date and rx.next_monitoring_due_date < datetime.utcnow().date() and not override_reason:
+        raise HTTPException(409, f"Cannot dispense: monitoring was due on {rx.next_monitoring_due_date.isoformat()} and is overdue -- provide monitoring_override_reason to proceed")
     row = OralTherapyDispensing(
         prescription_id=id, patient_id=rx.patient_id, quantity_dispensed=body.get("quantity_dispensed"),
         batch_lot=body.get("batch_lot"), days_supply=body.get("days_supply"),
         checked_by=body.get("checked_by"), collected_by=body.get("collected_by"),
-        returned_unused_quantity=body.get("returned_unused_quantity"), dispensed_by=_actor(current_user),
+        returned_unused_quantity=body.get("returned_unused_quantity"), monitoring_override_reason=override_reason or None,
+        dispensed_by=_actor(current_user),
     )
     if body.get("expiry_date"):
         row.expiry_date = datetime.fromisoformat(body["expiry_date"]).date()
@@ -7117,6 +7129,10 @@ async def add_oral_therapy_review(
         reviewed_by=_actor(current_user),
     )
     db.add(row)
+    # A review is the natural point to set/update when monitoring is next due (ORL-060) --
+    # optional, since not every review changes it.
+    if body.get("next_monitoring_due_date"):
+        rx.next_monitoring_due_date = datetime.fromisoformat(body["next_monitoring_due_date"]).date()
     db.commit()
     db.refresh(row)
     return {"status": "success", "review": _oral_review_dict(row)}

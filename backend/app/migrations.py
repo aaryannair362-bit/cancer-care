@@ -198,6 +198,10 @@ ADDITIVE_COLUMNS = [
     ("cca_results", "critical_escalated_to", "VARCHAR(200)"),
     ("cca_results", "critical_escalated_by", "VARCHAR(200)"),
     ("cca_results", "critical_escalated_at", "TIMESTAMP"),
+    # Safety/dataflow-critical follow-up round: monitoring-overdue refill gate (reference
+    # ORL-060) for Oral/Continuous Therapy.
+    ("cca_oral_therapy_prescriptions", "next_monitoring_due_date", "DATE"),
+    ("cca_oral_therapy_dispensings", "monitoring_override_reason", "TEXT"),
 ]
 
 
