@@ -639,6 +639,37 @@ class CCACoordinationCase(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+
+class CoordinationContactLogEntry(Base):
+    """Per-attempt contact log (gap review item 8, Nurse Navigation) --
+    CCACoordinationCase.communication_status/last_contact_at above is a rolling
+    single-state snapshot; this is the append-only history of every attempt behind it."""
+    __tablename__ = "cca_coordination_contact_log_entries"
+    id = Column(Integer, primary_key=True)
+    coordination_case_id = Column(Integer, ForeignKey("cca_coordination_cases.id"), nullable=False)
+    contact_method = Column(String(30), nullable=True)  # Phone, SMS, Email, In-Person
+    outcome = Column(String(30), nullable=False)  # Reached, UnableToReach, VoicemailLeft, CallbackRequested, Declined
+    notes = Column(Text, nullable=True)
+    attempted_by = Column(String(200))
+    attempted_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TreatmentEducationDeliveryRecord(Base):
+    """Education delivery during ACTIVE TREATMENT (gap review item 8) -- distinct from
+    SurvivorshipCarePlanDocument.education_delivered below, which is a single post-treatment
+    flag. This is the append-only record of every education session delivered while a
+    patient is still on active treatment."""
+    __tablename__ = "cca_treatment_education_delivery_records"
+    id = Column(Integer, primary_key=True)
+    coordination_case_id = Column(Integer, ForeignKey("cca_coordination_cases.id"), nullable=False)
+    topic = Column(String(300), nullable=False)
+    material_used = Column(String(200), nullable=True)
+    language = Column(String(50), nullable=True)
+    comprehension_teach_back = Column(String(50), nullable=True)  # Confirmed, Partial, Not Confirmed
+    delivered_by = Column(String(200))
+    delivered_at = Column(DateTime, default=datetime.utcnow)
+
+
 class CCAAppointmentCoordination(Base):
     """Hospital-wide Appointment Coordination (Gap Analysis PDF item 23) -- the Patient
     Liaison's own record of an appointment in any department (Radiology, Surgery, Lab,

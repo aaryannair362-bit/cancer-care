@@ -265,6 +265,17 @@
                         </div>
                         <button class="btn-outline" onclick="submitContactStatus(${caseId})">💾 Save Contact Status</button>
                         <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
+                        <div class="section-title" style="font-size:14px; margin-bottom:8px;">Contact Log (per-attempt history)</div>
+                        <div id="coord-contact-log-${caseId}"></div>
+                        <div class="form-group" style="margin-top:10px;"><label class="form-label">Method</label>
+                            <select id="coord-log-method-${caseId}" class="form-select"><option>Phone</option><option>SMS</option><option>Email</option><option>In-Person</option></select>
+                        </div>
+                        <div class="form-group"><label class="form-label">Outcome</label>
+                            <select id="coord-log-outcome-${caseId}" class="form-select">${['Reached','UnableToReach','VoicemailLeft','CallbackRequested','Declined'].map(o => `<option>${o}</option>`).join('')}</select>
+                        </div>
+                        <div class="form-group"><input type="text" id="coord-log-notes-${caseId}" class="form-input" placeholder="Notes (optional)" /></div>
+                        <button class="btn-outline" onclick="submitContactLogEntry(${caseId})">+ Log Contact Attempt</button>
+                        <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
                         <div class="section-title" style="font-size:14px; margin-bottom:8px;">Barriers</div>
                         ${(c.barriers || []).map(b => `<div class="barrier-row">${escapeHtml(b.type)}: ${escapeHtml(b.notes || '')} (${escapeHtml(b.status)})</div>`).join('') || '<div class="barrier-row">None recorded.</div>'}
                         <div class="form-group" style="margin-top:10px;"><input type="text" id="coord-barrier-${caseId}" class="form-input" placeholder="Barrier type, e.g. TransportationIssue" /></div>
@@ -279,9 +290,60 @@
                         <div class="form-group"><label class="form-label">Date &amp; time</label><input type="datetime-local" id="coord-appt-when-${caseId}" class="form-input" /></div>
                         <div class="form-group"><label class="form-label">Purpose / location</label><input type="text" id="coord-appt-purpose-${caseId}" class="form-input" /></div>
                         <button class="btn-outline" onclick="submitCoordinationAppointment(${caseId}, ${c.patient_id})">+ Coordinate Appointment</button>
+                        <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
+                        <div class="section-title" style="font-size:14px; margin-bottom:8px;">Treatment Education Delivered</div>
+                        <div id="coord-education-${caseId}"></div>
+                        <div class="form-group" style="margin-top:10px;"><input type="text" id="coord-edu-topic-${caseId}" class="form-input" placeholder="Topic, e.g. Chemotherapy side effects" /></div>
+                        <div class="form-group"><input type="text" id="coord-edu-material-${caseId}" class="form-input" placeholder="Material used (optional)" /></div>
+                        <div class="form-group"><label class="form-label">Comprehension teach-back</label>
+                            <select id="coord-edu-teachback-${caseId}" class="form-select"><option>Confirmed</option><option>Partial</option><option>Not Confirmed</option></select>
+                        </div>
+                        <button class="btn-outline" onclick="submitEducationRecord(${caseId})">+ Record Education Delivered</button>
                     </div>
                 `;
                 loadCaseAppointments(caseId, c.patient_id);
+                loadContactLog(caseId);
+                loadEducationRecords(caseId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadContactLog(caseId) {
+            const el = document.getElementById(`coord-contact-log-${caseId}`);
+            try {
+                const data = await Api.get(`${CCA_API}/coordination/cases/${caseId}/contact-log`);
+                el.innerHTML = data.contact_log.map(c => `<div class="barrier-row">${escapeHtml(c.contact_method || '')} — <strong>${escapeHtml(c.outcome)}</strong>${c.notes ? ': ' + escapeHtml(c.notes) : ''} (${c.attempted_at ? new Date(c.attempted_at).toLocaleString() : ''})</div>`).join('') || '<div class="barrier-row">No contact attempts logged yet.</div>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitContactLogEntry(caseId) {
+            try {
+                await Api.post(`${CCA_API}/coordination/cases/${caseId}/contact-log`, {
+                    contact_method: document.getElementById(`coord-log-method-${caseId}`).value,
+                    outcome: document.getElementById(`coord-log-outcome-${caseId}`).value,
+                    notes: document.getElementById(`coord-log-notes-${caseId}`).value || undefined,
+                });
+                toast('Contact attempt logged', 'success');
+                openCoordinationCase(caseId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadEducationRecords(caseId) {
+            const el = document.getElementById(`coord-education-${caseId}`);
+            try {
+                const data = await Api.get(`${CCA_API}/coordination/cases/${caseId}/education-records`);
+                el.innerHTML = data.education_records.map(e => `<div class="barrier-row">${escapeHtml(e.topic)} — teach-back: <strong>${escapeHtml(e.comprehension_teach_back || '—')}</strong> (${e.delivered_at ? new Date(e.delivered_at).toLocaleString() : ''})</div>`).join('') || '<div class="barrier-row">No education sessions recorded yet.</div>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitEducationRecord(caseId) {
+            try {
+                await Api.post(`${CCA_API}/coordination/cases/${caseId}/education-records`, {
+                    topic: document.getElementById(`coord-edu-topic-${caseId}`).value,
+                    material_used: document.getElementById(`coord-edu-material-${caseId}`).value || undefined,
+                    comprehension_teach_back: document.getElementById(`coord-edu-teachback-${caseId}`).value,
+                });
+                toast('Education delivery recorded', 'success');
+                loadEducationRecords(caseId);
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

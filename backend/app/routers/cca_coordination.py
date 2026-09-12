@@ -32,6 +32,7 @@ from ..models_cca import (
     CCAFinancialCase, CCACoordinationCase, CCAIntakeAssessment, CCAEncounter, CCAOrder,
     CarePlan, StagingRecord, CCAJourneyEvent, TreatmentPlan, CarePlanTask, DomainEvent,
     CCAAppointmentCoordination,
+    CoordinationContactLogEntry, TreatmentEducationDeliveryRecord,
 )
 from ..events import publish
 from ..cca_product_decisions import EXTERNAL_SPECIALIST_CAN_SIGN_RECOMMENDATIONS
@@ -723,6 +724,96 @@ async def update_contact_status(case_id: int, request: Request, db: Session = De
         )
     db.commit()
     return {"status": "success", "case": _coordination_out(case)}
+
+
+# ---------------------------------------------------------
+# Per-attempt Contact Log + active-treatment Education Delivery record (gap review item 8,
+# Nurse Navigation) -- communication_status/last_contact_at above is a rolling single-state
+# snapshot; these are the append-only histories behind it.
+# ---------------------------------------------------------
+
+_CONTACT_LOG_OUTCOMES = ("Reached", "UnableToReach", "VoicemailLeft", "CallbackRequested", "Declined")
+
+
+def _contact_log_out(c: CoordinationContactLogEntry) -> dict:
+    return {
+        "id": c.id, "coordination_case_id": c.coordination_case_id, "contact_method": c.contact_method,
+        "outcome": c.outcome, "notes": c.notes, "attempted_by": c.attempted_by,
+        "attempted_at": c.attempted_at.isoformat() if c.attempted_at else None,
+    }
+
+
+@router.post("/coordination/cases/{case_id}/contact-log", status_code=201)
+async def add_contact_log_entry(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not (is_cca_patient_liaison(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Patient Liaison or Admin may log a contact attempt")
+    case = _get_org_coordination_case(db, case_id, _org_id(current_user))
+    body = await request.json()
+    outcome = body.get("outcome")
+    if outcome not in _CONTACT_LOG_OUTCOMES:
+        raise HTTPException(422, f"outcome must be one of {_CONTACT_LOG_OUTCOMES}")
+    actor = _actor(current_user)
+    entry = CoordinationContactLogEntry(
+        coordination_case_id=case.id, contact_method=body.get("contact_method"), outcome=outcome,
+        notes=body.get("notes"), attempted_by=actor,
+    )
+    db.add(entry)
+    # Keep the rolling snapshot in sync with the latest attempt, same fields
+    # update_contact_status above already sets.
+    if outcome == "Reached":
+        case.communication_status = "Reached"
+    elif outcome in ("UnableToReach", "VoicemailLeft", "Declined"):
+        case.communication_status = "UnableToReach"
+    elif outcome == "CallbackRequested":
+        case.communication_status = "CallbackRequired"
+    case.last_contact_at = datetime.utcnow()
+    db.commit()
+    db.refresh(entry)
+    return {"status": "success", "contact_log_entry": _contact_log_out(entry)}
+
+
+@router.get("/coordination/cases/{case_id}/contact-log")
+def list_contact_log(case_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    case = _get_org_coordination_case(db, case_id, _org_id(current_user))
+    rows = db.query(CoordinationContactLogEntry).filter(CoordinationContactLogEntry.coordination_case_id == case.id).order_by(CoordinationContactLogEntry.attempted_at.desc()).all()
+    return {"contact_log": [_contact_log_out(c) for c in rows]}
+
+
+def _education_record_out(e: TreatmentEducationDeliveryRecord) -> dict:
+    return {
+        "id": e.id, "coordination_case_id": e.coordination_case_id, "topic": e.topic,
+        "material_used": e.material_used, "language": e.language,
+        "comprehension_teach_back": e.comprehension_teach_back, "delivered_by": e.delivered_by,
+        "delivered_at": e.delivered_at.isoformat() if e.delivered_at else None,
+    }
+
+
+@router.post("/coordination/cases/{case_id}/education-records", status_code=201)
+async def add_education_record(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not (is_cca_patient_liaison(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Patient Liaison or Admin may record education delivery")
+    case = _get_org_coordination_case(db, case_id, _org_id(current_user))
+    body = await request.json()
+    topic = (body.get("topic") or "").strip()
+    if not topic:
+        raise HTTPException(422, "topic is required")
+    actor = _actor(current_user)
+    record = TreatmentEducationDeliveryRecord(
+        coordination_case_id=case.id, topic=topic, material_used=body.get("material_used"),
+        language=body.get("language"), comprehension_teach_back=body.get("comprehension_teach_back"),
+        delivered_by=actor,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "education_record": _education_record_out(record)}
+
+
+@router.get("/coordination/cases/{case_id}/education-records")
+def list_education_records(case_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    case = _get_org_coordination_case(db, case_id, _org_id(current_user))
+    rows = db.query(TreatmentEducationDeliveryRecord).filter(TreatmentEducationDeliveryRecord.coordination_case_id == case.id).order_by(TreatmentEducationDeliveryRecord.delivered_at.desc()).all()
+    return {"education_records": [_education_record_out(e) for e in rows]}
 
 
 @router.post("/coordination/cases/{case_id}/barriers")

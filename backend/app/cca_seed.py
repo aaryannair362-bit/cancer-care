@@ -33,6 +33,7 @@ from .models_cca import (
     PathologySecondOpinion, PathologyMdtReviewNote,
     CancerEpisode, LineOfTherapy,
     MDTActionItem, MDTMeetingMinutes,
+    CCACoordinationCase, CoordinationContactLogEntry, TreatmentEducationDeliveryRecord,
 )
 from .models_cca_oncology_ext import (
     TreatmentOrderDrugLine, RadiationPrescription, CCARadiationPhase, RadiationFraction,
@@ -168,6 +169,23 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
                     db.query(child_model).filter(
                         child_model.admission_id.in_(inpatient_admission_ids)
                     ).delete(synchronize_session=False)
+            # CoordinationContactLogEntry/TreatmentEducationDeliveryRecord have no patient_id
+            # of their own -- delete them via their parent CCACoordinationCase ids. Note:
+            # CCACoordinationCase itself is a pre-existing omission from this reset (not
+            # introduced here) and is left as-is; this only prevents these two new child
+            # tables from accumulating orphans of their own.
+            coordination_case_ids = [
+                row.id for row in db.query(CCACoordinationCase.id).filter(
+                    CCACoordinationCase.patient_id.in_(org_patient_ids)
+                ).all()
+            ]
+            if coordination_case_ids:
+                db.query(CoordinationContactLogEntry).filter(
+                    CoordinationContactLogEntry.coordination_case_id.in_(coordination_case_ids)
+                ).delete(synchronize_session=False)
+                db.query(TreatmentEducationDeliveryRecord).filter(
+                    TreatmentEducationDeliveryRecord.coordination_case_id.in_(coordination_case_ids)
+                ).delete(synchronize_session=False)
             # LesionMeasurement has no patient_id of its own -- delete it via its parent
             # TargetLesion ids before TargetLesion itself is deleted below.
             target_lesion_ids = [
