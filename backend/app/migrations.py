@@ -176,6 +176,9 @@ ADDITIVE_COLUMNS = [
     ("cca_results", "amendment_reason", "TEXT"),
     ("cca_results", "amended_by", "VARCHAR(200)"),
     ("cca_results", "amended_at", "TIMESTAMP"),
+    # Safety/dataflow-critical follow-up round: toxicity-driven audit link on TreatmentOrder
+    # (reference spec SCR-ORD-005).
+    ("cca_treatment_orders", "toxicity_event_id", "INTEGER"),
 ]
 
 

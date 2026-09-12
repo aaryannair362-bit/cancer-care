@@ -808,6 +808,10 @@ class TreatmentOrder(Base):
     supersedes_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=True)
     revision_reason = Column(Text, nullable=True)
     dose_modification_percent = Column(String(20), nullable=True)
+    # Toxicity-driven audit link (reference spec SCR-ORD-005: "creates the audit link
+    # between toxicity and dose change") -- optional, set when this revision exists because
+    # of a specific graded toxicity, not a computed relationship.
+    toxicity_event_id = Column(Integer, ForeignKey("cca_toxicity_events.id"), nullable=True)
     signer_email = Column(String(200), nullable=True)
     signer_role = Column(String(50), nullable=True)
     signed_at = Column(DateTime, nullable=True)
@@ -1862,3 +1866,37 @@ class ClinicalMasterItem(Base):
     fields = Column(JSON, nullable=False)
     created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Safety/dataflow-critical follow-up round -- gaps found verifying Batches 1-9 against the
+# reference spec that don't involve dose/threshold computation (functional/dataflow parity
+# pass, not new gap-report batches).
+# ---------------------------------------------------------------------------
+
+class SystemicTherapyHoldDecision(Base):
+    """The oncologist's own Hold/Delay/Discontinue-Regimen decision (reference SCR-ORD-006),
+    made ahead of the next cycle -- distinct from TreatmentClearance (the treatment-day
+    clearance decision, C.10) and TreatmentHoldEvent (the Day-Care nurse's mid-infusion stop,
+    models_cca.py). Tied to a TreatmentPlan (the regimen being held), not a single
+    TreatmentOrder, since the decision outlives any one order and governs whether a *future*
+    order should even be written. resumption_criteria is a list of clinician-authored
+    checkable items ({criterion, met}), never a computed readiness score."""
+    __tablename__ = "cca_systemic_therapy_hold_decisions"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_plan_id = Column(Integer, ForeignKey("cca_treatment_plans.id"), nullable=False)
+    toxicity_event_id = Column(Integer, ForeignKey("cca_toxicity_events.id"), nullable=True)
+    decision_type = Column(String(30), nullable=False)  # Delay, Hold, Discontinue Regimen, Discontinue All Systemic, Change Regimen
+    reason_category = Column(String(50), nullable=True)  # Toxicity, Progression, Patient Choice, Logistics, Other
+    reason_detail = Column(Text, nullable=False)
+    resumption_criteria = Column(JSON, nullable=True)  # [{"criterion": ..., "met": bool}, ...]
+    review_date = Column(Date, nullable=True)
+    next_plan = Column(Text, nullable=True)
+    patient_informed = Column(Boolean, default=False)
+    patient_informed_at = Column(DateTime, nullable=True)
+    status = Column(String(30), default="OPEN")  # OPEN, RESUMED, SUPERSEDED
+    resumed_at = Column(DateTime, nullable=True)
+    resumed_by = Column(String(200), nullable=True)
+    decided_by = Column(String(200))
+    decided_at = Column(DateTime, default=datetime.utcnow)

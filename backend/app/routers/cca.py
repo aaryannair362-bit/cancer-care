@@ -54,6 +54,7 @@ from ..models_cca import (
     OralTherapyPrescription, OralTherapyCounselling, OralTherapyDispensing,
     OralTherapyReview, OralTherapyHoldEvent,
     ClinicalMaster, ClinicalMasterItem,
+    SystemicTherapyHoldDecision,
 )
 from ..cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
@@ -3509,6 +3510,7 @@ def _treatment_order_dict(order: TreatmentOrder, db: Session = None) -> dict:
         "supersedes_id": order.supersedes_id,
         "revision_reason": order.revision_reason,
         "dose_modification_percent": order.dose_modification_percent,
+        "toxicity_event_id": order.toxicity_event_id,
         "signer_email": order.signer_email,
         "signer_role": order.signer_role,
         "signed_at": order.signed_at.isoformat() if order.signed_at else None,
@@ -3569,6 +3571,14 @@ async def create_treatment_order(
         if not prior_order or prior_order.patient_id != patient_id:
             raise HTTPException(422, "supersedes_id must reference an existing Treatment Order for the same patient")
 
+    # Toxicity-driven audit link (SCR-ORD-005) -- optional, must reference a real toxicity
+    # event for this patient when supplied.
+    toxicity_event_id = body.get("toxicity_event_id")
+    if toxicity_event_id is not None:
+        tox = db.query(ToxicityEvent).filter(ToxicityEvent.id == toxicity_event_id).first()
+        if not tox or tox.patient_id != patient_id:
+            raise HTTPException(422, "toxicity_event_id must reference an existing toxicity event for the same patient")
+
     order = TreatmentOrder(
         treatment_plan_id=plan.id,
         treatment_session_id=session.id,
@@ -3579,6 +3589,7 @@ async def create_treatment_order(
         supersedes_id=order_supersedes_id,
         revision_reason=body.get("revision_reason"),
         dose_modification_percent=body.get("dose_modification_percent"),
+        toxicity_event_id=toxicity_event_id,
         created_by=actor,
     )
     db.add(order)
@@ -7234,6 +7245,106 @@ def delete_clinical_master_item(id: int, db: Session = Depends(get_cca_db), curr
     db.delete(item)
     db.commit()
     return {"status": "success"}
+
+
+# ---------------------------------------------------------
+# Systemic Therapy Hold / Delay / Discontinue-Regimen decision (reference spec SCR-ORD-006)
+# -- safety/dataflow-critical follow-up round. See SystemicTherapyHoldDecision's docstring
+# in models_cca.py for why this is distinct from TreatmentClearance and TreatmentHoldEvent.
+# ---------------------------------------------------------
+
+_HOLD_DECISION_TYPES = ("Delay", "Hold", "Discontinue Regimen", "Discontinue All Systemic", "Change Regimen")
+
+
+def _hold_decision_dict(h: SystemicTherapyHoldDecision) -> dict:
+    return {
+        "id": h.id, "patient_id": h.patient_id, "treatment_plan_id": h.treatment_plan_id,
+        "toxicity_event_id": h.toxicity_event_id, "decision_type": h.decision_type,
+        "reason_category": h.reason_category, "reason_detail": h.reason_detail,
+        "resumption_criteria": h.resumption_criteria or [],
+        "review_date": h.review_date.isoformat() if h.review_date else None,
+        "next_plan": h.next_plan, "patient_informed": bool(h.patient_informed),
+        "patient_informed_at": h.patient_informed_at.isoformat() if h.patient_informed_at else None,
+        "status": h.status, "resumed_at": h.resumed_at.isoformat() if h.resumed_at else None,
+        "resumed_by": h.resumed_by, "decided_by": h.decided_by,
+        "decided_at": h.decided_at.isoformat() if h.decided_at else None,
+    }
+
+
+@router.post("/treatment-plans/{id}/hold-decisions")
+async def create_hold_decision(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Treatment plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    decision_type = body.get("decision_type")
+    reason_detail = (body.get("reason_detail") or "").strip()
+    if decision_type not in _HOLD_DECISION_TYPES:
+        raise HTTPException(422, f"decision_type must be one of {', '.join(_HOLD_DECISION_TYPES)}")
+    if not reason_detail:
+        raise HTTPException(422, "reason_detail is required")
+    toxicity_event_id = body.get("toxicity_event_id")
+    if toxicity_event_id is not None:
+        tox = db.query(ToxicityEvent).filter(ToxicityEvent.id == toxicity_event_id).first()
+        if not tox or tox.patient_id != plan.patient_id:
+            raise HTTPException(422, "toxicity_event_id must reference an existing toxicity event for the same patient")
+
+    decision = SystemicTherapyHoldDecision(
+        patient_id=plan.patient_id, treatment_plan_id=id, toxicity_event_id=toxicity_event_id,
+        decision_type=decision_type, reason_category=body.get("reason_category"), reason_detail=reason_detail,
+        resumption_criteria=body.get("resumption_criteria"),
+        review_date=datetime.fromisoformat(body["review_date"]).date() if body.get("review_date") else None,
+        next_plan=body.get("next_plan"), patient_informed=bool(body.get("patient_informed", False)),
+        patient_informed_at=datetime.utcnow() if body.get("patient_informed") else None,
+        decided_by=_actor(current_user),
+    )
+    db.add(decision)
+    if decision_type in ("Discontinue Regimen", "Discontinue All Systemic"):
+        _apply_treatment_plan_discontinuation(db, plan, reason_detail, _actor(current_user), current_user.get("role"))
+    publish(
+        db, "SYSTEMIC_THERAPY_HOLD_DECISION", patient_id=plan.patient_id, actor=_actor(current_user), role=current_user.get("role"),
+        title=f"Systemic therapy {decision_type.lower()} decision", category="TREATMENT_ORDER",
+        description=f"{_actor(current_user)} recorded a {decision_type} decision: {reason_detail}",
+    )
+    db.commit()
+    db.refresh(decision)
+    return {"status": "success", "hold_decision": _hold_decision_dict(decision)}
+
+
+@router.post("/hold-decisions/{id}/resume")
+async def resume_hold_decision(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    """Marks the decision resumed. The caller (a clinician) is asserting readiness --
+    resumption_criteria stay as a documented checklist for that judgment, never a computed
+    gate this endpoint evaluates itself."""
+    decision = db.query(SystemicTherapyHoldDecision).filter(SystemicTherapyHoldDecision.id == id).first()
+    if not decision:
+        raise HTTPException(404, "Hold decision not found")
+    _check_patient_in_org(db, decision.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    if decision.status != "OPEN":
+        raise HTTPException(409, f"Only an OPEN hold decision can be resumed (current status: {decision.status})")
+    body = await request.json()
+    if "resumption_criteria" in body:
+        decision.resumption_criteria = body["resumption_criteria"]
+    decision.status = "RESUMED"
+    decision.resumed_by = _actor(current_user)
+    decision.resumed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(decision)
+    return {"status": "success", "hold_decision": _hold_decision_dict(decision)}
+
+
+@router.get("/patients/{patient_id}/hold-decisions")
+def list_hold_decisions(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(SystemicTherapyHoldDecision).filter(SystemicTherapyHoldDecision.patient_id == patient_id).order_by(SystemicTherapyHoldDecision.id.desc()).all()
+    return {"hold_decisions": [_hold_decision_dict(h) for h in rows]}
 
 
 # ---------------------------------------------------------
