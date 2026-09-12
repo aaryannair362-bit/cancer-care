@@ -277,6 +277,7 @@
             <a class="sidebar-nav-item" id="nav-inpatient" onclick="showTab('inpatient')"><div class="nav-item-left"><span>🛏️</span><span>Inpatient</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-toxicity" onclick="showTab('toxicity')"><div class="nav-item-left"><span>⚠️</span><span>Toxicity Register</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-lesions" onclick="showTab('lesions')"><div class="nav-item-left"><span>📏</span><span>Response Tracking</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-results-inbox" onclick="showTab('results-inbox')"><div class="nav-item-left"><span>📥</span><span>Results Inbox</span></div><span class="nav-chevron">›</span></a>
 
             <div class="sidebar-section-title">CLINICAL INTELLIGENCE / COORDINATION</div>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
@@ -333,6 +334,20 @@
                 </div>
 
                 <div id="consult-form-area" style="display:none;">
+                    <div class="section-card">
+                        <div class="section-title">Visit Type</div>
+                        <div class="section-sub" style="margin-bottom:10px;">Final gap-closing round, item 16 -- distinguishes a comprehensive initial work-up from a focused interval visit.</div>
+                        <select id="consult-visit-type" class="form-select" onchange="updateVisitTypeFields()">
+                            <option value="NEW_CONSULTATION">New Consultation</option>
+                            <option value="FOLLOW_UP_VISIT">Follow-up Visit</option>
+                        </select>
+                        <div id="followup-fields" style="display:none; margin-top:14px;">
+                            <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Interval history since last visit</label><textarea id="consult-interval-history" class="form-textarea" rows="2"></textarea></div>
+                            <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Toxicity since last visit</label><textarea id="consult-interval-toxicity" class="form-textarea" rows="2"></textarea></div>
+                            <div class="form-group"><label class="form-label">Response/investigations reviewed today</label><textarea id="consult-interval-response" class="form-textarea" rows="2"></textarea></div>
+                        </div>
+                    </div>
+
                     <div class="section-card">
                         <div class="section-head">
                             <div>
@@ -517,6 +532,16 @@
                 <div id="lesions-content"><!-- Populated via JS: loadLesionTrackingView() --></div>
             </div>
 
+            <!-- ===== RESULTS INBOX (final gap-closing round, item 16) -- the backend
+                 GET /results + POST /results/{id}/acknowledge already existed; this was a
+                 real dead UI gap (only the disconnected cca_os.html demo prototype had an
+                 inbox mockup, never wired to the real backend). ===== -->
+            <div id="view-results-inbox" class="view-panel">
+                <h1 class="page-title">Results Inbox</h1>
+                <p class="page-subtitle">Every result across your patients, newest first. Acknowledging a critical result also resolves its linked review task.</p>
+                <div id="results-inbox-content"><!-- Populated via JS: loadResultsInbox() --></div>
+            </div>
+
             <!-- ===== NEXUS: real 13(+1)-section clinical brief (renderNexusBrief, cca-summary.js)
                  above a coordination-task board that is still static/mock ===== -->
             <div id="view-nexus" class="view-panel">
@@ -661,6 +686,7 @@
             if (tab === 'inpatient') loadInpatientView();
             if (tab === 'toxicity') loadToxicityRegisterView();
             if (tab === 'lesions') loadLesionTrackingView();
+            if (tab === 'results-inbox') loadResultsInbox();
             if (tab === 'guideline') loadGuidelinePathway();
             if (tab === 'staging') loadStagingWorkspace();
             if (tab === 'mdt') loadMdtWorkspace();
@@ -783,8 +809,17 @@
         }
 
         async function ensureEncounterId() {
-            const data = await Api.post(`${CCA_API}/patients/${currentPatientId}/encounters`, { specialty: 'Medical Oncology' });
+            const visitType = document.getElementById('consult-visit-type') ? document.getElementById('consult-visit-type').value : 'NEW_CONSULTATION';
+            const data = await Api.post(`${CCA_API}/patients/${currentPatientId}/encounters`, { specialty: 'Medical Oncology', encounter_type: visitType });
             return data.encounter.id;
+        }
+
+        // Dedicated New Consultation / Follow-up Visit fields (final gap-closing round,
+        // item 16) -- reuses CCAEncounter.encounter_type, already settable but never
+        // actually offered as a choice anywhere in this page.
+        function updateVisitTypeFields() {
+            const isFollowUp = document.getElementById('consult-visit-type').value === 'FOLLOW_UP_VISIT';
+            document.getElementById('followup-fields').style.display = isFollowUp ? 'block' : 'none';
         }
 
         // ---------------------------------------------------------------
@@ -1008,7 +1043,9 @@
             statusEl.textContent = 'Finalising...';
             try {
                 const encId = await ensureEncounterId();
+                const visitType = document.getElementById('consult-visit-type').value;
                 await Api.post(`${CCA_API}/encounters/${encId}/note/finalise`, {
+                    visit_type: visitType,
                     chief_complaint: document.getElementById('consult-cc').value,
                     hpi: document.getElementById('consult-hpi').value,
                     physical_exam: document.getElementById('consult-exam').value,
@@ -1019,6 +1056,11 @@
                     treatment_modality: selectedModality,
                     ai_scribe_medications: getSelectedMedications(),
                     raw_transcript: document.getElementById('scribe-transcript').value || undefined,
+                    ...(visitType === 'FOLLOW_UP_VISIT' ? {
+                        interval_history: document.getElementById('consult-interval-history').value,
+                        interval_toxicity: document.getElementById('consult-interval-toxicity').value,
+                        interval_response_review: document.getElementById('consult-interval-response').value,
+                    } : {}),
                 });
                 statusEl.textContent = '✅ Consultation note finalised.';
                 toast('Consultation note finalised', 'success');
@@ -3292,6 +3334,45 @@
                 });
                 document.getElementById('order-set-status').textContent = `✅ ${res.orders.length} order(s) raised.`;
                 toast(`${res.orders.length} order(s) raised`, 'success');
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // Results Inbox (final gap-closing round, item 16)
+        let resultsInboxFilter = 'unacknowledged';
+
+        async function loadResultsInbox() {
+            const container = document.getElementById('results-inbox-content');
+            try {
+                const data = await Api.get(`${CCA_API}/results`);
+                const rows = (data.results || []).filter(r => resultsInboxFilter === 'all' || r.status !== 'ACKNOWLEDGED');
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-head">
+                            <div class="section-title">Inbox</div>
+                            <select class="form-select" style="width:auto;" onchange="resultsInboxFilter = this.value; loadResultsInbox();">
+                                <option value="unacknowledged" ${resultsInboxFilter === 'unacknowledged' ? 'selected' : ''}>Unacknowledged only</option>
+                                <option value="all" ${resultsInboxFilter === 'all' ? 'selected' : ''}>All results</option>
+                            </select>
+                        </div>
+                        ${rows.length ? rows.map(r => `
+                            <div class="checklist-row" style="display:flex; justify-content:space-between; align-items:center;">
+                                <div>
+                                    <strong>${escapeHtml(r.title)}</strong> ${r.is_critical ? '<span class="badge badge-rose">Critical</span>' : ''}
+                                    <div style="font-size:12px; color:var(--ink-500);">${escapeHtml(r.result_type)} · ${r.resulted_at ? new Date(r.resulted_at).toLocaleString() : ''} · <span class="badge ${r.status === 'ACKNOWLEDGED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(r.status)}</span></div>
+                                </div>
+                                ${r.status !== 'ACKNOWLEDGED' ? `<button class="btn-outline" onclick="submitAcknowledgeResult(${r.id})">Acknowledge</button>` : ''}
+                            </div>
+                        `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">Nothing in the inbox.</p>'}
+                    </div>
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitAcknowledgeResult(resultId) {
+            try {
+                await Api.post(`${CCA_API}/results/${resultId}/acknowledge`, {});
+                toast('Result acknowledged', 'success');
+                loadResultsInbox();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
