@@ -414,15 +414,20 @@
             toast(`Added "${name}" to lab tests list`, 'success');
         }
 
+        let currentImagingOrderId = null;
+
         async function openImagingOrder(orderId) {
+            currentImagingOrderId = orderId;
             const detail = document.getElementById('imaging-order-detail');
             try {
                 const data = await Api.get(`${CCA_API}/imaging/orders/${orderId}`);
                 const o = data.order;
                 const draft = data.results.find(r => r.report_status === 'Draft');
+                const current = draft || data.results.slice().reverse().find(r => r.report_status === 'Finalized');
                 detail.innerHTML = `
                     <div class="section-title">${escapeHtml(o.item_name)}</div>
                     <div class="section-sub" style="margin-bottom:14px;">Indication: ${escapeHtml(o.clinical_indication || 'Not recorded')}${data.prior_study_available ? ' · Prior study available' : ''}</div>
+                    ${current && current.is_critical ? renderCriticalResultPanel(current) : ''}
                     <div class="form-grid-2">
                         <div class="form-group"><label class="form-label">Scheduled at</label><input type="datetime-local" id="img-sched-at" class="form-input" value="${o.scheduled_at ? o.scheduled_at.slice(0,16) : ''}" /></div>
                         <div class="form-group"><label class="form-label">Location</label><input type="text" id="img-location" class="form-input" value="${escapeHtml(o.location || '')}" /></div>
@@ -432,6 +437,7 @@
 
                     <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Findings</label><textarea id="img-findings" class="form-textarea" rows="3">${escapeHtml(draft ? draft.findings_text || '' : '')}</textarea></div>
                     <div class="form-group" style="margin-bottom:14px;"><label class="form-label">Impression</label><textarea id="img-impression" class="form-textarea" rows="2">${escapeHtml(draft ? draft.impression || '' : '')}</textarea></div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="img-critical" ${draft && draft.is_critical ? 'checked' : ''}/> <label for="img-critical">⚠ Flag as critical finding</label></div>
 
                     <!-- Prescribed Medicines / Prescriptions section -->
                     <div style="background:var(--bg-card-subtle); border:1px solid var(--line); border-radius:var(--radius-md); padding:14px; margin-bottom:14px;">
@@ -484,7 +490,8 @@
                 await Api.post(`${CCA_API}/imaging/orders/${orderId}/report`, {
                     findings_text: document.getElementById('img-findings').value,
                     impression: document.getElementById('img-impression').value,
-                    structured_report: { medications: meds }
+                    structured_report: { medications: meds },
+                    is_critical: document.getElementById('img-critical').checked,
                 });
                 toast('Report draft saved with prescribed medicines', 'success');
                 openImagingOrder(orderId);
@@ -494,7 +501,52 @@
             try {
                 await Api.post(`${CCA_API}/imaging/results/${resultId}/finalize`);
                 toast('Report finalized', 'success');
-                loadImagingWorklist();
+                if (currentImagingOrderId) openImagingOrder(currentImagingOrderId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // Critical-result notify/escalate (reference pathology/radiology critical-finding
+        // communication) -- the backend endpoints already existed and were wired up in
+        // pathologist.html; this closes the identical dead-end here (a radiologist flagging a
+        // finding critical previously had no UI path to notify/escalate anyone).
+        function renderCriticalResultPanel(result) {
+            const notified = !!result.critical_notified_to;
+            return `
+                <div class="section-card" style="background:var(--rose-badge-bg); margin-bottom:14px;">
+                    <div class="section-sub" style="font-weight:700; color:var(--rose-badge-text); margin-bottom:8px;">⚠ Critical Finding</div>
+                    ${notified
+                        ? `<div style="font-size:12.5px; margin-bottom:8px;">Notified: <strong>${escapeHtml(result.critical_notified_to)}</strong> via ${escapeHtml(result.critical_notification_method || '—')}</div>
+                           ${result.critical_escalated_to ? `<div style="font-size:12.5px;">Escalated to: <strong>${escapeHtml(result.critical_escalated_to)}</strong></div>` : `<button class="btn-outline" style="font-size:11px; padding:6px 10px;" onclick="escalateCriticalResult(${result.id})">Escalate</button>`}`
+                        : `<div class="form-grid-2" style="margin-bottom:8px;">
+                               <div class="form-group"><label class="form-label">Notified To</label><input type="text" id="crit-notified-${result.id}" class="form-input" /></div>
+                               <div class="form-group"><label class="form-label">Method</label>
+                                   <select id="crit-method-${result.id}" class="form-select"><option>Phone</option><option>In-Person</option><option>Secure Message</option><option>Other</option></select>
+                               </div>
+                           </div>
+                           <button class="btn-navy" style="font-size:11px; padding:6px 10px;" onclick="submitCriticalNotification(${result.id})">Record Notification</button>`
+                    }
+                </div>
+            `;
+        }
+
+        async function submitCriticalNotification(resultId) {
+            try {
+                await Api.post(`${CCA_API}/results/${resultId}/notify-critical`, {
+                    notified_to: document.getElementById(`crit-notified-${resultId}`).value,
+                    notification_method: document.getElementById(`crit-method-${resultId}`).value,
+                });
+                toast('Critical result notification recorded', 'success');
+                if (currentImagingOrderId) openImagingOrder(currentImagingOrderId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function escalateCriticalResult(resultId) {
+            const escalatedTo = prompt('Escalate to (name/role):');
+            if (!escalatedTo) return;
+            try {
+                await Api.post(`${CCA_API}/results/${resultId}/escalate-critical`, { escalated_to: escalatedTo });
+                toast('Escalated', 'success');
+                if (currentImagingOrderId) openImagingOrder(currentImagingOrderId);
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
