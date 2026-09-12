@@ -30,6 +30,8 @@ from ..models import User
 from ..models_cca import (
     CCAPatient, MDTCase, MDTDecision, MDTParticipant, CCAExternalAccess, CCAExternalOpinion,
     CCAFinancialCase, CCACoordinationCase, CCAIntakeAssessment, CCAEncounter, CCAOrder,
+    FinancialPreauthorization, BillableEventRecord, HighCostDrugApproval,
+    ClaimRecord, RefundCreditNote,
     CarePlan, StagingRecord, CCAJourneyEvent, TreatmentPlan, CarePlanTask, DomainEvent,
     CCAAppointmentCoordination,
     CoordinationContactLogEntry, TreatmentEducationDeliveryRecord,
@@ -696,6 +698,308 @@ async def update_financial_next_action(case_id: int, request: Request, db: Sessi
     case.next_action_due = date.fromisoformat(body["next_action_due"]) if body.get("next_action_due") else None
     db.commit()
     return {"status": "success", "case": _financial_out(case)}
+
+
+# ---------------------------------------------------------------------------
+# Finance back-office lifecycle (gap review item 14) -- preauthorisation/denial/appeal,
+# charge capture, high-cost-drug approval, claim tracking, refund/credit note. All
+# monetary amounts below are always the payer's/billing staff's own typed figure, never
+# computed by this system.
+# ---------------------------------------------------------------------------
+
+def _preauth_out(p: FinancialPreauthorization) -> dict:
+    return {
+        "id": p.id, "financial_case_id": p.financial_case_id, "services_requested": p.services_requested,
+        "requested_amount": p.requested_amount, "submitted_date": p.submitted_date.isoformat() if p.submitted_date else None,
+        "status": p.status, "approved_amount": p.approved_amount, "denial_reason": p.denial_reason,
+        "decision_date": p.decision_date.isoformat() if p.decision_date else None,
+        "appeal_submitted": bool(p.appeal_submitted), "appeal_reason": p.appeal_reason,
+        "appeal_status": p.appeal_status, "appeal_outcome_notes": p.appeal_outcome_notes,
+        "submitted_by": p.submitted_by,
+    }
+
+
+@router.post("/financial/cases/{case_id}/preauthorizations", status_code=201)
+async def create_preauthorization(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_financial_write(current_user)
+    case = _get_org_financial_case(db, case_id, _org_id(current_user))
+    body = await request.json()
+    services = (body.get("services_requested") or "").strip()
+    if not services:
+        raise HTTPException(422, "services_requested is required")
+    preauth = FinancialPreauthorization(
+        financial_case_id=case.id, patient_id=case.patient_id, services_requested=services,
+        requested_amount=body.get("requested_amount"),
+        submitted_date=date.fromisoformat(body["submitted_date"]) if body.get("submitted_date") else datetime.utcnow().date(),
+        submitted_by=_actor(current_user),
+    )
+    db.add(preauth)
+    db.commit()
+    db.refresh(preauth)
+    return {"status": "success", "preauthorization": _preauth_out(preauth)}
+
+
+@router.get("/financial/cases/{case_id}/preauthorizations")
+def list_preauthorizations(case_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    case = _get_org_financial_case(db, case_id, _org_id(current_user))
+    rows = db.query(FinancialPreauthorization).filter(FinancialPreauthorization.financial_case_id == case.id).order_by(FinancialPreauthorization.id.desc()).all()
+    return {"preauthorizations": [_preauth_out(p) for p in rows]}
+
+
+@router.post("/preauthorizations/{id}/decide")
+async def decide_preauthorization(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    preauth = db.query(FinancialPreauthorization).filter(FinancialPreauthorization.id == id).first()
+    if not preauth:
+        raise HTTPException(404, "Preauthorization not found")
+    _check_patient_in_org(db, preauth.patient_id, _org_id(current_user))
+    _require_financial_write(current_user)
+    body = await request.json()
+    status_val = body.get("status")
+    if status_val not in ("Approved", "PartiallyApproved", "Denied", "PendingInfo"):
+        raise HTTPException(422, "status must be one of Approved, PartiallyApproved, Denied, PendingInfo")
+    if status_val == "Denied" and not (body.get("denial_reason") or "").strip():
+        raise HTTPException(422, "denial_reason is required when status is Denied")
+    preauth.status = status_val
+    preauth.approved_amount = body.get("approved_amount")
+    preauth.denial_reason = body.get("denial_reason")
+    preauth.decision_date = datetime.utcnow().date()
+    db.commit()
+    db.refresh(preauth)
+    return {"status": "success", "preauthorization": _preauth_out(preauth)}
+
+
+@router.post("/preauthorizations/{id}/appeal")
+async def appeal_preauthorization(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    preauth = db.query(FinancialPreauthorization).filter(FinancialPreauthorization.id == id).first()
+    if not preauth:
+        raise HTTPException(404, "Preauthorization not found")
+    _check_patient_in_org(db, preauth.patient_id, _org_id(current_user))
+    _require_financial_write(current_user)
+    if preauth.status != "Denied":
+        raise HTTPException(409, "Only a Denied preauthorization can be appealed")
+    body = await request.json()
+    reason = (body.get("appeal_reason") or "").strip()
+    if not reason:
+        raise HTTPException(422, "appeal_reason is required")
+    preauth.appeal_submitted = True
+    preauth.appeal_reason = reason
+    preauth.appeal_submitted_date = datetime.utcnow().date()
+    preauth.appeal_status = "Pending"
+    db.commit()
+    db.refresh(preauth)
+    return {"status": "success", "preauthorization": _preauth_out(preauth)}
+
+
+@router.post("/preauthorizations/{id}/appeal-outcome")
+async def record_appeal_outcome(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    preauth = db.query(FinancialPreauthorization).filter(FinancialPreauthorization.id == id).first()
+    if not preauth:
+        raise HTTPException(404, "Preauthorization not found")
+    _check_patient_in_org(db, preauth.patient_id, _org_id(current_user))
+    _require_financial_write(current_user)
+    if not preauth.appeal_submitted:
+        raise HTTPException(409, "No appeal has been submitted for this preauthorization")
+    body = await request.json()
+    outcome = body.get("appeal_status")
+    if outcome not in ("Upheld", "Overturned"):
+        raise HTTPException(422, "appeal_status must be one of Upheld, Overturned")
+    preauth.appeal_status = outcome
+    preauth.appeal_outcome_notes = body.get("appeal_outcome_notes")
+    preauth.appeal_outcome_date = datetime.utcnow().date()
+    db.commit()
+    db.refresh(preauth)
+    return {"status": "success", "preauthorization": _preauth_out(preauth)}
+
+
+def _billable_event_out(b: BillableEventRecord) -> dict:
+    return {
+        "id": b.id, "financial_case_id": b.financial_case_id, "service_description": b.service_description,
+        "service_date": b.service_date.isoformat() if b.service_date else None, "amount": b.amount,
+        "linked_order_id": b.linked_order_id, "status": b.status, "captured_by": b.captured_by,
+    }
+
+
+@router.post("/financial/cases/{case_id}/billable-events", status_code=201)
+async def add_billable_event(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_financial_write(current_user)
+    case = _get_org_financial_case(db, case_id, _org_id(current_user))
+    body = await request.json()
+    description = (body.get("service_description") or "").strip()
+    if not description:
+        raise HTTPException(422, "service_description is required")
+    event = BillableEventRecord(
+        financial_case_id=case.id, patient_id=case.patient_id, service_description=description,
+        service_date=date.fromisoformat(body["service_date"]) if body.get("service_date") else datetime.utcnow().date(),
+        amount=body.get("amount"), linked_order_id=body.get("linked_order_id"), captured_by=_actor(current_user),
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+    return {"status": "success", "billable_event": _billable_event_out(event)}
+
+
+@router.get("/financial/cases/{case_id}/billable-events")
+def list_billable_events(case_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    case = _get_org_financial_case(db, case_id, _org_id(current_user))
+    rows = db.query(BillableEventRecord).filter(BillableEventRecord.financial_case_id == case.id).order_by(BillableEventRecord.id.desc()).all()
+    return {"billable_events": [_billable_event_out(b) for b in rows]}
+
+
+def _hcd_approval_out(h: HighCostDrugApproval) -> dict:
+    return {
+        "id": h.id, "financial_case_id": h.financial_case_id, "drug_name": h.drug_name,
+        "estimated_cost": h.estimated_cost, "approval_status": h.approval_status,
+        "approving_body": h.approving_body, "approval_reference": h.approval_reference,
+        "decision_date": h.decision_date.isoformat() if h.decision_date else None, "requested_by": h.requested_by,
+    }
+
+
+@router.post("/financial/cases/{case_id}/high-cost-drug-approvals", status_code=201)
+async def create_hcd_approval(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_financial_write(current_user)
+    case = _get_org_financial_case(db, case_id, _org_id(current_user))
+    body = await request.json()
+    drug_name = (body.get("drug_name") or "").strip()
+    if not drug_name:
+        raise HTTPException(422, "drug_name is required")
+    approval = HighCostDrugApproval(
+        financial_case_id=case.id, patient_id=case.patient_id, drug_name=drug_name,
+        estimated_cost=body.get("estimated_cost"), requested_by=_actor(current_user),
+    )
+    db.add(approval)
+    db.commit()
+    db.refresh(approval)
+    return {"status": "success", "approval": _hcd_approval_out(approval)}
+
+
+@router.get("/financial/cases/{case_id}/high-cost-drug-approvals")
+def list_hcd_approvals(case_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    case = _get_org_financial_case(db, case_id, _org_id(current_user))
+    rows = db.query(HighCostDrugApproval).filter(HighCostDrugApproval.financial_case_id == case.id).order_by(HighCostDrugApproval.id.desc()).all()
+    return {"approvals": [_hcd_approval_out(h) for h in rows]}
+
+
+@router.post("/high-cost-drug-approvals/{id}/decide")
+async def decide_hcd_approval(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    approval = db.query(HighCostDrugApproval).filter(HighCostDrugApproval.id == id).first()
+    if not approval:
+        raise HTTPException(404, "High-cost drug approval not found")
+    _check_patient_in_org(db, approval.patient_id, _org_id(current_user))
+    _require_financial_write(current_user)
+    body = await request.json()
+    status_val = body.get("approval_status")
+    if status_val not in ("Approved", "Denied"):
+        raise HTTPException(422, "approval_status must be one of Approved, Denied")
+    approval.approval_status = status_val
+    approval.approving_body = body.get("approving_body")
+    approval.approval_reference = body.get("approval_reference")
+    approval.decision_date = datetime.utcnow().date()
+    db.commit()
+    db.refresh(approval)
+    return {"status": "success", "approval": _hcd_approval_out(approval)}
+
+
+def _claim_out(c: ClaimRecord) -> dict:
+    return {
+        "id": c.id, "financial_case_id": c.financial_case_id, "claim_number": c.claim_number,
+        "payer_name": c.payer_name, "submitted_date": c.submitted_date.isoformat() if c.submitted_date else None,
+        "submitted_amount": c.submitted_amount, "status": c.status, "paid_amount": c.paid_amount,
+        "payer_reference": c.payer_reference, "submitted_by": c.submitted_by,
+    }
+
+
+@router.post("/financial/cases/{case_id}/claims", status_code=201)
+async def create_claim(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_financial_write(current_user)
+    case = _get_org_financial_case(db, case_id, _org_id(current_user))
+    body = await request.json()
+    claim = ClaimRecord(
+        financial_case_id=case.id, patient_id=case.patient_id, claim_number=body.get("claim_number"),
+        payer_name=body.get("payer_name"),
+        submitted_date=date.fromisoformat(body["submitted_date"]) if body.get("submitted_date") else datetime.utcnow().date(),
+        submitted_amount=body.get("submitted_amount"), submitted_by=_actor(current_user),
+    )
+    db.add(claim)
+    db.commit()
+    db.refresh(claim)
+    return {"status": "success", "claim": _claim_out(claim)}
+
+
+@router.get("/financial/cases/{case_id}/claims")
+def list_claims(case_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    case = _get_org_financial_case(db, case_id, _org_id(current_user))
+    rows = db.query(ClaimRecord).filter(ClaimRecord.financial_case_id == case.id).order_by(ClaimRecord.id.desc()).all()
+    return {"claims": [_claim_out(c) for c in rows]}
+
+
+@router.post("/claims/{id}/update-status")
+async def update_claim_status(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    claim = db.query(ClaimRecord).filter(ClaimRecord.id == id).first()
+    if not claim:
+        raise HTTPException(404, "Claim not found")
+    _check_patient_in_org(db, claim.patient_id, _org_id(current_user))
+    _require_financial_write(current_user)
+    body = await request.json()
+    status_val = body.get("status")
+    if status_val not in ("UnderReview", "Approved", "PartiallyApproved", "Denied", "Paid"):
+        raise HTTPException(422, "status must be one of UnderReview, Approved, PartiallyApproved, Denied, Paid")
+    claim.status = status_val
+    claim.paid_amount = body.get("paid_amount", claim.paid_amount)
+    claim.payer_reference = body.get("payer_reference", claim.payer_reference)
+    db.commit()
+    db.refresh(claim)
+    return {"status": "success", "claim": _claim_out(claim)}
+
+
+def _refund_out(r: RefundCreditNote) -> dict:
+    return {
+        "id": r.id, "financial_case_id": r.financial_case_id, "amount": r.amount, "reason": r.reason,
+        "note_type": r.note_type, "status": r.status, "issued_date": r.issued_date.isoformat() if r.issued_date else None,
+        "issued_by": r.issued_by, "requested_by": r.requested_by,
+    }
+
+
+@router.post("/financial/cases/{case_id}/refunds", status_code=201)
+async def create_refund(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_financial_write(current_user)
+    case = _get_org_financial_case(db, case_id, _org_id(current_user))
+    body = await request.json()
+    amount = body.get("amount")
+    reason = (body.get("reason") or "").strip()
+    if not amount or not reason:
+        raise HTTPException(422, "amount and reason are required")
+    refund = RefundCreditNote(
+        financial_case_id=case.id, patient_id=case.patient_id, amount=amount, reason=reason,
+        note_type=body.get("note_type", "Refund"), requested_by=_actor(current_user),
+    )
+    db.add(refund)
+    db.commit()
+    db.refresh(refund)
+    return {"status": "success", "refund": _refund_out(refund)}
+
+
+@router.get("/financial/cases/{case_id}/refunds")
+def list_refunds(case_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    case = _get_org_financial_case(db, case_id, _org_id(current_user))
+    rows = db.query(RefundCreditNote).filter(RefundCreditNote.financial_case_id == case.id).order_by(RefundCreditNote.id.desc()).all()
+    return {"refunds": [_refund_out(r) for r in rows]}
+
+
+@router.post("/refunds/{id}/issue")
+async def issue_refund(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    refund = db.query(RefundCreditNote).filter(RefundCreditNote.id == id).first()
+    if not refund:
+        raise HTTPException(404, "Refund/credit note not found")
+    _check_patient_in_org(db, refund.patient_id, _org_id(current_user))
+    _require_financial_write(current_user)
+    if refund.status == "Issued":
+        raise HTTPException(409, "This refund/credit note is already issued")
+    refund.status = "Issued"
+    refund.issued_date = datetime.utcnow().date()
+    refund.issued_by = _actor(current_user)
+    db.commit()
+    db.refresh(refund)
+    return {"status": "success", "refund": _refund_out(refund)}
 
 
 # ---------------------------------------------------------------------------

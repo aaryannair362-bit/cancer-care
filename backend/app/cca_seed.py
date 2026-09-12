@@ -35,6 +35,8 @@ from .models_cca import (
     CancerEpisode, LineOfTherapy,
     MDTActionItem, MDTMeetingMinutes,
     CCACoordinationCase, CoordinationContactLogEntry, TreatmentEducationDeliveryRecord,
+    FinancialPreauthorization, BillableEventRecord, HighCostDrugApproval,
+    ClaimRecord, RefundCreditNote,
 )
 from .models_cca_oncology_ext import (
     TreatmentOrderDrugLine, RadiationPrescription, CCARadiationPhase, RadiationFraction,
@@ -133,6 +135,10 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # itself is a pre-existing omission from this reset (not introduced here).
             SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
             SurgicalStomaRecord, SurgicalComplicationRecord,
+            # All have their own patient_id, even though CCAFinancialCase itself is a
+            # pre-existing omission from this reset (not introduced here).
+            FinancialPreauthorization, BillableEventRecord, HighCostDrugApproval,
+            ClaimRecord, RefundCreditNote,
             CCAJourneyEvent, ResponseAssessment, TreatmentClearance,
             # Has its own patient_id -- optionally references a ToxicityEvent, deleted
             # before ToxicityEvent itself just below.

@@ -60,6 +60,7 @@
         .worklist-row { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; margin-bottom: 10px; display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr auto; gap: 14px; align-items: center; }
         .wl-label { font-size: 11px; color: var(--ink-500); text-transform: uppercase; margin-bottom: 2px; }
         .wl-value { font-size: 13.5px; font-weight: 700; color: var(--ink-900); }
+        .participant-row { padding: 8px 0; border-bottom: 1px solid var(--line-subtle); font-size: 13px; }
         .form-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
         .form-label { font-size: 12px; font-weight: 600; color: var(--ink-700); }
         .form-input, .form-select, .form-textarea { width: 100%; height: 38px; padding: 0 12px; background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; color: var(--ink-900); outline: none; }
@@ -199,8 +200,189 @@
                         <div class="form-group"><select id="fin-clearance-${caseId}" class="form-select">${['NotStarted','PendingDocuments','InsuranceApprovalPending','PatientContributionPending','PartiallyCleared','Cleared','NotCleared','Deferred'].map(s => `<option ${f.financial_clearance_status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
                         <button class="btn-navy" onclick="submitClearance(${caseId})">✅ Save Clearance</button>
                     </div>
+
+                    <div class="section-card"><div class="section-title" style="font-size:14px; margin-bottom:8px;">Preauthorization</div><div id="fin-preauth-${caseId}"></div>
+                        <div class="form-group" style="margin-top:10px;"><input type="text" id="fin-preauth-services-${caseId}" class="form-input" placeholder="Services requested" /></div>
+                        <button class="btn-outline" onclick="submitPreauth(${caseId})">+ Submit Preauthorization</button>
+                    </div>
+                    <div class="section-card"><div class="section-title" style="font-size:14px; margin-bottom:8px;">Charge Capture</div><div id="fin-billable-${caseId}"></div>
+                        <div class="form-group" style="margin-top:10px;"><input type="text" id="fin-billable-desc-${caseId}" class="form-input" placeholder="Service description" /></div>
+                        <div class="form-group"><input type="text" id="fin-billable-amount-${caseId}" class="form-input" placeholder="Amount" /></div>
+                        <button class="btn-outline" onclick="submitBillableEvent(${caseId})">+ Capture Charge</button>
+                    </div>
+                    <div class="section-card"><div class="section-title" style="font-size:14px; margin-bottom:8px;">High-Cost Drug Approval</div><div id="fin-hcd-${caseId}"></div>
+                        <div class="form-group" style="margin-top:10px;"><input type="text" id="fin-hcd-drug-${caseId}" class="form-input" placeholder="Drug name" /></div>
+                        <button class="btn-outline" onclick="submitHcdApproval(${caseId})">+ Request Approval</button>
+                    </div>
+                    <div class="section-card"><div class="section-title" style="font-size:14px; margin-bottom:8px;">Claim Tracking</div><div id="fin-claims-${caseId}"></div>
+                        <div class="form-group" style="margin-top:10px;"><input type="text" id="fin-claim-number-${caseId}" class="form-input" placeholder="Claim number" /></div>
+                        <div class="form-group"><input type="text" id="fin-claim-payer-${caseId}" class="form-input" placeholder="Payer name" /></div>
+                        <button class="btn-outline" onclick="submitClaim(${caseId})">+ Submit Claim</button>
+                    </div>
+                    <div class="section-card"><div class="section-title" style="font-size:14px; margin-bottom:8px;">Refunds / Credit Notes</div><div id="fin-refunds-${caseId}"></div>
+                        <div class="form-group" style="margin-top:10px;"><input type="text" id="fin-refund-amount-${caseId}" class="form-input" placeholder="Amount" /></div>
+                        <div class="form-group"><input type="text" id="fin-refund-reason-${caseId}" class="form-input" placeholder="Reason" /></div>
+                        <button class="btn-outline" onclick="submitRefund(${caseId})">+ Request Refund/Credit Note</button>
+                    </div>
                 `;
                 renderFinancialCaseSummary(`fin-summary-${caseId}`, f.patient_id);
+                loadPreauthorizations(caseId);
+                loadBillableEvents(caseId);
+                loadHcdApprovals(caseId);
+                loadClaims(caseId);
+                loadRefunds(caseId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // Finance back-office lifecycle (final gap-closing round, item 14)
+        async function loadPreauthorizations(caseId) {
+            const el = document.getElementById(`fin-preauth-${caseId}`);
+            try {
+                const data = await Api.get(`${CCA_API}/financial/cases/${caseId}/preauthorizations`);
+                el.innerHTML = data.preauthorizations.map(p => `
+                    <div class="participant-row" style="display:block;">
+                        <strong>${escapeHtml(p.services_requested)}</strong> — <span class="badge ${p.status === 'Approved' ? 'badge-green' : (p.status === 'Denied' ? 'badge-rose' : 'badge-amber')}">${escapeHtml(p.status)}</span>
+                        ${p.status === 'Submitted' || p.status === 'PendingInfo' ? `<button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="promptDecidePreauth(${caseId}, ${p.id})">Decide</button>` : ''}
+                        ${p.status === 'Denied' && !p.appeal_submitted ? `<button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="promptAppealPreauth(${caseId}, ${p.id})">Appeal</button>` : ''}
+                        ${p.appeal_submitted && p.appeal_status === 'Pending' ? `<button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="promptAppealOutcome(${caseId}, ${p.id})">Record Appeal Outcome</button>` : ''}
+                        ${p.appeal_status && p.appeal_status !== 'Pending' ? `<div style="font-size:11.5px; color:var(--ink-500);">Appeal ${escapeHtml(p.appeal_status)}: ${escapeHtml(p.appeal_outcome_notes || '')}</div>` : ''}
+                    </div>
+                `).join('') || '<div class="participant-row">No preauthorizations submitted.</div>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitPreauth(caseId) {
+            try {
+                await Api.post(`${CCA_API}/financial/cases/${caseId}/preauthorizations`, {
+                    services_requested: document.getElementById(`fin-preauth-services-${caseId}`).value,
+                });
+                toast('Preauthorization submitted', 'success');
+                loadPreauthorizations(caseId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function promptDecidePreauth(caseId, id) {
+            const status = prompt('Decision: Approved, PartiallyApproved, Denied, or PendingInfo?');
+            if (!status) return;
+            const denialReason = status === 'Denied' ? prompt('Denial reason:') : undefined;
+            Api.post(`${CCA_API}/preauthorizations/${id}/decide`, { status, denial_reason: denialReason })
+                .then(() => { toast('Decision recorded', 'success'); loadPreauthorizations(caseId); })
+                .catch(err => toast(apiErrorMessage(err), 'error'));
+        }
+
+        function promptAppealPreauth(caseId, id) {
+            const reason = prompt('Appeal reason:');
+            if (!reason) return;
+            Api.post(`${CCA_API}/preauthorizations/${id}/appeal`, { appeal_reason: reason })
+                .then(() => { toast('Appeal submitted', 'success'); loadPreauthorizations(caseId); })
+                .catch(err => toast(apiErrorMessage(err), 'error'));
+        }
+
+        function promptAppealOutcome(caseId, id) {
+            const outcome = prompt('Appeal outcome: Upheld or Overturned?');
+            if (!outcome) return;
+            Api.post(`${CCA_API}/preauthorizations/${id}/appeal-outcome`, { appeal_status: outcome })
+                .then(() => { toast('Appeal outcome recorded', 'success'); loadPreauthorizations(caseId); })
+                .catch(err => toast(apiErrorMessage(err), 'error'));
+        }
+
+        async function loadBillableEvents(caseId) {
+            const el = document.getElementById(`fin-billable-${caseId}`);
+            try {
+                const data = await Api.get(`${CCA_API}/financial/cases/${caseId}/billable-events`);
+                el.innerHTML = data.billable_events.map(b => `<div class="participant-row">${escapeHtml(b.service_description)} — ${escapeHtml(b.amount || '—')} — <span class="badge badge-blue">${escapeHtml(b.status)}</span></div>`).join('') || '<div class="participant-row">No charges captured.</div>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitBillableEvent(caseId) {
+            try {
+                await Api.post(`${CCA_API}/financial/cases/${caseId}/billable-events`, {
+                    service_description: document.getElementById(`fin-billable-desc-${caseId}`).value,
+                    amount: document.getElementById(`fin-billable-amount-${caseId}`).value || undefined,
+                });
+                toast('Charge captured', 'success');
+                loadBillableEvents(caseId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadHcdApprovals(caseId) {
+            const el = document.getElementById(`fin-hcd-${caseId}`);
+            try {
+                const data = await Api.get(`${CCA_API}/financial/cases/${caseId}/high-cost-drug-approvals`);
+                el.innerHTML = data.approvals.map(h => `<div class="participant-row">${escapeHtml(h.drug_name)} — <span class="badge ${h.approval_status === 'Approved' ? 'badge-green' : (h.approval_status === 'Denied' ? 'badge-rose' : 'badge-amber')}">${escapeHtml(h.approval_status)}</span>${h.approval_status === 'Pending' ? ` <button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="promptDecideHcd(${caseId}, ${h.id})">Decide</button>` : ''}</div>`).join('') || '<div class="participant-row">No high-cost drug requests.</div>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitHcdApproval(caseId) {
+            try {
+                await Api.post(`${CCA_API}/financial/cases/${caseId}/high-cost-drug-approvals`, {
+                    drug_name: document.getElementById(`fin-hcd-drug-${caseId}`).value,
+                });
+                toast('High-cost drug approval requested', 'success');
+                loadHcdApprovals(caseId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function promptDecideHcd(caseId, id) {
+            const status = prompt('Approval status: Approved or Denied?');
+            if (!status) return;
+            Api.post(`${CCA_API}/high-cost-drug-approvals/${id}/decide`, { approval_status: status })
+                .then(() => { toast('Decision recorded', 'success'); loadHcdApprovals(caseId); })
+                .catch(err => toast(apiErrorMessage(err), 'error'));
+        }
+
+        async function loadClaims(caseId) {
+            const el = document.getElementById(`fin-claims-${caseId}`);
+            try {
+                const data = await Api.get(`${CCA_API}/financial/cases/${caseId}/claims`);
+                el.innerHTML = data.claims.map(c => `<div class="participant-row">${escapeHtml(c.claim_number || 'No claim #')} — ${escapeHtml(c.payer_name || '')} — <span class="badge badge-blue">${escapeHtml(c.status)}</span>${!['Paid','Denied'].includes(c.status) ? ` <button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="promptUpdateClaim(${caseId}, ${c.id})">Update Status</button>` : ''}</div>`).join('') || '<div class="participant-row">No claims submitted.</div>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitClaim(caseId) {
+            try {
+                await Api.post(`${CCA_API}/financial/cases/${caseId}/claims`, {
+                    claim_number: document.getElementById(`fin-claim-number-${caseId}`).value || undefined,
+                    payer_name: document.getElementById(`fin-claim-payer-${caseId}`).value || undefined,
+                });
+                toast('Claim submitted', 'success');
+                loadClaims(caseId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function promptUpdateClaim(caseId, id) {
+            const status = prompt('Status: UnderReview, Approved, PartiallyApproved, Denied, or Paid?');
+            if (!status) return;
+            const paidAmount = status === 'Paid' ? prompt('Paid amount:') : undefined;
+            Api.post(`${CCA_API}/claims/${id}/update-status`, { status, paid_amount: paidAmount })
+                .then(() => { toast('Claim updated', 'success'); loadClaims(caseId); })
+                .catch(err => toast(apiErrorMessage(err), 'error'));
+        }
+
+        async function loadRefunds(caseId) {
+            const el = document.getElementById(`fin-refunds-${caseId}`);
+            try {
+                const data = await Api.get(`${CCA_API}/financial/cases/${caseId}/refunds`);
+                el.innerHTML = data.refunds.map(r => `<div class="participant-row">${escapeHtml(r.note_type)}: ${escapeHtml(r.amount)} — ${escapeHtml(r.reason)} — <span class="badge ${r.status === 'Issued' ? 'badge-green' : 'badge-amber'}">${escapeHtml(r.status)}</span>${r.status !== 'Issued' ? ` <button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="submitIssueRefund(${caseId}, ${r.id})">Issue</button>` : ''}</div>`).join('') || '<div class="participant-row">No refunds/credit notes.</div>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitRefund(caseId) {
+            try {
+                await Api.post(`${CCA_API}/financial/cases/${caseId}/refunds`, {
+                    amount: document.getElementById(`fin-refund-amount-${caseId}`).value,
+                    reason: document.getElementById(`fin-refund-reason-${caseId}`).value,
+                });
+                toast('Refund/credit note requested', 'success');
+                loadRefunds(caseId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitIssueRefund(caseId, id) {
+            try {
+                await Api.post(`${CCA_API}/refunds/${id}/issue`, {});
+                toast('Refund/credit note issued', 'success');
+                loadRefunds(caseId);
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

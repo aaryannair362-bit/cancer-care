@@ -672,6 +672,100 @@ class CCAFinancialCase(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+# ---------------------------------------------------------------------------
+# Finance back-office lifecycle (gap review item 14) -- CCAFinancialCase above only ever
+# covered pre-treatment estimate/counselling; insurance_status/scheme_status were bare
+# strings with no real request/decision/appeal trail. All monetary amounts below are always
+# the payer's/billing staff's own typed figure, never computed by this system (same
+# no-computed-clinical/financial-judgment posture as the standing dosage rule).
+# ---------------------------------------------------------------------------
+
+class FinancialPreauthorization(Base):
+    """Preauthorisation + denial/appeal lifecycle -- one row per payer preauth request,
+    with an inline appeal trail rather than a separate appeal table, since an appeal is a
+    follow-up state on the same request, not an independently repeatable entity."""
+    __tablename__ = "cca_financial_preauthorizations"
+    id = Column(Integer, primary_key=True)
+    financial_case_id = Column(Integer, ForeignKey("cca_financial_cases.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    services_requested = Column(Text, nullable=False)
+    requested_amount = Column(String(100), nullable=True)
+    submitted_date = Column(Date, nullable=True)
+    status = Column(String(30), default="Submitted")  # Submitted, Approved, PartiallyApproved, Denied, PendingInfo
+    approved_amount = Column(String(100), nullable=True)
+    denial_reason = Column(Text, nullable=True)
+    decision_date = Column(Date, nullable=True)
+    appeal_submitted = Column(Boolean, default=False)
+    appeal_reason = Column(Text, nullable=True)
+    appeal_submitted_date = Column(Date, nullable=True)
+    appeal_status = Column(String(30), nullable=True)  # Pending, Upheld, Overturned
+    appeal_outcome_notes = Column(Text, nullable=True)
+    appeal_outcome_date = Column(Date, nullable=True)
+    submitted_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class BillableEventRecord(Base):
+    """Charge capture -- amount is always billing staff's own typed figure, never computed."""
+    __tablename__ = "cca_billable_event_records"
+    id = Column(Integer, primary_key=True)
+    financial_case_id = Column(Integer, ForeignKey("cca_financial_cases.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    service_description = Column(String(300), nullable=False)
+    service_date = Column(Date, nullable=True)
+    amount = Column(String(100), nullable=True)
+    linked_order_id = Column(Integer, ForeignKey("cca_orders.id"), nullable=True)
+    status = Column(String(30), default="Captured")  # Captured, Submitted, Paid, WrittenOff
+    captured_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class HighCostDrugApproval(Base):
+    __tablename__ = "cca_high_cost_drug_approvals"
+    id = Column(Integer, primary_key=True)
+    financial_case_id = Column(Integer, ForeignKey("cca_financial_cases.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    drug_name = Column(String(200), nullable=False)
+    estimated_cost = Column(String(100), nullable=True)
+    approval_status = Column(String(30), default="Pending")  # Pending, Approved, Denied
+    approving_body = Column(String(200), nullable=True)
+    approval_reference = Column(String(100), nullable=True)
+    decision_date = Column(Date, nullable=True)
+    requested_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ClaimRecord(Base):
+    __tablename__ = "cca_claim_records"
+    id = Column(Integer, primary_key=True)
+    financial_case_id = Column(Integer, ForeignKey("cca_financial_cases.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    claim_number = Column(String(100), nullable=True)
+    payer_name = Column(String(200), nullable=True)
+    submitted_date = Column(Date, nullable=True)
+    submitted_amount = Column(String(100), nullable=True)
+    status = Column(String(30), default="Submitted")  # Submitted, UnderReview, Approved, PartiallyApproved, Denied, Paid
+    paid_amount = Column(String(100), nullable=True)
+    payer_reference = Column(String(100), nullable=True)
+    submitted_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RefundCreditNote(Base):
+    __tablename__ = "cca_refund_credit_notes"
+    id = Column(Integer, primary_key=True)
+    financial_case_id = Column(Integer, ForeignKey("cca_financial_cases.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    amount = Column(String(100), nullable=False)
+    reason = Column(Text, nullable=False)
+    note_type = Column(String(20), default="Refund")  # Refund, Credit Note
+    status = Column(String(30), default="Requested")  # Requested, Approved, Issued
+    issued_date = Column(Date, nullable=True)
+    issued_by = Column(String(200), nullable=True)
+    requested_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class CCACoordinationCase(Base):
     """Patient Liaison / Care Coordinator workflow (13_Patient_Liaison_Care_Coordinator.pdf) --
     contact/appointment-navigation and drop-off-risk tracking. Care Milestones (Registration
