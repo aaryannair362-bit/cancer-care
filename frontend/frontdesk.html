@@ -625,6 +625,14 @@
                 </div>
                 <span class="nav-chevron">›</span>
             </a>
+
+            <a class="sidebar-nav-item" id="nav-referrals" onclick="showTab('referrals')">
+                <div class="nav-item-left">
+                    <span>📨</span>
+                    <span>Referrals</span>
+                </div>
+                <span class="nav-chevron">›</span>
+            </a>
         </aside>
 
         <!-- Main Workspace Canvas -->
@@ -692,30 +700,7 @@
                     <div>
                         <div class="section-card" style="padding: 16px;">
                             <div class="section-title" style="margin-bottom: 12px; font-size: 14px;">Front Desk Attention</div>
-                            <div class="attention-card">
-                                <span>⚠️ 2 patients waiting more than 20 minutes</span>
-                                <span>›</span>
-                            </div>
-                            <div class="attention-card">
-                                <span>⚠️ 3 registrations missing mandatory information</span>
-                                <span>›</span>
-                            </div>
-                            <div class="attention-card">
-                                <span>⚠️ 1 possible duplicate patient</span>
-                                <span>›</span>
-                            </div>
-                            <div class="attention-card">
-                                <span>⚠️ 2 referrals awaiting appointment</span>
-                                <span>›</span>
-                            </div>
-                            <div class="attention-card">
-                                <span>⚠️ 1 patient requested reschedule</span>
-                                <span>›</span>
-                            </div>
-                            <div class="attention-card">
-                                <span>⚠️ 3 appointments tomorrow not confirmed</span>
-                                <span>›</span>
-                            </div>
+                            <div id="fd-attention-live"><!-- Populated via JS: loadFrontDeskAttention() -- live counts, not demo text --></div>
                         </div>
 
                         <div class="section-card" style="padding: 16px;">
@@ -1240,6 +1225,13 @@
                 </div>
             </div>
 
+            <!-- ===== VIEW 4: REFERRALS (final gap-closing round, item 7) ===== -->
+            <div id="view-referrals" class="view-panel">
+                <h1 class="page-title">Referrals</h1>
+                <p class="page-subtitle">Referral intake state machine: New → Accepted / Rejected / More Info Required → Assigned.</p>
+                <div id="referrals-content"><!-- Populated via JS: loadReferralsView() --></div>
+            </div>
+
         </main>
     </div>
 
@@ -1260,6 +1252,7 @@
 
             if (tabName === 'overview') loadOverviewData();
             if (tabName === 'patients') loadFrontDeskPatientList();
+            if (tabName === 'referrals') loadReferralsView();
         }
 
         async function loadOverviewData() {
@@ -1273,6 +1266,110 @@
             } catch (err) {
                 renderSampleQueue();
             }
+            loadFrontDeskAttention();
+        }
+
+        // Final gap-closing round, item 7 -- replaces the previously-hardcoded Attention
+        // panel with live counts from the backend.
+        async function loadFrontDeskAttention() {
+            const host = document.getElementById('fd-attention-live');
+            try {
+                const a = await Api.get('/cca/front-desk/attention');
+                const items = [
+                    [a.registrations_missing_mandatory_info, 'registration(s) missing mandatory information', () => showTab('patients')],
+                    [a.possible_duplicate_patients, 'possible duplicate patient group(s)', () => showTab('patients')],
+                    [a.referrals_awaiting_triage, 'referral(s) awaiting triage', () => showTab('referrals')],
+                ];
+                host.innerHTML = items.map(([count, label, _]) => `
+                    <div class="attention-card" style="cursor:pointer;" onclick="showTab('${label.includes('referral') ? 'referrals' : 'patients'}')">
+                        <span>⚠️ ${count} ${label}</span>
+                        <span>›</span>
+                    </div>
+                `).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">Nothing needs attention.</p>';
+            } catch (err) {
+                host.innerHTML = `<p style="font-size:12px; color:var(--rose-badge-text);">${escapeHtml(apiErrorMessage(err))}</p>`;
+            }
+        }
+
+        const REFERRAL_STATUS_BADGE = { New: 'badge-amber', Accepted: 'badge-blue', Rejected: 'badge-rose', MoreInfo: 'badge-amber', Assigned: 'badge-green' };
+
+        async function loadReferralsView() {
+            const container = document.getElementById('referrals-content');
+            try {
+                const data = await Api.get('/cca/referrals');
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-head"><div class="section-title">New Referral</div></div>
+                        <div class="form-grid-2" style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+                            <div><label class="form-label" style="display:block; font-size:12px; font-weight:600; margin-bottom:6px;">Patient name *</label><input type="text" id="ref-name" class="form-input" style="width:100%; height:38px; padding:0 12px; border:1px solid var(--line); border-radius:6px;" /></div>
+                            <div><label class="form-label" style="display:block; font-size:12px; font-weight:600; margin-bottom:6px;">Priority</label><select id="ref-priority" class="form-select" style="width:100%; height:38px; border:1px solid var(--line); border-radius:6px;"><option>Routine</option><option>Urgent</option></select></div>
+                        </div>
+                        <div style="margin-bottom:16px;"><label class="form-label" style="display:block; font-size:12px; font-weight:600; margin-bottom:6px;">Referring source</label><input type="text" id="ref-source" class="form-input" style="width:100%; height:38px; padding:0 12px; border:1px solid var(--line); border-radius:6px;" /></div>
+                        <div style="margin-bottom:16px;"><label class="form-label" style="display:block; font-size:12px; font-weight:600; margin-bottom:6px;">Referral reason *</label><input type="text" id="ref-reason" class="form-input" style="width:100%; height:38px; padding:0 12px; border:1px solid var(--line); border-radius:6px;" /></div>
+                        <button class="btn-navy" onclick="submitCreateReferral()">Log Referral</button>
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title">Referral Queue</div>
+                        ${data.referrals.length ? data.referrals.map(r => `
+                            <div class="attention-card" style="display:block; cursor:default;">
+                                <div style="display:flex; justify-content:space-between; align-items:center;">
+                                    <strong>${escapeHtml(r.patient_name)}</strong>
+                                    <span class="badge ${REFERRAL_STATUS_BADGE[r.status] || 'badge-blue'}">${escapeHtml(r.status)}</span>
+                                </div>
+                                <div style="font-size:12px; color:var(--ink-500); margin:4px 0;">${escapeHtml(r.referral_reason)} — ${escapeHtml(r.priority)} — ${escapeHtml(r.referring_source || 'No source given')}</div>
+                                ${referralActionsHtml(r)}
+                            </div>
+                        `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No referrals logged.</p>'}
+                    </div>
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        function referralActionsHtml(r) {
+            if (r.status === 'New') return `<button class="btn-outline" onclick="submitReferralTransition(${r.id}, 'Accepted')">Accept</button> <button class="btn-outline" onclick="promptReferralReject(${r.id})">Reject</button> <button class="btn-outline" onclick="promptReferralMoreInfo(${r.id})">Request More Info</button>`;
+            if (r.status === 'MoreInfo') return `<button class="btn-outline" onclick="submitReferralTransition(${r.id}, 'Accepted')">Accept</button> <button class="btn-outline" onclick="promptReferralReject(${r.id})">Reject</button>`;
+            if (r.status === 'Accepted') return `<button class="btn-navy" onclick="promptReferralAssign(${r.id})">Assign to Patient</button>`;
+            return '';
+        }
+
+        async function submitCreateReferral() {
+            try {
+                await Api.post('/cca/referrals', {
+                    patient_name: document.getElementById('ref-name').value, priority: document.getElementById('ref-priority').value,
+                    referring_source: document.getElementById('ref-source').value || undefined, referral_reason: document.getElementById('ref-reason').value,
+                });
+                toast('Referral logged', 'success');
+                loadReferralsView();
+                loadFrontDeskAttention();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitReferralTransition(id, status, extra) {
+            try {
+                await Api.post(`/cca/referrals/${id}/transition`, Object.assign({ status }, extra || {}));
+                toast(`Referral moved to ${status}`, 'success');
+                loadReferralsView();
+                loadFrontDeskAttention();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function promptReferralReject(id) {
+            const reason = prompt('Reason for rejecting this referral:');
+            if (!reason) return;
+            submitReferralTransition(id, 'Rejected', { status_reason: reason });
+        }
+
+        function promptReferralMoreInfo(id) {
+            const reason = prompt('What information is missing?');
+            if (!reason) return;
+            submitReferralTransition(id, 'MoreInfo', { status_reason: reason });
+        }
+
+        function promptReferralAssign(id) {
+            const patientId = prompt('Patient ID to assign this referral to (register the patient first if needed):');
+            if (!patientId) return;
+            const assignedTo = prompt('Assigned to (department/clinician):') || undefined;
+            submitReferralTransition(id, 'Assigned', { patient_id: Number(patientId), assigned_to: assignedTo });
         }
 
         function renderSampleQueue() {

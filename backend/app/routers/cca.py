@@ -58,6 +58,7 @@ from ..models_cca import (
     SystemicTherapyHoldDecision, CumulativeDoseRecord, PharmacyReturnEvent, PharmacyRecallEvent,
     CancerEpisode, LineOfTherapy,
     MDTActionItem, MDTMeetingMinutes,
+    CCAReferral,
 )
 from ..cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
@@ -415,6 +416,153 @@ async def update_patient_data_per_visit(
             "phone": patient.phone, "age": patient.age, "sex": patient.sex,
             "journey_state": patient.journey_state,
         }
+    }
+
+
+# ---------------------------------------------------------
+# Referral intake state machine + duplicate-patient detection/merge + live Front Desk
+# Attention panel (gap review item 7, Registration module C.1) -- previously the referral
+# state machine didn't exist at all and the Attention panel was hardcoded demo text.
+# Duplicate detection is plain exact-match lookup (same phone, or same name+dob) within the
+# organization, never a fuzzy/scored match -- Front Desk reviews and confirms, this system
+# never auto-merges.
+# ---------------------------------------------------------
+
+_REFERRAL_TRANSITIONS = {
+    "New": {"Accepted", "Rejected", "MoreInfo"},
+    "MoreInfo": {"Accepted", "Rejected"},
+    "Accepted": {"Assigned"},
+}
+
+
+def _referral_dict(r: CCAReferral) -> dict:
+    return {
+        "id": r.id, "patient_id": r.patient_id, "patient_name": r.patient_name,
+        "referring_source": r.referring_source, "referral_reason": r.referral_reason,
+        "priority": r.priority, "status": r.status, "status_reason": r.status_reason,
+        "assigned_to": r.assigned_to, "received_by": r.received_by,
+        "received_at": r.received_at.isoformat() if r.received_at else None,
+    }
+
+
+@router.post("/referrals", status_code=201)
+async def create_referral(request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not (is_cca_front_desk(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only Front Desk or Admin may log a referral")
+    body = await request.json()
+    patient_name = (body.get("patient_name") or "").strip()
+    reason = (body.get("referral_reason") or "").strip()
+    if not (patient_name and reason):
+        raise HTTPException(422, "patient_name and referral_reason are required")
+    referral = CCAReferral(
+        organization_id=_org_id(current_user), patient_name=patient_name,
+        referring_source=body.get("referring_source"), referral_reason=reason,
+        priority=body.get("priority", "Routine"), received_by=_actor(current_user),
+    )
+    db.add(referral)
+    db.commit()
+    db.refresh(referral)
+    return {"status": "success", "referral": _referral_dict(referral)}
+
+
+@router.get("/referrals")
+def list_referrals(status: str = None, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    query = db.query(CCAReferral).filter(CCAReferral.organization_id == _org_id(current_user))
+    if status:
+        query = query.filter(CCAReferral.status == status)
+    rows = query.order_by(CCAReferral.id.desc()).all()
+    return {"referrals": [_referral_dict(r) for r in rows]}
+
+
+@router.post("/referrals/{id}/transition")
+async def transition_referral(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not (is_cca_front_desk(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only Front Desk or Admin may transition a referral")
+    referral = db.query(CCAReferral).filter(CCAReferral.id == id, CCAReferral.organization_id == _org_id(current_user)).first()
+    if not referral:
+        raise HTTPException(404, "Referral not found")
+    body = await request.json()
+    target = body.get("status")
+    allowed = _REFERRAL_TRANSITIONS.get(referral.status, set())
+    if target not in allowed:
+        raise HTTPException(409, f"Cannot move referral from {referral.status} to {target} (allowed: {sorted(allowed)})")
+    if target in ("Rejected", "MoreInfo") and not (body.get("status_reason") or "").strip():
+        raise HTTPException(422, "status_reason is required for Rejected/MoreInfo")
+    if target == "Assigned":
+        patient_id = body.get("patient_id")
+        if patient_id is None:
+            raise HTTPException(422, "patient_id is required to assign a referral")
+        _get_org_patient(db, patient_id, _org_id(current_user))
+        referral.patient_id = patient_id
+        referral.assigned_to = body.get("assigned_to")
+    referral.status = target
+    referral.status_reason = body.get("status_reason")
+    db.commit()
+    db.refresh(referral)
+    return {"status": "success", "referral": _referral_dict(referral)}
+
+
+@router.get("/patients/duplicate-candidates")
+def list_duplicate_candidates(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    org_id = _org_id(current_user)
+    patients = db.query(CCAPatient).filter(
+        CCAPatient.organization_id == org_id, CCAPatient.merged_into_patient_id.is_(None)
+    ).all()
+    by_phone: dict = {}
+    by_name_dob: dict = {}
+    for p in patients:
+        if p.phone:
+            by_phone.setdefault(p.phone.strip(), []).append(p)
+        if p.name and p.dob:
+            by_name_dob.setdefault((p.name.strip().lower(), p.dob), []).append(p)
+    groups = []
+    seen_ids = set()
+    for group in list(by_phone.values()) + list(by_name_dob.values()):
+        if len(group) < 2:
+            continue
+        ids = tuple(sorted(p.id for p in group))
+        if ids in seen_ids:
+            continue
+        seen_ids.add(ids)
+        groups.append([{"id": p.id, "mrn": p.mrn, "name": p.name, "phone": p.phone, "dob": p.dob} for p in group])
+    return {"duplicate_groups": groups}
+
+
+@router.post("/patients/{id}/merge-duplicate")
+async def merge_duplicate_patient(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not (is_cca_front_desk(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only Front Desk or Admin may merge a duplicate patient record")
+    org_id = _org_id(current_user)
+    duplicate = _get_org_patient(db, id, org_id)
+    body = await request.json()
+    primary_id = body.get("merge_into_patient_id")
+    if primary_id is None:
+        raise HTTPException(422, "merge_into_patient_id is required")
+    if primary_id == id:
+        raise HTTPException(422, "A patient cannot be merged into itself")
+    primary = _get_org_patient(db, primary_id, org_id)
+    duplicate.merged_into_patient_id = primary.id
+    duplicate.journey_state = "Merged"
+    db.commit()
+    return {"status": "success", "duplicate_patient_id": duplicate.id, "merged_into_patient_id": primary.id}
+
+
+@router.get("/front-desk/attention")
+def get_front_desk_attention(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Replaces the previously-hardcoded Front Desk Attention panel with live counts."""
+    org_id = _org_id(current_user)
+    referrals_awaiting = db.query(CCAReferral).filter(
+        CCAReferral.organization_id == org_id, CCAReferral.status == "New"
+    ).count()
+    patients = db.query(CCAPatient).filter(
+        CCAPatient.organization_id == org_id, CCAPatient.merged_into_patient_id.is_(None)
+    ).all()
+    missing_info_count = sum(1 for p in patients if not (p.phone and (p.dob or p.age) and p.sex))
+    duplicate_group_count = len(list_duplicate_candidates(db, current_user)["duplicate_groups"])
+    return {
+        "referrals_awaiting_triage": referrals_awaiting,
+        "registrations_missing_mandatory_info": missing_info_count,
+        "possible_duplicate_patients": duplicate_group_count,
     }
 
 

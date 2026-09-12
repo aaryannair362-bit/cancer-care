@@ -215,6 +215,9 @@ ADDITIVE_COLUMNS = [
     ("cca_treatment_plans", "line_of_therapy_id", "INTEGER"),
     ("cca_treatment_completions", "episode_id", "INTEGER"),
     ("cca_surveillance_plans", "episode_id", "INTEGER"),
+    # Final gap-closing round: Front Desk duplicate-merge (flag-and-link, not a full
+    # historical-record migration -- see CCAPatient.merged_into_patient_id's docstring).
+    ("cca_patients", "merged_into_patient_id", "INTEGER"),
 ]
 
 

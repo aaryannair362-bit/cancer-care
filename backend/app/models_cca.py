@@ -34,7 +34,39 @@ class CCAPatient(Base):
     id_proof_verification_status = Column(String(30))
     organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
     demo_flag = Column(Boolean, default=True)
+    # Duplicate-merge (gap review item 7, Registration module) -- set on the duplicate row,
+    # pointing at the primary record it was merged into. This is a flag-and-link merge for
+    # Front Desk triage, not a full historical-record migration: existing clinical rows
+    # under the duplicate's patient_id are NOT re-pointed. A true single-record consolidation
+    # is a separate, deliberate data-migration operation outside this pass's scope.
+    merged_into_patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Referral intake state machine (gap review item 7, Registration module C.1) --
+# New -> Accepted / Rejected / MoreInfo -> Assigned. Previously no referral concept existed
+# at all; a referred patient's provenance and triage state had nowhere to live. Org-scoped
+# rather than patient-scoped (like ClinicalMaster/PharmacyRecallEvent) since a referral
+# exists before any CCAPatient row does -- patient_id is only set once Assigned.
+# ---------------------------------------------------------------------------
+
+class CCAReferral(Base):
+    __tablename__ = "cca_referrals"
+    id = Column(Integer, primary_key=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=True)
+    patient_name = Column(String(200), nullable=False)
+    referring_source = Column(String(200), nullable=True)  # referring clinician/facility
+    referral_reason = Column(Text, nullable=False)
+    priority = Column(String(20), default="Routine")  # Routine, Urgent
+    status = Column(String(30), default="New")  # New, Accepted, Rejected, MoreInfo, Assigned
+    status_reason = Column(Text, nullable=True)  # required for Rejected/MoreInfo
+    assigned_to = Column(String(200), nullable=True)
+    received_by = Column(String(200))
+    received_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 
 class CCAConsent(Base):
     __tablename__ = "cca_consents"
