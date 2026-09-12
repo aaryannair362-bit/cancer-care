@@ -1785,10 +1785,21 @@
             el.style.display = 'block';
             el.innerHTML = 'Loading…';
             try {
-                const data = await Api.get(`${CCA_API}/radiation-phases/${phaseId}/fractions`);
+                const [data, dashboard] = await Promise.all([
+                    Api.get(`${CCA_API}/radiation-phases/${phaseId}/fractions`),
+                    Api.get(`${CCA_API}/radiation-phases/${phaseId}/cumulative-delivery`).catch(() => null),
+                ]);
                 const fractions = data.fractions || [];
-                const delivered = fractions.filter(f => f.status === 'delivered').length;
-                el.innerHTML = `<div style="font-size:12px; font-weight:700; margin-bottom:6px;">${delivered} of ${fractions.length} fractions delivered</div>` +
+                // Cumulative Delivery Dashboard (worklist/dashboard follow-up round, reference
+                // SCR-RTT-009) -- pure summation over these same fraction rows, computed
+                // server-side so it can't drift from what's shown per-fraction below.
+                const summaryLine = dashboard
+                    ? `${dashboard.fractions_delivered} of ${dashboard.fractions_total} delivered · ${dashboard.cumulative_delivered_dose_gy} of ${dashboard.total_prescribed_dose_gy} Gy` +
+                      (dashboard.fractions_missed ? ` · ${dashboard.fractions_missed} missed` : '') +
+                      (dashboard.open_interruption_count ? ` · <span style="color:var(--rose-badge-text);">${dashboard.open_interruption_count} open interruption</span>` : '') +
+                      (dashboard.dose_mismatches.length ? ` · <span style="color:var(--rose-badge-text);">${dashboard.dose_mismatches.length} dose mismatch flagged</span>` : '')
+                    : `${fractions.filter(f => f.status === 'delivered').length} of ${fractions.length} fractions delivered`;
+                el.innerHTML = `<div style="font-size:12px; font-weight:700; margin-bottom:6px;">${summaryLine}</div>` +
                     fractions.map(f => `<div style="font-size:12px; color:var(--ink-700); padding:3px 0;">#${f.fraction_number} — ${escapeHtml(f.status)}${f.delivered_dose_gy ? ' · ' + f.delivered_dose_gy + ' Gy' : ''}${f.variance_or_toxicity ? ' · ⚠ ' + escapeHtml(f.variance_or_toxicity) : ''}</div>`).join('');
             } catch (err) { el.innerHTML = `<p style="color:var(--rose-badge-text); font-size:12px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
         }

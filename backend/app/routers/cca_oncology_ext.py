@@ -640,6 +640,31 @@ def list_radiation_fractions(phase_id: int, db: Session = Depends(get_cca_db), c
     return {"fractions": [_rt_fraction_out(f) for f in rows]}
 
 
+@router.get("/radiation-phases/{phase_id}/cumulative-delivery")
+def get_cumulative_delivery(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Cumulative Delivery Dashboard (reference SCR-RTT-009, worklist/dashboard follow-up
+    round) -- pure summation/bookkeeping over data that already exists (fraction count,
+    each fraction's own delivered_dose_gy, the phase's own total_prescribed_dose_gy), never
+    a tolerance/threshold comparison against those totals (standing repo rule)."""
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    fractions = db.query(RadiationFraction).filter(RadiationFraction.phase_id == phase.id).order_by(RadiationFraction.fraction_number).all()
+    delivered = [f for f in fractions if f.status == "delivered"]
+    missed = [f for f in fractions if f.status == "missed"]
+    cumulative_delivered_dose_gy = sum(f.delivered_dose_gy for f in delivered if f.delivered_dose_gy is not None)
+    interruptions = db.query(RadiationInterruption).filter(RadiationInterruption.phase_id == phase.id).all()
+    open_interruptions = [i for i in interruptions if i.end_at is None]
+    return {
+        "phase_id": phase.id, "patient_id": rx.patient_id, "phase_label": phase.label,
+        "fractions_total": phase.number_of_fractions, "fractions_delivered": len(delivered),
+        "fractions_missed": len(missed), "fractions_remaining": max(phase.number_of_fractions - len(delivered) - len(missed), 0),
+        "total_prescribed_dose_gy": phase.total_prescribed_dose_gy,
+        "cumulative_delivered_dose_gy": cumulative_delivered_dose_gy,
+        "interruption_count": len(interruptions), "open_interruption_count": len(open_interruptions),
+        "dose_mismatches": [f.id for f in delivered if f.dose_match_confirmed is False],
+        "rt_sub_status": phase.rt_sub_status,
+    }
+
+
 @router.get("/radiation-phases/{phase_id}/interruptions")
 def list_radiation_interruptions(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     phase, _rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
