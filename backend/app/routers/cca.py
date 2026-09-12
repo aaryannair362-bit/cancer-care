@@ -1885,6 +1885,83 @@ def acknowledge_result(
 
 
 # ---------------------------------------------------------
+# Active critical-result communication (safety/dataflow-critical follow-up round -- reference
+# spec's pathology/radiology critical-finding communication). is_critical + acknowledged_by/at
+# already existed; this closes the gap between "flagged critical" and "someone was actually
+# told" -- generic on CCAResult so it covers pathology, radiology and lab alike.
+# ---------------------------------------------------------
+
+@router.post("/results/{id}/notify-critical")
+async def notify_critical_result(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    result = db.query(CCAResult).filter(CCAResult.id == id).first()
+    if not result:
+        raise HTTPException(404, "Result not found")
+    _check_patient_in_org(db, result.patient_id, _org_id(current_user))
+    if not result.is_critical:
+        raise HTTPException(409, "This result is not flagged critical")
+    body = await request.json()
+    notified_to = (body.get("notified_to") or "").strip()
+    method = (body.get("notification_method") or "").strip()
+    if not (notified_to and method):
+        raise HTTPException(422, "notified_to and notification_method are required")
+    actor = _actor(current_user)
+    result.critical_notified_to = notified_to
+    result.critical_notification_method = method
+    result.critical_acknowledged_by = actor
+    result.critical_acknowledged_at = datetime.utcnow()
+    if "escalation_required" in body:
+        result.critical_escalation_required = bool(body["escalation_required"])
+    publish(
+        db, "CRITICAL_RESULT_NOTIFIED", patient_id=result.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Critical result communicated: {result.title}", category="INVESTIGATION",
+        description=f"{actor} notified {notified_to} of a critical result via {method}.",
+        result_id=result.id,
+    )
+    db.commit()
+    return {"status": "success", "result": {
+        "id": result.id, "critical_notified_to": result.critical_notified_to,
+        "critical_notification_method": result.critical_notification_method,
+        "critical_acknowledged_by": result.critical_acknowledged_by,
+        "critical_acknowledged_at": result.critical_acknowledged_at.isoformat(),
+        "critical_escalation_required": bool(result.critical_escalation_required),
+    }}
+
+
+@router.post("/results/{id}/escalate-critical")
+async def escalate_critical_result(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    result = db.query(CCAResult).filter(CCAResult.id == id).first()
+    if not result:
+        raise HTTPException(404, "Result not found")
+    _check_patient_in_org(db, result.patient_id, _org_id(current_user))
+    if not result.is_critical:
+        raise HTTPException(409, "This result is not flagged critical")
+    body = await request.json()
+    escalated_to = (body.get("escalated_to") or "").strip()
+    if not escalated_to:
+        raise HTTPException(422, "escalated_to is required")
+    actor = _actor(current_user)
+    result.critical_escalated_to = escalated_to
+    result.critical_escalated_by = actor
+    result.critical_escalated_at = datetime.utcnow()
+    publish(
+        db, "CRITICAL_RESULT_ESCALATED", patient_id=result.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Critical result escalated: {result.title}", category="INVESTIGATION",
+        description=f"{actor} escalated an unactioned critical result to {escalated_to}.",
+        result_id=result.id,
+    )
+    db.commit()
+    return {"status": "success", "result": {
+        "id": result.id, "critical_escalated_to": result.critical_escalated_to,
+        "critical_escalated_by": result.critical_escalated_by,
+        "critical_escalated_at": result.critical_escalated_at.isoformat(),
+    }}
+
+
+# ---------------------------------------------------------
 # 6. Staging Workspace & Confirmation (SCR-17)
 # ---------------------------------------------------------
 

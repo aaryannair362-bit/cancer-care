@@ -22,7 +22,7 @@ from ..auth import (
     get_current_user, is_admin, is_cca_oncologist, is_cca_pathologist,
     is_cca_radiologist, is_cca_radiology_coordinator, is_cca_lab_phlebotomy,
 )
-from ..models_cca import CCAOrder, CCAResult, CCABiomarkerResult, CCAJourneyEvent, CCAPatient
+from ..models_cca import CCAOrder, CCAResult, CCABiomarkerResult, CCAJourneyEvent, CCAPatient, PathologySpecimenAccession
 from ..events import publish
 from .cca import get_cca_db, _org_id, _actor, _get_org_patient, _check_patient_in_org
 
@@ -259,7 +259,56 @@ def get_pathology_order(order_id: int, db: Session = Depends(get_cca_db), curren
     if order.order_type != "PATHOLOGY":
         raise HTTPException(404, "Not a pathology order")
     results = db.query(CCAResult).filter(CCAResult.order_id == order.id).order_by(CCAResult.resulted_at.desc()).all()
-    return {"order": _order_out(order), "results": [_result_out(r) for r in results]}
+    accession = db.query(PathologySpecimenAccession).filter(PathologySpecimenAccession.order_id == order.id).order_by(PathologySpecimenAccession.id.desc()).first()
+    return {"order": _order_out(order), "results": [_result_out(r) for r in results], "accession": _accession_out(accession) if accession else None}
+
+
+_ACCESSION_CONDITIONS = ("Intact", "Leaking", "Damaged Packaging", "Fixative Insufficient", "Other")
+
+
+def _accession_out(a: PathologySpecimenAccession) -> dict:
+    return {
+        "id": a.id, "order_id": a.order_id, "accession_number": a.accession_number,
+        "container_count": a.container_count, "condition_on_receipt": a.condition_on_receipt,
+        "labelling_concordant": bool(a.labelling_concordant), "discrepancy_note": a.discrepancy_note,
+        "status": a.status, "received_by": a.received_by, "received_at": a.received_at.isoformat() if a.received_at else None,
+    }
+
+
+@router.post("/pathology/orders/{order_id}/accession", status_code=201)
+async def accession_specimen(order_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Specimen Receipt & Accession (reference SCR-PAT-002, safety/dataflow-critical
+    follow-up round) -- the gate draft_pathology_report now checks before a report can be
+    started. A discrepancy (bad condition or labelling mismatch) quarantines the specimen
+    instead of accepting it, and requires a documented note."""
+    if not (is_cca_pathologist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Pathologist or Admin may accession a specimen")
+    org_id = _org_id(current_user)
+    order = _get_org_order(db, order_id, org_id)
+    if order.order_type != "PATHOLOGY":
+        raise HTTPException(404, "Not a pathology order")
+    body = await request.json()
+    accession_number = (body.get("accession_number") or "").strip()
+    if not accession_number:
+        raise HTTPException(422, "accession_number is required")
+    condition = body.get("condition_on_receipt")
+    if condition is not None and condition not in _ACCESSION_CONDITIONS:
+        raise HTTPException(422, f"condition_on_receipt must be one of {_ACCESSION_CONDITIONS}")
+    labelling_concordant = bool(body.get("labelling_concordant", True))
+    has_discrepancy = (not labelling_concordant) or (condition not in (None, "Intact"))
+    discrepancy_note = (body.get("discrepancy_note") or "").strip()
+    if has_discrepancy and not discrepancy_note:
+        raise HTTPException(422, "discrepancy_note is required when condition_on_receipt is not Intact or labelling is discordant")
+    accession = PathologySpecimenAccession(
+        order_id=order_id, patient_id=order.patient_id, accession_number=accession_number,
+        container_count=body.get("container_count"), condition_on_receipt=condition,
+        labelling_concordant=labelling_concordant, discrepancy_note=discrepancy_note or None,
+        status="QUARANTINED" if has_discrepancy else "ACCEPTED", received_by=_actor(current_user),
+    )
+    db.add(accession)
+    db.commit()
+    db.refresh(accession)
+    return {"status": "success", "accession": _accession_out(accession)}
 
 
 # Structured report fields the pathologist personally types (Product 1 vs Product 2 gap
@@ -302,6 +351,16 @@ async def draft_pathology_report(order_id: int, request: Request, db: Session = 
     order = _get_org_order(db, order_id, org_id)
     if order.order_type != "PATHOLOGY":
         raise HTTPException(404, "Not a pathology order")
+    # Specimen Receipt & Accession gate (reference SCR-PAT-002, safety/dataflow-critical
+    # follow-up round) -- a report cannot be drafted until the specimen has been accessioned
+    # and accepted (not quarantined for a discrepancy).
+    accession = db.query(PathologySpecimenAccession).filter(
+        PathologySpecimenAccession.order_id == order_id
+    ).order_by(PathologySpecimenAccession.id.desc()).first()
+    if not accession:
+        raise HTTPException(409, "Cannot draft a report: this specimen has not been accessioned yet")
+    if accession.status != "ACCEPTED":
+        raise HTTPException(409, f"Cannot draft a report: specimen accession is {accession.status}, not ACCEPTED")
     body = await request.json()
     structured_report = body.get("structured_report")
     _check_node_coherence(structured_report)

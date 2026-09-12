@@ -190,6 +190,14 @@ ADDITIVE_COLUMNS = [
     # and RTT toxicity linkage into the shared ToxicityEvent record (RTT-050).
     ("cca_radiation_phases", "physics_qa_waived_items", "JSON"),
     ("cca_radiation_fractions", "toxicity_event_id", "INTEGER"),
+    # Safety/dataflow-critical follow-up round: active critical-result communication chain
+    # on CCAResult (reference spec's pathology/radiology critical-finding communication).
+    ("cca_results", "critical_notified_to", "VARCHAR(200)"),
+    ("cca_results", "critical_notification_method", "VARCHAR(50)"),
+    ("cca_results", "critical_escalation_required", "BOOLEAN DEFAULT FALSE"),
+    ("cca_results", "critical_escalated_to", "VARCHAR(200)"),
+    ("cca_results", "critical_escalated_by", "VARCHAR(200)"),
+    ("cca_results", "critical_escalated_at", "TIMESTAMP"),
 ]
 
 

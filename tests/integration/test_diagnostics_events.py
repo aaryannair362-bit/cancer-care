@@ -76,6 +76,12 @@ def test_imaging_and_pathology_finalize_publish_domain_events(client, auth_heade
 
     path_order_id = _raise_order(db_session, patient_id, "PATHOLOGY")
     pathologist_headers = auth_headers(pathologist)
+    # Specimen Receipt & Accession (safety/dataflow-critical follow-up round, reference
+    # SCR-PAT-002) is now a hard precondition for drafting a pathology report.
+    accession = client.post(f"/api/cca/pathology/orders/{path_order_id}/accession", headers=pathologist_headers, json={
+        "accession_number": "S26-DIAGEVT-001", "condition_on_receipt": "Intact",
+    })
+    assert accession.status_code == 201, accession.text
     path_result_id = client.post(f"/api/cca/pathology/orders/{path_order_id}/report", headers=pathologist_headers, json={
         "findings_text": "Invasive ductal carcinoma.",
         "structured_report": {"site": "Left breast", "specimen": "Core needle biopsy", "histology": "IDC"},

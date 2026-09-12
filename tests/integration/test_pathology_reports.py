@@ -60,6 +60,16 @@ def _make_pathology_order(db_session, patient_id):
     return order
 
 
+def _accession_order(client, path_headers, order_id, accession_number="S26-00417"):
+    """Specimen Receipt & Accession (safety/dataflow-critical follow-up round, reference
+    SCR-PAT-002) is now a hard precondition for drafting a pathology report."""
+    r = client.post(f"/api/cca/pathology/orders/{order_id}/accession", headers=path_headers, json={
+        "accession_number": accession_number, "container_count": 1, "condition_on_receipt": "Intact",
+    })
+    assert r.status_code == 201, r.text
+    assert r.json()["accession"]["status"] == "ACCEPTED"
+
+
 _FULL_STRUCTURED_REPORT = {
     "site": "Left breast", "specimen": "Core needle biopsy", "accession": "S26-00417",
     "histology": "Invasive ductal carcinoma", "grade": "2", "tumour_size_mm": "18",
@@ -72,6 +82,7 @@ _FULL_STRUCTURED_REPORT = {
 def test_finalize_requires_site_specimen_and_histology(client, path_headers, db_session, oncologist):
     patient_id = _patient_id(db_session, oncologist.organization_id)
     order = _make_pathology_order(db_session, patient_id)
+    _accession_order(client, path_headers, order.id)
 
     incomplete = client.post(f"/api/cca/pathology/orders/{order.id}/report", headers=path_headers, json={
         "findings_text": "Pending full workup.", "structured_report": {"grade": "2"},
@@ -96,6 +107,7 @@ def test_finalize_requires_site_specimen_and_histology(client, path_headers, db_
 def test_node_coherence_check(client, path_headers, db_session, oncologist):
     patient_id = _patient_id(db_session, oncologist.organization_id)
     order = _make_pathology_order(db_session, patient_id)
+    _accession_order(client, path_headers, order.id)
 
     bad = dict(_FULL_STRUCTURED_REPORT, nodes_examined="2", nodes_positive="5")
     rejected = client.post(f"/api/cca/pathology/orders/{order.id}/report", headers=path_headers, json={
@@ -112,6 +124,7 @@ def test_node_coherence_check(client, path_headers, db_session, oncologist):
 def test_finalized_report_is_immutable_without_amendment_reason(client, path_headers, db_session, oncologist):
     patient_id = _patient_id(db_session, oncologist.organization_id)
     order = _make_pathology_order(db_session, patient_id)
+    _accession_order(client, path_headers, order.id)
 
     draft = client.post(f"/api/cca/pathology/orders/{order.id}/report", headers=path_headers, json={
         "findings_text": "Invasive ductal carcinoma.", "structured_report": _FULL_STRUCTURED_REPORT,
@@ -132,6 +145,7 @@ def test_finalized_report_is_immutable_without_amendment_reason(client, path_hea
 def test_amendment_creates_a_linked_record_and_supersedes_the_original(client, path_headers, db_session, oncologist):
     patient_id = _patient_id(db_session, oncologist.organization_id)
     order = _make_pathology_order(db_session, patient_id)
+    _accession_order(client, path_headers, order.id)
 
     draft = client.post(f"/api/cca/pathology/orders/{order.id}/report", headers=path_headers, json={
         "findings_text": "Invasive ductal carcinoma, grade 2.", "structured_report": _FULL_STRUCTURED_REPORT,

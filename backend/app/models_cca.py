@@ -306,8 +306,19 @@ class CCAResult(Base):
     report_status = Column(String(30), default="Draft")  # Draft|Finalized|Superseded -- "No autonomous final report"
     finalized_by = Column(String(200), nullable=True)
     finalized_at = Column(DateTime, nullable=True)
+    # critical_acknowledged_by/at were declared but never written anywhere in this codebase
+    # until now (safety/dataflow-critical follow-up round) -- repurposed as intended by their
+    # name: who actively notified someone of a critical result, and when, via
+    # POST /results/{id}/notify-critical, distinct from the generic /acknowledge endpoint's
+    # own acknowledged_by/at (any clinician reviewing any result, critical or not).
     critical_acknowledged_by = Column(String(200), nullable=True)
     critical_acknowledged_at = Column(DateTime, nullable=True)
+    critical_notified_to = Column(String(200), nullable=True)
+    critical_notification_method = Column(String(50), nullable=True)  # Phone, In-Person, Secure Message, Other
+    critical_escalation_required = Column(Boolean, default=False)
+    critical_escalated_to = Column(String(200), nullable=True)
+    critical_escalated_by = Column(String(200), nullable=True)
+    critical_escalated_at = Column(DateTime, nullable=True)
     # Amendment/immutability (Product 1 vs Product 2 gap report, Batch 6: Pathology) -- once
     # Finalized, a report is immutable; a further edit must go through the amendment path
     # instead, which creates a NEW linked row rather than mutating the finalized one, so the
@@ -1973,3 +1984,23 @@ class PharmacyRecallEvent(Base):
     initiated_at = Column(DateTime, default=datetime.utcnow)
     closed_by = Column(String(200), nullable=True)
     closed_at = Column(DateTime, nullable=True)
+
+
+class PathologySpecimenAccession(Base):
+    """Specimen Receipt & Accession (reference SCR-PAT-002) -- gates pathology report
+    drafting: draft_pathology_report (routers/cca_diagnostics.py) now requires an ACCEPTED
+    accession to exist for the order before a report can be started, closing the safety gap
+    where nothing verified the right specimen was received before processing began.
+    condition_on_receipt/discrepancy_note are pathologist/technician-typed, never computed."""
+    __tablename__ = "cca_pathology_specimen_accessions"
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("cca_orders.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    accession_number = Column(String(100), nullable=False)
+    container_count = Column(Integer, nullable=True)
+    condition_on_receipt = Column(String(100), nullable=True)  # Intact, Leaking, Damaged Packaging, Fixative Insufficient, Other
+    labelling_concordant = Column(Boolean, default=True)
+    discrepancy_note = Column(Text, nullable=True)
+    status = Column(String(30), default="ACCEPTED")  # ACCEPTED, QUARANTINED
+    received_by = Column(String(200))
+    received_at = Column(DateTime, default=datetime.utcnow)

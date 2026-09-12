@@ -105,6 +105,12 @@ def test_pathology_report_and_finalize(client, auth_headers, db_session, oncolog
     patient_id = _patient_id(db_session, oncologist.organization_id)
     order = _make_order(db_session, patient_id, "PATHOLOGY", item_name="Core Biopsy")
     path_headers = auth_headers(pathologist)
+    # Specimen Receipt & Accession (safety/dataflow-critical follow-up round, reference
+    # SCR-PAT-002) is now a hard precondition for drafting a pathology report.
+    accession = client.post(f"/api/cca/pathology/orders/{order.id}/accession", headers=path_headers, json={
+        "accession_number": "S26-DIAGMOD-001", "condition_on_receipt": "Intact",
+    })
+    assert accession.status_code == 201, accession.text
 
     draft = client.post(f"/api/cca/pathology/orders/{order.id}/report", headers=path_headers, json={
         "findings_text": "Invasive ductal carcinoma.",
