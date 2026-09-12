@@ -142,6 +142,34 @@
         <thead><tr><th>Time</th><th>Patient</th><th>Category</th><th>Event</th><th>Actor</th><th>Description</th></tr></thead>
         <tbody id="audit-table-body"></tbody>
     </table>
+
+    <h1 style="margin-top:32px;">🗂️ Clinical Masters</h1>
+    <p style="color:var(--ink-500);margin-bottom:16px;">Facility/department/roster/formulary/lab/radiology/surgery/pathology/consent/value-set/unit reference catalogues. Draft &rarr; Publish &rarr; Retire — a published version is never edited in place; a change creates a new version instead.</p>
+    <div class="flex">
+        <select id="master-type-select">
+            <option value="FACILITY">Facility / Location</option>
+            <option value="DEPARTMENT">Department / Service</option>
+            <option value="CLINICIAN_ROSTER">Clinician / Roster</option>
+            <option value="FORMULARY">Formulary</option>
+            <option value="LAB_CATALOGUE">Laboratory Catalogue &amp; Unit</option>
+            <option value="RADIOLOGY_PROTOCOL">Radiology Catalogue / Protocol</option>
+            <option value="SURGERY_TEMPLATE">Surgery Procedure / Template</option>
+            <option value="PATHOLOGY_SYNOPTIC_TEMPLATE">Pathology Synoptic Template</option>
+            <option value="CONSENT_TEMPLATE">Consent / Document Template</option>
+            <option value="VALUE_SET">Value Set / Terminology</option>
+            <option value="UNIT_NORMALIZATION">Unit / Normalisation</option>
+        </select>
+        <input type="text" id="master-name" placeholder="Name, e.g. &quot;Main Campus&quot;" />
+        <input type="text" id="master-owner" placeholder="Owner / approving authority" />
+        <button id="create-master-btn" class="btn-primary">Create Draft</button>
+        <button id="master-filter-btn" class="btn-outline">Filter by Type</button>
+        <button id="master-refresh-btn" class="btn-outline">Refresh</button>
+    </div>
+    <table>
+        <thead><tr><th>Type</th><th>Name</th><th>Version</th><th>Status</th><th>Owner</th><th>Action</th></tr></thead>
+        <tbody id="master-table-body"></tbody>
+    </table>
+    <div id="master-detail" style="margin-top:16px;"></div>
 </div>
 <script>
 const ALL_ROLES = [
@@ -478,9 +506,114 @@ document.getElementById('audit-refresh-btn').addEventListener('click', () => {
     loadCcaAudit();
 });
 
+// ---------------------------------------------------------------
+// Clinical Masters / Administration (Product 1 vs Product 2 gap report, Batch 10)
+// ---------------------------------------------------------------
+let selectedMasterId = null;
+
+async function loadClinicalMasters(filterByType) {
+    const tbody = document.getElementById('master-table-body');
+    try {
+        const qs = filterByType ? `?master_type=${document.getElementById('master-type-select').value}` : '';
+        const res = await apiRequest(`/cca/clinical-masters${qs}`);
+        if (!res.ok) { showMessage('Failed to load clinical masters', 'error'); return; }
+        const data = await res.json();
+        const masters = data.masters || [];
+        if (!masters.length) {
+            tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--ink-400);">No masters yet</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = masters.map(m => `
+            <tr>
+                <td>${m.master_type}</td>
+                <td><a href="#" onclick="viewMasterDetail(${m.id}); return false;">${m.name}</a></td>
+                <td>v${m.version}</td>
+                <td>${m.status}</td>
+                <td>${m.owner || '—'}</td>
+                <td>
+                    ${m.status === 'DRAFT' ? `<button class="btn-primary publish-master" data-id="${m.id}">Publish</button>` : ''}
+                    ${m.status === 'PUBLISHED' ? `<button class="btn-outline retire-master" data-id="${m.id}">Retire</button>` : ''}
+                </td>
+            </tr>
+        `).join('');
+        document.querySelectorAll('.publish-master').forEach(btn => btn.addEventListener('click', () => publishMaster(btn.dataset.id)));
+        document.querySelectorAll('.retire-master').forEach(btn => btn.addEventListener('click', () => retireMaster(btn.dataset.id)));
+    } catch (err) { showMessage('Failed to load clinical masters', 'error'); }
+}
+
+async function createMaster() {
+    const name = document.getElementById('master-name').value.trim();
+    if (!name) { showMessage('Name is required', 'error'); return; }
+    const res = await apiRequest('/cca/clinical-masters', {
+        method: 'POST',
+        body: JSON.stringify({
+            master_type: document.getElementById('master-type-select').value, name,
+            owner: document.getElementById('master-owner').value || null,
+        }),
+    });
+    if (res.ok) {
+        showMessage('Draft master created', 'success');
+        document.getElementById('master-name').value = '';
+        loadClinicalMasters(false);
+    } else {
+        const err = await res.json();
+        showMessage(err.detail || 'Failed to create master', 'error');
+    }
+}
+
+async function publishMaster(id) {
+    const res = await apiRequest(`/cca/clinical-masters/${id}/publish`, { method: 'POST' });
+    if (res.ok) { showMessage('Master published', 'success'); loadClinicalMasters(false); }
+    else { const err = await res.json(); showMessage(err.detail || 'Failed to publish', 'error'); }
+}
+
+async function retireMaster(id) {
+    const res = await apiRequest(`/cca/clinical-masters/${id}/retire`, { method: 'POST' });
+    if (res.ok) { showMessage('Master retired', 'success'); loadClinicalMasters(false); }
+    else { const err = await res.json(); showMessage(err.detail || 'Failed to retire', 'error'); }
+}
+
+async function viewMasterDetail(id) {
+    selectedMasterId = id;
+    const res = await apiRequest(`/cca/clinical-masters/${id}`);
+    if (!res.ok) { showMessage('Failed to load master detail', 'error'); return; }
+    const data = await res.json();
+    const isDraft = data.master.status === 'DRAFT';
+    document.getElementById('master-detail').innerHTML = `
+        <h2 style="font-size:15px; font-weight:700; color:var(--ink-900); margin-bottom:10px;">${data.master.name} — Items</h2>
+        <table style="margin-bottom:12px;">
+            <thead><tr><th>#</th><th>Fields (JSON)</th></tr></thead>
+            <tbody>
+                ${data.items.length ? data.items.map(i => `<tr><td>${i.sequence_number}</td><td><code>${JSON.stringify(i.fields)}</code></td></tr>`).join('') : '<tr><td colspan="2" style="text-align:center;color:var(--ink-400);">No items yet</td></tr>'}
+            </tbody>
+        </table>
+        ${isDraft ? `
+        <div class="flex">
+            <input type="text" id="item-fields-json" placeholder='{"code":"...", "name":"..."}' style="flex:2;" />
+            <button class="btn-primary" onclick="addMasterItem()">Add Item</button>
+        </div>` : '<p style="color:var(--ink-500);">Published/retired masters are immutable — create a new draft version to change items.</p>'}
+    `;
+}
+
+async function addMasterItem() {
+    let fields;
+    try { fields = JSON.parse(document.getElementById('item-fields-json').value); }
+    catch (e) { showMessage('Fields must be valid JSON', 'error'); return; }
+    const res = await apiRequest(`/cca/clinical-masters/${selectedMasterId}/items`, {
+        method: 'POST', body: JSON.stringify({ fields }),
+    });
+    if (res.ok) { showMessage('Item added', 'success'); viewMasterDetail(selectedMasterId); }
+    else { const err = await res.json(); showMessage(err.detail || 'Failed to add item', 'error'); }
+}
+
+document.getElementById('create-master-btn').addEventListener('click', createMaster);
+document.getElementById('master-filter-btn').addEventListener('click', () => loadClinicalMasters(true));
+document.getElementById('master-refresh-btn').addEventListener('click', () => loadClinicalMasters(false));
+
 verifyAdmin().then(() => {
     loadUsers(); loadCustomMedicines(); loadCustomLabTests();
     loadCcaOperationsDashboard(); loadCcaTreatmentAnalytics(); loadCcaAudit();
+    loadClinicalMasters(false);
 });
 </script>
 </body>

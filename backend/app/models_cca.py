@@ -1800,3 +1800,65 @@ class OralTherapyHoldEvent(Base):
     patient_notification_status = Column(String(30), default="HOLD_NOT_COMMUNICATED")  # HOLD_NOT_COMMUNICATED, COMMUNICATED
     created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Clinical Masters / Administration (Product 1 vs Product 2 gap report, Batch 10: C.26).
+#
+# The reference spec's 18 SCR-ADM-* screens all share one shape (identity/status/version/
+# effective-dates/owner/change-reason + a repeatable-items table) -- rather than 18
+# near-duplicate tables, this is one generic ClinicalMaster/ClinicalMasterItem pair keyed
+# by a master_type discriminator, matching the pattern this codebase already uses for
+# exactly this kind of "many small variants of one shape" problem (see
+# OncologyRecordExtension's docstring in models_cca_oncology_ext.py).
+#
+# Deliberately NOT built here, all for the same reason (standing repo rule: no
+# dose-calculation/threshold/rule-engine logic):
+#   - Dose Modification & Rounding Rule Master (SCR-ADM-008) -- entirely a dose-threshold
+#     rule engine, skipped outright rather than built hollow.
+#   - The "Dose modification rules" and "Readiness rules" sub-tables of the Regimen Master
+#     (SCR-ADM-005) and Treatment Readiness Rule Master (SCR-ADM-007) -- trigger/threshold/
+#     action rule engines. Regimen identity fields already exist as Regimen/RegimenDrugLine.
+#   - OAR constraint value/operator/threshold rows (SCR-ADM-011) and Alert/Escalation Rule
+#     trigger-expression/hard-stop rows (SCR-ADM-017).
+#   - User/Role/Permission Administration (SCR-ADM-001) -- already covered by this
+#     codebase's existing RBAC (rbac_projection.py).
+# ---------------------------------------------------------------------------
+
+class ClinicalMaster(Base):
+    """One master-data catalogue (Facility, Department, Clinician/Roster, Formulary, Lab
+    Catalogue, Radiology Protocol, Surgery Template, Pathology Synoptic Template, Consent
+    Template, Value Set, or Unit Normalisation -- see CLINICAL_MASTER_TYPES in
+    routers/cca.py). Versioned the same way TreatmentPlan is: DRAFT -> PUBLISHED, with a
+    new row (never an in-place edit to a published version) for any subsequent revision."""
+    __tablename__ = "cca_clinical_masters"
+    id = Column(Integer, primary_key=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    master_type = Column(String(50), nullable=False)
+    name = Column(String(200), nullable=False)
+    status = Column(String(30), default="DRAFT")  # DRAFT, PUBLISHED, RETIRED
+    version = Column(Integer, default=1)
+    supersedes_id = Column(Integer, ForeignKey("cca_clinical_masters.id"), nullable=True)
+    effective_from = Column(Date, nullable=True)
+    effective_to = Column(Date, nullable=True)
+    owner = Column(String(200), nullable=True)
+    change_reason = Column(Text, nullable=True)
+    published_by = Column(String(200), nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ClinicalMasterItem(Base):
+    """One repeatable row within a ClinicalMaster's items table (e.g. one location under a
+    Facility Master, one drug under a Formulary Master). `fields` is a JSON blob rather
+    than fixed columns because the repeatable-row schema differs per master_type -- a fixed
+    schema per type would mean 11 more near-duplicate tables for the same reason
+    ClinicalMaster itself avoids 18."""
+    __tablename__ = "cca_clinical_master_items"
+    id = Column(Integer, primary_key=True)
+    master_id = Column(Integer, ForeignKey("cca_clinical_masters.id"), nullable=False)
+    sequence_number = Column(Integer, default=1)
+    fields = Column(JSON, nullable=False)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)

@@ -53,6 +53,7 @@ from ..models_cca import (
     SurvivorshipReferral,
     OralTherapyPrescription, OralTherapyCounselling, OralTherapyDispensing,
     OralTherapyReview, OralTherapyHoldEvent,
+    ClinicalMaster, ClinicalMasterItem,
 )
 from ..cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
@@ -7027,6 +7028,212 @@ def confirm_oral_therapy_hold_contact(id: int, db: Session = Depends(get_cca_db)
     db.commit()
     db.refresh(row)
     return {"status": "success", "hold_event": _oral_hold_event_dict(row)}
+
+
+# ---------------------------------------------------------
+# Clinical Masters / Administration (Product 1 vs Product 2 gap report, Batch 10: C.26).
+# See ClinicalMaster's docstring in models_cca.py for the generic master_type design and
+# what's deliberately excluded (dose/threshold/rule-engine masters).
+# ---------------------------------------------------------
+
+CLINICAL_MASTER_TYPES = (
+    "FACILITY", "DEPARTMENT", "CLINICIAN_ROSTER", "FORMULARY", "LAB_CATALOGUE",
+    "RADIOLOGY_PROTOCOL", "SURGERY_TEMPLATE", "PATHOLOGY_SYNOPTIC_TEMPLATE",
+    "CONSENT_TEMPLATE", "VALUE_SET", "UNIT_NORMALIZATION",
+)
+
+
+def _clinical_master_dict(m: ClinicalMaster) -> dict:
+    return {
+        "id": m.id, "master_type": m.master_type, "name": m.name, "status": m.status,
+        "version": m.version, "supersedes_id": m.supersedes_id,
+        "effective_from": m.effective_from.isoformat() if m.effective_from else None,
+        "effective_to": m.effective_to.isoformat() if m.effective_to else None,
+        "owner": m.owner, "change_reason": m.change_reason,
+        "published_by": m.published_by, "published_at": m.published_at.isoformat() if m.published_at else None,
+        "created_by": m.created_by, "created_at": m.created_at.isoformat() if m.created_at else None,
+    }
+
+
+def _clinical_master_item_dict(i: ClinicalMasterItem) -> dict:
+    return {"id": i.id, "master_id": i.master_id, "sequence_number": i.sequence_number, "fields": i.fields}
+
+
+@router.post("/clinical-masters")
+async def create_clinical_master(
+    request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    if not is_admin(current_user):
+        raise HTTPException(403, "Only Admin may create a clinical master")
+    org_id = _org_id(current_user)
+    body = await request.json()
+    master_type = body.get("master_type")
+    name = (body.get("name") or "").strip()
+    if master_type not in CLINICAL_MASTER_TYPES:
+        raise HTTPException(422, f"master_type must be one of {', '.join(CLINICAL_MASTER_TYPES)}")
+    if not name:
+        raise HTTPException(422, "name is required")
+
+    supersedes_id = body.get("supersedes_id")
+    version = 1
+    if supersedes_id is not None:
+        prior = db.query(ClinicalMaster).filter(ClinicalMaster.id == supersedes_id, ClinicalMaster.organization_id == org_id).first()
+        if not prior:
+            raise HTTPException(422, "supersedes_id must reference an existing master in this organization")
+        version = prior.version + 1
+
+    def _parse_date(key):
+        value = body.get(key)
+        return datetime.fromisoformat(value).date() if value else None
+
+    master = ClinicalMaster(
+        organization_id=org_id, master_type=master_type, name=name, version=version, supersedes_id=supersedes_id,
+        effective_from=_parse_date("effective_from"), effective_to=_parse_date("effective_to"),
+        owner=body.get("owner"), change_reason=body.get("change_reason"), created_by=_actor(current_user),
+    )
+    db.add(master)
+    db.commit()
+    db.refresh(master)
+    return {"status": "success", "master": _clinical_master_dict(master)}
+
+
+@router.put("/clinical-masters/{id}")
+async def update_clinical_master(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    if not is_admin(current_user):
+        raise HTTPException(403, "Only Admin may edit a clinical master")
+    org_id = _org_id(current_user)
+    master = db.query(ClinicalMaster).filter(ClinicalMaster.id == id, ClinicalMaster.organization_id == org_id).first()
+    if not master:
+        raise HTTPException(404, "Clinical master not found")
+    if master.status != "DRAFT":
+        raise HTTPException(409, "Only a DRAFT master can be edited -- publish a new version instead")
+    body = await request.json()
+    for field in ("name", "owner", "change_reason"):
+        if field in body:
+            setattr(master, field, body[field])
+    if body.get("effective_from"):
+        master.effective_from = datetime.fromisoformat(body["effective_from"]).date()
+    if body.get("effective_to"):
+        master.effective_to = datetime.fromisoformat(body["effective_to"]).date()
+    db.commit()
+    db.refresh(master)
+    return {"status": "success", "master": _clinical_master_dict(master)}
+
+
+@router.post("/clinical-masters/{id}/publish")
+def publish_clinical_master(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Publish/Release (SCR-ADM-018's essence) -- reuses the existing DomainEvent audit
+    table for the release record rather than a new Configuration Release table, per
+    ClinicalMaster's docstring."""
+    if not is_admin(current_user):
+        raise HTTPException(403, "Only Admin may publish a clinical master")
+    org_id = _org_id(current_user)
+    master = db.query(ClinicalMaster).filter(ClinicalMaster.id == id, ClinicalMaster.organization_id == org_id).first()
+    if not master:
+        raise HTTPException(404, "Clinical master not found")
+    if master.status != "DRAFT":
+        raise HTTPException(409, f"Only a DRAFT master can be published (current status: {master.status})")
+    actor = _actor(current_user)
+    master.status = "PUBLISHED"
+    master.published_by = actor
+    master.published_at = datetime.utcnow()
+    if master.supersedes_id:
+        prior = db.query(ClinicalMaster).filter(ClinicalMaster.id == master.supersedes_id).first()
+        if prior and prior.status == "PUBLISHED":
+            prior.status = "RETIRED"
+    publish(
+        db, "CLINICAL_MASTER_PUBLISHED", actor=actor, role=current_user.get("role"),
+        title=f"Clinical master published: {master.master_type} / {master.name}", category="ADMINISTRATION",
+        description=f"{actor} published {master.master_type} master '{master.name}' (v{master.version}).",
+        master_id=master.id, master_type=master.master_type,
+    )
+    db.commit()
+    db.refresh(master)
+    return {"status": "success", "master": _clinical_master_dict(master)}
+
+
+@router.post("/clinical-masters/{id}/retire")
+def retire_clinical_master(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not is_admin(current_user):
+        raise HTTPException(403, "Only Admin may retire a clinical master")
+    org_id = _org_id(current_user)
+    master = db.query(ClinicalMaster).filter(ClinicalMaster.id == id, ClinicalMaster.organization_id == org_id).first()
+    if not master:
+        raise HTTPException(404, "Clinical master not found")
+    if master.status != "PUBLISHED":
+        raise HTTPException(409, "Only a PUBLISHED master can be retired")
+    master.status = "RETIRED"
+    db.commit()
+    db.refresh(master)
+    return {"status": "success", "master": _clinical_master_dict(master)}
+
+
+@router.get("/clinical-masters/{id}")
+def get_clinical_master(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    org_id = _org_id(current_user)
+    master = db.query(ClinicalMaster).filter(ClinicalMaster.id == id, ClinicalMaster.organization_id == org_id).first()
+    if not master:
+        raise HTTPException(404, "Clinical master not found")
+    items = db.query(ClinicalMasterItem).filter(ClinicalMasterItem.master_id == id).order_by(ClinicalMasterItem.sequence_number.asc()).all()
+    return {"master": _clinical_master_dict(master), "items": [_clinical_master_item_dict(i) for i in items]}
+
+
+@router.get("/clinical-masters")
+def list_clinical_masters(
+    master_type: Optional[str] = None, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    org_id = _org_id(current_user)
+    query = db.query(ClinicalMaster).filter(ClinicalMaster.organization_id == org_id)
+    if master_type:
+        query = query.filter(ClinicalMaster.master_type == master_type)
+    rows = query.order_by(ClinicalMaster.master_type.asc(), ClinicalMaster.id.desc()).all()
+    return {"masters": [_clinical_master_dict(m) for m in rows]}
+
+
+@router.post("/clinical-masters/{id}/items")
+async def add_clinical_master_item(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    if not is_admin(current_user):
+        raise HTTPException(403, "Only Admin may edit a clinical master's items")
+    org_id = _org_id(current_user)
+    master = db.query(ClinicalMaster).filter(ClinicalMaster.id == id, ClinicalMaster.organization_id == org_id).first()
+    if not master:
+        raise HTTPException(404, "Clinical master not found")
+    if master.status != "DRAFT":
+        raise HTTPException(409, "Only a DRAFT master's items can be edited -- publish a new version instead")
+    body = await request.json()
+    fields = body.get("fields")
+    if not isinstance(fields, dict) or not fields:
+        raise HTTPException(422, "fields must be a non-empty object")
+    item = ClinicalMasterItem(
+        master_id=id, sequence_number=_coerce_int(body, "sequence_number", 1), fields=fields,
+        created_by=_actor(current_user),
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return {"status": "success", "item": _clinical_master_item_dict(item)}
+
+
+@router.delete("/clinical-master-items/{id}")
+def delete_clinical_master_item(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not is_admin(current_user):
+        raise HTTPException(403, "Only Admin may edit a clinical master's items")
+    org_id = _org_id(current_user)
+    item = db.query(ClinicalMasterItem).filter(ClinicalMasterItem.id == id).first()
+    if not item:
+        raise HTTPException(404, "Item not found")
+    master = db.query(ClinicalMaster).filter(ClinicalMaster.id == item.master_id, ClinicalMaster.organization_id == org_id).first()
+    if not master:
+        raise HTTPException(404, "Item not found")
+    if master.status != "DRAFT":
+        raise HTTPException(409, "Only a DRAFT master's items can be edited -- publish a new version instead")
+    db.delete(item)
+    db.commit()
+    return {"status": "success"}
 
 
 # ---------------------------------------------------------
