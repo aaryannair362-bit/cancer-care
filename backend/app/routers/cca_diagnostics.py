@@ -22,7 +22,12 @@ from ..auth import (
     get_current_user, is_admin, is_cca_oncologist, is_cca_pathologist,
     is_cca_radiologist, is_cca_radiology_coordinator, is_cca_lab_phlebotomy,
 )
-from ..models_cca import CCAOrder, CCAResult, CCABiomarkerResult, CCAJourneyEvent, CCAPatient, PathologySpecimenAccession
+from ..models_cca import (
+    CCAOrder, CCAResult, CCABiomarkerResult, CCAJourneyEvent, CCAPatient, PathologySpecimenAccession,
+    TreatmentPlan, TreatmentOrder,
+    PathologyBlockSlide, PathologyCustodyEvent, PathologyFrozenSection, PathologySecondOpinion,
+    PathologyMdtReviewNote,
+)
 from ..events import publish
 from .cca import get_cca_db, _org_id, _actor, _get_org_patient, _check_patient_in_org
 
@@ -481,6 +486,368 @@ def finalize_pathology_report(result_id: int, db: Session = Depends(get_cca_db),
     db.commit()
     db.refresh(result)
     return {"status": "success", "result": _result_out(result)}
+
+
+@router.get("/pathology/orders/{order_id}/neoadjuvant-context")
+def get_neoadjuvant_context(order_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """The Pathological Treatment Response screen's (reference SCR-PAT-008) "read-only/
+    derived" section -- feature completion round. No new table needed: response_grading_
+    system/response_grade_category/pathologic_complete_response are pathologist-typed
+    keys within CCAResult.structured_report, the same free-form JSON every other synoptic
+    field already uses (nothing restricts which keys may be stored there). This endpoint
+    supplies only the neoadjuvant-therapy context, computed at read time from existing
+    TreatmentPlan/TreatmentOrder rows, never a second copy of that data."""
+    _require_diagnostics_read(current_user, is_cca_pathologist)
+    order = _get_org_order(db, order_id, _org_id(current_user))
+    plans = db.query(TreatmentPlan).filter(TreatmentPlan.patient_id == order.patient_id, TreatmentPlan.intent.ilike("%neoadjuvant%")).order_by(TreatmentPlan.id.desc()).all()
+    if not plans:
+        return {"neoadjuvant_therapy_received": False, "therapy_completion_date": None, "interval_to_specimen_days": None, "neoadjuvant_treatment_summary": None}
+    latest_plan = plans[0]
+    last_order = db.query(TreatmentOrder).filter(TreatmentOrder.treatment_plan_id == latest_plan.id).order_by(TreatmentOrder.id.desc()).first()
+    completion_date = last_order.signed_at.date() if last_order and last_order.signed_at else None
+    interval_days = (order.ordered_at.date() - completion_date).days if (completion_date and order.ordered_at) else None
+    return {
+        "neoadjuvant_therapy_received": True,
+        "neoadjuvant_treatment_summary": f"{latest_plan.modality} ({latest_plan.protocol_name or 'protocol not recorded'})",
+        "therapy_completion_date": completion_date.isoformat() if completion_date else None,
+        "interval_to_specimen_days": interval_days,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Feature completion round: Block/Slide registry, Archive/Custody, Frozen Section, Second
+# Opinion/External Review, Pathology MDT Review Note (reference SCR-PAT-004/017/012/013/016).
+# ---------------------------------------------------------------------------
+
+def _block_slide_out(b: PathologyBlockSlide) -> dict:
+    return {
+        "id": b.id, "order_id": b.order_id, "patient_id": b.patient_id, "item_type": b.item_type,
+        "block_or_slide_id": b.block_or_slide_id, "tissue": b.tissue, "processing_status": b.processing_status,
+        "stain": b.stain, "qc_status": b.qc_status, "location": b.location, "assigned_to": b.assigned_to,
+    }
+
+
+_BLOCK_SLIDE_PROCESSING_STATUSES = ("Pending", "Processing", "Cut", "Stained", "QC", "Ready", "Archived")
+
+
+@router.post("/pathology/orders/{order_id}/block-slides", status_code=201)
+async def add_block_slide(order_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not (is_cca_pathologist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Pathologist or Admin may register a block/slide")
+    order = _get_org_order(db, order_id, _org_id(current_user))
+    if order.order_type != "PATHOLOGY":
+        raise HTTPException(404, "Not a pathology order")
+    body = await request.json()
+    item_type = body.get("item_type")
+    block_or_slide_id = (body.get("block_or_slide_id") or "").strip()
+    if item_type not in ("Block", "Slide"):
+        raise HTTPException(422, "item_type must be one of Block, Slide")
+    if not block_or_slide_id:
+        raise HTTPException(422, "block_or_slide_id is required")
+    row = PathologyBlockSlide(
+        order_id=order_id, patient_id=order.patient_id, item_type=item_type, block_or_slide_id=block_or_slide_id,
+        tissue=body.get("tissue"), stain=body.get("stain"), location=body.get("location"),
+        assigned_to=body.get("assigned_to"), created_by=_actor(current_user),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "block_slide": _block_slide_out(row)}
+
+
+@router.get("/pathology/orders/{order_id}/block-slides")
+def list_block_slides(order_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_diagnostics_read(current_user, is_cca_pathologist)
+    order = _get_org_order(db, order_id, _org_id(current_user))
+    rows = db.query(PathologyBlockSlide).filter(PathologyBlockSlide.order_id == order.id).order_by(PathologyBlockSlide.id.asc()).all()
+    return {"block_slides": [_block_slide_out(b) for b in rows]}
+
+
+@router.get("/pathology/processing-queue")
+def pathology_processing_queue(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Block / Slide Management & Processing Queue (reference SCR-PAT-004) -- every block/
+    slide not yet Archived, org-wide."""
+    _require_diagnostics_read(current_user, is_cca_pathologist)
+    org_id = _org_id(current_user)
+    rows = db.query(PathologyBlockSlide).join(
+        CCAPatient, CCAPatient.id == PathologyBlockSlide.patient_id
+    ).filter(CCAPatient.organization_id == org_id, PathologyBlockSlide.processing_status != "Archived").order_by(PathologyBlockSlide.id.desc()).all()
+    results = []
+    for b in rows:
+        patient = db.query(CCAPatient).filter(CCAPatient.id == b.patient_id).first()
+        results.append({**_block_slide_out(b), "patient_name": patient.name if patient else None, "mrn": patient.mrn if patient else None})
+    return {"queue": results, "total": len(results)}
+
+
+@router.post("/pathology/block-slides/{id}/update")
+async def update_block_slide(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not (is_cca_pathologist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Pathologist or Admin may update a block/slide")
+    row = db.query(PathologyBlockSlide).filter(PathologyBlockSlide.id == id).first()
+    if not row:
+        raise HTTPException(404, "Block/slide not found")
+    _check_patient_in_org(db, row.patient_id, _org_id(current_user))
+    body = await request.json()
+    if "processing_status" in body:
+        if body["processing_status"] not in _BLOCK_SLIDE_PROCESSING_STATUSES:
+            raise HTTPException(422, f"processing_status must be one of {_BLOCK_SLIDE_PROCESSING_STATUSES}")
+        row.processing_status = body["processing_status"]
+    for field in ("stain", "qc_status", "location", "assigned_to"):
+        if field in body:
+            setattr(row, field, body[field])
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "block_slide": _block_slide_out(row)}
+
+
+def _custody_event_out(c: PathologyCustodyEvent) -> dict:
+    return {
+        "id": c.id, "block_slide_id": c.block_slide_id, "custody_status": c.custody_status,
+        "location": c.location, "released_to": c.released_to, "released_at": c.released_at.isoformat() if c.released_at else None,
+        "expected_return": c.expected_return.isoformat() if c.expected_return else None,
+        "returned_at": c.returned_at.isoformat() if c.returned_at else None, "disposition": c.disposition,
+        "recorded_by": c.recorded_by, "recorded_at": c.recorded_at.isoformat() if c.recorded_at else None,
+    }
+
+
+@router.post("/pathology/block-slides/{id}/custody-events", status_code=201)
+async def add_custody_event(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not (is_cca_pathologist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Pathologist or Admin may record a custody event")
+    block_slide = db.query(PathologyBlockSlide).filter(PathologyBlockSlide.id == id).first()
+    if not block_slide:
+        raise HTTPException(404, "Block/slide not found")
+    _check_patient_in_org(db, block_slide.patient_id, _org_id(current_user))
+    body = await request.json()
+    custody_status = body.get("custody_status")
+    if custody_status not in ("Archived", "Loaned", "Returned", "Disposed"):
+        raise HTTPException(422, "custody_status must be one of Archived, Loaned, Returned, Disposed")
+
+    def _parse_date(key):
+        value = body.get(key)
+        return datetime.fromisoformat(value).date() if value else None
+
+    row = PathologyCustodyEvent(
+        block_slide_id=id, patient_id=block_slide.patient_id, custody_status=custody_status,
+        location=body.get("location"), released_to=body.get("released_to"),
+        released_at=datetime.utcnow() if custody_status == "Loaned" else None,
+        expected_return=_parse_date("expected_return"),
+        returned_at=datetime.utcnow() if custody_status == "Returned" else None,
+        disposition=body.get("disposition"), recorded_by=_actor(current_user),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "custody_event": _custody_event_out(row)}
+
+
+@router.get("/pathology/custody-inventory")
+def pathology_custody_inventory(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Specimen / Block / Slide Archive & Custody (reference SCR-PAT-017) -- current custody
+    status (most recent event) for every block/slide item, org-wide."""
+    _require_diagnostics_read(current_user, is_cca_pathologist)
+    org_id = _org_id(current_user)
+    items = db.query(PathologyBlockSlide).join(
+        CCAPatient, CCAPatient.id == PathologyBlockSlide.patient_id
+    ).filter(CCAPatient.organization_id == org_id).all()
+    results = []
+    for b in items:
+        patient = db.query(CCAPatient).filter(CCAPatient.id == b.patient_id).first()
+        latest_event = db.query(PathologyCustodyEvent).filter(PathologyCustodyEvent.block_slide_id == b.id).order_by(PathologyCustodyEvent.id.desc()).first()
+        results.append({
+            **_block_slide_out(b), "patient_name": patient.name if patient else None, "mrn": patient.mrn if patient else None,
+            "custody_status": latest_event.custody_status if latest_event else "Not Archived",
+            "current_location": latest_event.location if latest_event else b.location,
+        })
+    return {"inventory": results, "total": len(results)}
+
+
+def _frozen_section_out(f: PathologyFrozenSection) -> dict:
+    return {
+        "id": f.id, "order_id": f.order_id, "patient_id": f.patient_id, "theatre": f.theatre,
+        "question_from_surgeon": f.question_from_surgeon,
+        "specimen_received_at": f.specimen_received_at.isoformat() if f.specimen_received_at else None,
+        "frozen_impression": f.frozen_impression, "communicated_to": f.communicated_to,
+        "communication_method": f.communication_method,
+        "communicated_at": f.communicated_at.isoformat() if f.communicated_at else None,
+        "acknowledged_by": f.acknowledged_by, "acknowledged_at": f.acknowledged_at.isoformat() if f.acknowledged_at else None,
+        "permanent_result_concordance": f.permanent_result_concordance, "permanent_result_id": f.permanent_result_id,
+        "created_by": f.created_by, "created_at": f.created_at.isoformat() if f.created_at else None,
+    }
+
+
+@router.post("/patients/{patient_id}/frozen-sections", status_code=201)
+async def create_frozen_section(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Frozen Section / Intra-operative Pathology (reference SCR-PAT-012) -- a real,
+    time-critical intraoperative consultation, entirely absent before this round."""
+    if not (is_cca_pathologist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Pathologist or Admin may record a frozen section consultation")
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    question = (body.get("question_from_surgeon") or "").strip()
+    if not question:
+        raise HTTPException(422, "question_from_surgeon is required")
+    row = PathologyFrozenSection(
+        patient_id=patient_id, order_id=body.get("order_id"), theatre=body.get("theatre"),
+        question_from_surgeon=question, specimen_received_at=datetime.utcnow(),
+        frozen_impression=body.get("frozen_impression"), created_by=_actor(current_user),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "frozen_section": _frozen_section_out(row)}
+
+
+@router.post("/frozen-sections/{id}/communicate")
+async def communicate_frozen_section(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    row = db.query(PathologyFrozenSection).filter(PathologyFrozenSection.id == id).first()
+    if not row:
+        raise HTTPException(404, "Frozen section not found")
+    _check_patient_in_org(db, row.patient_id, _org_id(current_user))
+    body = await request.json()
+    communicated_to = (body.get("communicated_to") or "").strip()
+    method = (body.get("communication_method") or "").strip()
+    if not (communicated_to and method):
+        raise HTTPException(422, "communicated_to and communication_method are required")
+    if not (row.frozen_impression or body.get("frozen_impression")):
+        raise HTTPException(409, "frozen_impression must be recorded before it can be communicated")
+    if body.get("frozen_impression"):
+        row.frozen_impression = body["frozen_impression"]
+    row.communicated_to = communicated_to
+    row.communication_method = method
+    row.communicated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "frozen_section": _frozen_section_out(row)}
+
+
+@router.post("/frozen-sections/{id}/acknowledge")
+async def acknowledge_frozen_section(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    row = db.query(PathologyFrozenSection).filter(PathologyFrozenSection.id == id).first()
+    if not row:
+        raise HTTPException(404, "Frozen section not found")
+    _check_patient_in_org(db, row.patient_id, _org_id(current_user))
+    if not row.communicated_at:
+        raise HTTPException(409, "Cannot acknowledge before the impression has been communicated")
+    body = await request.json()
+    row.acknowledged_by = (body.get("acknowledged_by") or _actor(current_user))
+    row.acknowledged_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "frozen_section": _frozen_section_out(row)}
+
+
+@router.post("/frozen-sections/{id}/reconcile")
+async def reconcile_frozen_section(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Permanent result concordance -- the pathologist's own conclusion once the permanent
+    (paraffin) report is finalized, never a computed text-diff against the frozen impression."""
+    if not (is_cca_pathologist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Pathologist or Admin may reconcile a frozen section")
+    row = db.query(PathologyFrozenSection).filter(PathologyFrozenSection.id == id).first()
+    if not row:
+        raise HTTPException(404, "Frozen section not found")
+    _check_patient_in_org(db, row.patient_id, _org_id(current_user))
+    body = await request.json()
+    concordance = body.get("permanent_result_concordance")
+    if concordance not in ("Concordant", "Discordant", "Pending"):
+        raise HTTPException(422, "permanent_result_concordance must be one of Concordant, Discordant, Pending")
+    row.permanent_result_concordance = concordance
+    row.permanent_result_id = body.get("permanent_result_id")
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "frozen_section": _frozen_section_out(row)}
+
+
+@router.get("/patients/{patient_id}/frozen-sections")
+def list_frozen_sections(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(PathologyFrozenSection).filter(PathologyFrozenSection.patient_id == patient_id).order_by(PathologyFrozenSection.id.desc()).all()
+    return {"frozen_sections": [_frozen_section_out(f) for f in rows]}
+
+
+def _second_opinion_out(s: PathologySecondOpinion) -> dict:
+    return {
+        "id": s.id, "patient_id": s.patient_id, "order_id": s.order_id, "external_institution": s.external_institution,
+        "external_accession": s.external_accession, "material_received": s.material_received or [],
+        "prior_diagnosis": s.prior_diagnosis, "review_diagnosis": s.review_diagnosis, "concordance": s.concordance,
+        "clinical_impact": s.clinical_impact, "reviewed_by": s.reviewed_by,
+        "reviewed_at": s.reviewed_at.isoformat() if s.reviewed_at else None,
+    }
+
+
+@router.post("/patients/{patient_id}/second-opinions", status_code=201)
+async def create_second_opinion(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Second Opinion / External Pathology Review (reference SCR-PAT-013)."""
+    if not (is_cca_pathologist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Pathologist or Admin may record a second opinion review")
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    institution = (body.get("external_institution") or "").strip()
+    prior_diagnosis = (body.get("prior_diagnosis") or "").strip()
+    review_diagnosis = (body.get("review_diagnosis") or "").strip()
+    concordance = body.get("concordance")
+    if not (institution and prior_diagnosis and review_diagnosis):
+        raise HTTPException(422, "external_institution, prior_diagnosis and review_diagnosis are required")
+    if concordance not in ("Concordant", "Minor Discrepancy", "Major Discrepancy"):
+        raise HTTPException(422, "concordance must be one of Concordant, Minor Discrepancy, Major Discrepancy")
+    row = PathologySecondOpinion(
+        patient_id=patient_id, order_id=body.get("order_id"), external_institution=institution,
+        external_accession=body.get("external_accession"), material_received=body.get("material_received"),
+        prior_diagnosis=prior_diagnosis, review_diagnosis=review_diagnosis, concordance=concordance,
+        clinical_impact=body.get("clinical_impact"), reviewed_by=_actor(current_user),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "second_opinion": _second_opinion_out(row)}
+
+
+@router.get("/patients/{patient_id}/second-opinions")
+def list_second_opinions(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(PathologySecondOpinion).filter(PathologySecondOpinion.patient_id == patient_id).order_by(PathologySecondOpinion.id.desc()).all()
+    return {"second_opinions": [_second_opinion_out(s) for s in rows]}
+
+
+def _pathology_mdt_note_out(n: PathologyMdtReviewNote) -> dict:
+    return {
+        "id": n.id, "patient_id": n.patient_id, "mdt_case_id": n.mdt_case_id, "order_id": n.order_id,
+        "material_reviewed": n.material_reviewed, "key_findings": n.key_findings,
+        "diagnostic_staging_statement": n.diagnostic_staging_statement,
+        "uncertainty_limitations": n.uncertainty_limitations, "recommendation": n.recommendation,
+        "authored_by": n.authored_by, "authored_at": n.authored_at.isoformat() if n.authored_at else None,
+    }
+
+
+@router.post("/patients/{patient_id}/pathology-mdt-notes", status_code=201)
+async def create_pathology_mdt_note(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Pathology MDT Review Note (reference SCR-PAT-016)."""
+    if not (is_cca_pathologist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Pathologist or Admin may author a pathology MDT review note")
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    material_reviewed = (body.get("material_reviewed") or "").strip()
+    key_findings = (body.get("key_findings") or "").strip()
+    diagnostic_statement = (body.get("diagnostic_staging_statement") or "").strip()
+    if not (material_reviewed and key_findings and diagnostic_statement):
+        raise HTTPException(422, "material_reviewed, key_findings and diagnostic_staging_statement are required")
+    row = PathologyMdtReviewNote(
+        patient_id=patient_id, mdt_case_id=body.get("mdt_case_id"), order_id=body.get("order_id"),
+        material_reviewed=material_reviewed, key_findings=key_findings,
+        diagnostic_staging_statement=diagnostic_statement, uncertainty_limitations=body.get("uncertainty_limitations"),
+        recommendation=body.get("recommendation"), authored_by=_actor(current_user),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "pathology_mdt_note": _pathology_mdt_note_out(row)}
+
+
+@router.get("/patients/{patient_id}/pathology-mdt-notes")
+def list_pathology_mdt_notes(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(PathologyMdtReviewNote).filter(PathologyMdtReviewNote.patient_id == patient_id).order_by(PathologyMdtReviewNote.id.desc()).all()
+    return {"pathology_mdt_notes": [_pathology_mdt_note_out(n) for n in rows]}
 
 
 def _biomarker_out(b: CCABiomarkerResult) -> dict:

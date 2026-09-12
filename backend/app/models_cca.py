@@ -2013,3 +2013,113 @@ class PathologySpecimenAccession(Base):
     status = Column(String(30), default="ACCEPTED")  # ACCEPTED, QUARANTINED
     received_by = Column(String(200))
     received_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Feature completion round (functional/dataflow-parity verification against the reference
+# spec, continuing the safety/dataflow and worklist/dashboard follow-up rounds): the
+# remaining Pathology (C.19) gaps -- Block/Slide registry, Archive/Custody, Frozen Section,
+# Second Opinion/External Review, and Pathology MDT Review Note. Pathological Treatment
+# Response (SCR-PAT-008) needed no new table -- its fields already fit inside CCAResult.
+# structured_report's existing free-form JSON (the same way every other synoptic field
+# does); only the frontend form and a read-time derived-context helper were missing, see
+# routers/cca_diagnostics.py's get_neoadjuvant_context.
+# ---------------------------------------------------------------------------
+
+class PathologyBlockSlide(Base):
+    """Block / Slide Management & Processing Queue (reference SCR-PAT-004) -- individual
+    block/slide registry with processing/stain/QC status and physical location. Previously
+    entirely unrepresented: structured_report only ever held report-level synoptic fields,
+    never a specimen-derived block/slide inventory."""
+    __tablename__ = "cca_pathology_block_slides"
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("cca_orders.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    item_type = Column(String(20), nullable=False)  # Block, Slide
+    block_or_slide_id = Column(String(100), nullable=False)  # lab-assigned identifier
+    tissue = Column(String(200), nullable=True)
+    processing_status = Column(String(50), default="Pending")  # Pending, Processing, Cut, Stained, QC, Ready, Archived
+    stain = Column(String(100), nullable=True)
+    qc_status = Column(String(30), nullable=True)  # Pass, Fail, Repeat Required
+    location = Column(String(200), nullable=True)
+    assigned_to = Column(String(200), nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PathologyCustodyEvent(Base):
+    """Specimen / Block / Slide Archive & Custody (reference SCR-PAT-017) -- one append-only
+    custody transition per block/slide item (archived, loaned out, returned, disposed), so
+    full chain-of-custody is reconstructable rather than only a current-location field."""
+    __tablename__ = "cca_pathology_custody_events"
+    id = Column(Integer, primary_key=True)
+    block_slide_id = Column(Integer, ForeignKey("cca_pathology_block_slides.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    custody_status = Column(String(30), nullable=False)  # Archived, Loaned, Returned, Disposed
+    location = Column(String(200), nullable=True)
+    released_to = Column(String(200), nullable=True)
+    released_at = Column(DateTime, nullable=True)
+    expected_return = Column(Date, nullable=True)
+    returned_at = Column(DateTime, nullable=True)
+    disposition = Column(String(100), nullable=True)
+    recorded_by = Column(String(200))
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PathologyFrozenSection(Base):
+    """Frozen Section / Intra-operative Pathology (reference SCR-PAT-012) -- a distinct,
+    time-critical intraoperative consultation with its own communication/acknowledgement
+    chain and a later permanent-result concordance check, never folded into the standard
+    CCAResult synoptic-report path."""
+    __tablename__ = "cca_pathology_frozen_sections"
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey("cca_orders.id"), nullable=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    theatre = Column(String(100), nullable=True)
+    question_from_surgeon = Column(Text, nullable=False)
+    specimen_received_at = Column(DateTime, nullable=True)
+    frozen_impression = Column(Text, nullable=True)
+    communicated_to = Column(String(200), nullable=True)
+    communication_method = Column(String(50), nullable=True)
+    communicated_at = Column(DateTime, nullable=True)
+    acknowledged_by = Column(String(200), nullable=True)
+    acknowledged_at = Column(DateTime, nullable=True)
+    permanent_result_concordance = Column(String(30), nullable=True)  # Concordant, Discordant, Pending
+    permanent_result_id = Column(Integer, ForeignKey("cca_results.id"), nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PathologySecondOpinion(Base):
+    """Second Opinion / External Pathology Review (reference SCR-PAT-013)."""
+    __tablename__ = "cca_pathology_second_opinions"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    order_id = Column(Integer, ForeignKey("cca_orders.id"), nullable=True)
+    external_institution = Column(String(200), nullable=False)
+    external_accession = Column(String(100), nullable=True)
+    material_received = Column(JSON, nullable=True)  # ["Slides", "Blocks", "Report"]
+    prior_diagnosis = Column(Text, nullable=False)
+    review_diagnosis = Column(Text, nullable=False)
+    concordance = Column(String(30), nullable=False)  # Concordant, Minor Discrepancy, Major Discrepancy
+    clinical_impact = Column(Text, nullable=True)
+    reviewed_by = Column(String(200))
+    reviewed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PathologyMdtReviewNote(Base):
+    """Pathology MDT Review Note (reference SCR-PAT-016) -- the pathologist's own written
+    contribution to an MDT case, distinct from MDTCase.package_data (a generic JSON bag
+    nothing writes pathology-specific content into today)."""
+    __tablename__ = "cca_pathology_mdt_review_notes"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    mdt_case_id = Column(Integer, ForeignKey("cca_mdt_cases.id"), nullable=True)
+    order_id = Column(Integer, ForeignKey("cca_orders.id"), nullable=True)
+    material_reviewed = Column(Text, nullable=False)
+    key_findings = Column(Text, nullable=False)
+    diagnostic_staging_statement = Column(Text, nullable=False)
+    uncertainty_limitations = Column(Text, nullable=True)
+    recommendation = Column(Text, nullable=True)
+    authored_by = Column(String(200))
+    authored_at = Column(DateTime, default=datetime.utcnow)

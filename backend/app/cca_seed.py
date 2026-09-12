@@ -28,6 +28,8 @@ from .models_cca import (
     OralTherapyReview, OralTherapyHoldEvent,
     SystemicTherapyHoldDecision, CumulativeDoseRecord, PharmacyReturnEvent,
     PathologySpecimenAccession,
+    PathologyBlockSlide, PathologyCustodyEvent, PathologyFrozenSection,
+    PathologySecondOpinion, PathologyMdtReviewNote,
 )
 from .models_cca_oncology_ext import (
     TreatmentOrderDrugLine, RadiationPrescription, CCARadiationPhase, RadiationFraction,
@@ -80,6 +82,11 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # level (like ClinicalMaster), not patient data, so it stays out of this list.
             SystemicTherapyHoldDecision, CumulativeDoseRecord, PharmacyReturnEvent,
             PathologySpecimenAccession,
+            # Feature completion round -- PathologyCustodyEvent before its
+            # PathologyBlockSlide FK parent; PathologyFrozenSection/PathologyMdtReviewNote
+            # before CCAResult/MDTCase (their optional FK targets), both deleted below.
+            PathologyCustodyEvent, PathologyBlockSlide, PathologyFrozenSection,
+            PathologySecondOpinion, PathologyMdtReviewNote,
             # Day Care / Treatment Order / Pharmacy universe (Phases 1-7 and Batches 1-2 of the
             # Product 1 vs Product 2 gap-closing initiative) -- previously entirely missing from
             # this reset, so repeated demo/reset calls accumulated stale TreatmentOrder rows that
