@@ -24,6 +24,8 @@ from .models_cca import (
     SurveillancePlan, SurveillanceVisit, SurveillanceInvestigation, LateEffectRecord,
     SurvivorshipCarePlanDocument, RecurrenceSuspicionEvent, SurveillanceRecallEntry,
     SurvivorshipReferral,
+    OralTherapyPrescription, OralTherapyCounselling, OralTherapyDispensing,
+    OralTherapyReview, OralTherapyHoldEvent,
 )
 from .models_cca_oncology_ext import (
     TreatmentOrderDrugLine, RadiationPrescription, CCARadiationPhase, RadiationFraction,
@@ -67,6 +69,10 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             SurveillanceVisit, SurveillanceInvestigation, LateEffectRecord,
             SurvivorshipCarePlanDocument, RecurrenceSuspicionEvent, SurveillanceRecallEntry,
             SurvivorshipReferral, SurveillancePlan,
+            # Oral / Continuous Therapy universe (Batch 9) -- children before their
+            # OralTherapyPrescription parent, all with their own patient_id.
+            OralTherapyCounselling, OralTherapyDispensing, OralTherapyReview,
+            OralTherapyHoldEvent, OralTherapyPrescription,
             # Day Care / Treatment Order / Pharmacy universe (Phases 1-7 and Batches 1-2 of the
             # Product 1 vs Product 2 gap-closing initiative) -- previously entirely missing from
             # this reset, so repeated demo/reset calls accumulated stale TreatmentOrder rows that

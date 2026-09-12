@@ -87,12 +87,19 @@
         <aside class="sidebar">
             <div class="sidebar-section-title">PHARMACY</div>
             <a class="sidebar-nav-item active" id="nav-worklist" onclick="showTab('worklist')"><div class="nav-item-left"><span>💊</span><span>Verification &amp; Release Worklist</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-oral" onclick="showTab('oral')"><div class="nav-item-left"><span>💊</span><span>Oral Therapy</span></div><span class="nav-chevron">›</span></a>
         </aside>
         <main class="canvas">
             <div id="view-worklist" class="view-panel active">
                 <h1 class="page-title">Verification &amp; Release Worklist</h1>
                 <p class="page-subtitle">Signed treatment orders awaiting pharmacy verification, preparation, or release. Order → Verify → Query/Approve → Prepare → Double Check → Release → Administer.</p>
                 <div id="worklist-content"><!-- Populated via JS: loadPharmacyWorklist() --></div>
+            </div>
+
+            <div id="view-oral" class="view-panel">
+                <h1 class="page-title">Oral Therapy</h1>
+                <p class="page-subtitle">Counselling, dispensing, adherence/toxicity review, and hold/restart/discontinue for self-administered anticancer therapy.</p>
+                <div id="oral-content"><!-- Populated via JS: loadOralTherapyWorklist() --></div>
             </div>
         </main>
     </div>
@@ -118,6 +125,7 @@
             document.getElementById(`view-${tab}`).classList.add('active');
             document.getElementById(`nav-${tab}`).classList.add('active');
             if (tab === 'worklist') loadPharmacyWorklist();
+            if (tab === 'oral') loadOralTherapyWorklist();
         }
 
         async function loadPharmacyWorklist() {
@@ -287,6 +295,150 @@
                 });
                 toast('Released', 'success');
                 loadPharmacyWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---------------------------------------------------------------
+        // Oral / Continuous Anticancer Therapy (Product 1 vs Product 2 gap report, Batch 9)
+        // ---------------------------------------------------------------
+        const ORAL_RX_BADGE = { DRAFT: 'badge-amber', SIGNED: 'badge-blue', ACTIVE: 'badge-green', ON_HOLD: 'badge-amber', DISCONTINUED: 'badge-rose', COMPLETED: 'badge-blue' };
+
+        async function loadOralTherapyWorklist() {
+            const container = document.getElementById('oral-content');
+            try {
+                const patientsData = await Api.get(`${CCA_API}/patients`);
+                const patients = patientsData.results || [];
+                const entries = [];
+                for (const p of patients) {
+                    let rxs = [];
+                    try {
+                        const rd = await Api.get(`${CCA_API}/patients/${p.id}/oral-therapy-prescriptions`);
+                        rxs = (rd.prescriptions || []).filter(r => r.status !== 'DRAFT' && r.status !== 'COMPLETED');
+                    } catch (err) { continue; }
+                    for (const r of rxs) entries.push({ patient: p, rx: r });
+                }
+                if (!entries.length) {
+                    container.innerHTML = '<div class="section-card"><p class="empty-hint">No active oral therapy prescriptions need pharmacy action.</p></div>';
+                    return;
+                }
+                container.innerHTML = (await Promise.all(entries.map(e => renderOralRxCard(e.patient, e.rx)))).join('');
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function renderOralRxCard(patient, rx) {
+            let detail = { counsellings: [], dispensings: [], reviews: [], hold_events: [] };
+            try { detail = await Api.get(`${CCA_API}/oral-therapy-prescriptions/${rx.id}`); } catch (err) {}
+            const counselled = detail.counsellings.length > 0;
+
+            return `
+                <div class="section-card">
+                    <div class="section-head">
+                        <div>
+                            <div class="section-title">${escapeHtml(patient.name)} <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(patient.mrn)}</span></div>
+                            <div class="section-sub">${escapeHtml(rx.drug)} · ${escapeHtml(rx.final_prescribed_dose || 'dose not recorded')} · ${escapeHtml(rx.frequency || '')}</div>
+                        </div>
+                        <span class="badge ${ORAL_RX_BADGE[rx.status] || 'badge-blue'}">${escapeHtml(rx.status)}</span>
+                    </div>
+
+                    <div class="section-sub" style="margin-bottom:8px;">Counselling: ${counselled ? `✅ by ${escapeHtml(detail.counsellings[0].counselled_by)}` : '⚠️ Not yet recorded — dispensing is blocked until this is done'}</div>
+                    ${!counselled ? `
+                    <div class="form-checkbox-row" style="margin-bottom:10px;"><input type="checkbox" id="counsel-${rx.id}" /> <label for="counsel-${rx.id}" style="font-size:12.5px;">Full counselling delivered (dose/timing, food, missed/vomited dose, storage, handling, side effects, red flags, monitoring, interactions, refill process, adherence)</label></div>
+                    <button class="btn-outline btn-sm" onclick="submitOralCounselling(${rx.id})" style="margin-bottom:14px;">Record Counselling</button>
+                    ` : ''}
+
+                    ${counselled ? `
+                    <div class="med-card">
+                        <div class="med-card-title">Dispense</div>
+                        <div class="form-grid-3">
+                            <div class="form-group"><label class="form-label">Quantity dispensed</label><input type="text" id="oral-qty-${rx.id}" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Batch / Lot</label><input type="text" id="oral-batch-${rx.id}" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Days supply</label><input type="text" id="oral-days-${rx.id}" class="form-input" /></div>
+                        </div>
+                        <button class="btn-navy btn-sm" onclick="submitOralDispense(${rx.id})">Record Dispensing</button>
+                    </div>
+                    <div class="med-card">
+                        <div class="med-card-title">Adherence &amp; Toxicity Review</div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Adherence method</label><input type="text" id="oral-adhmethod-${rx.id}" class="form-input" placeholder="Patient report / Pill count / Refill history" /></div>
+                            <div class="form-group"><label class="form-label">Dose decision</label>
+                                <select id="oral-decision-${rx.id}" class="form-select">
+                                    <option value="Continue Unchanged">Continue Unchanged</option>
+                                    <option value="Reduce">Reduce</option>
+                                    <option value="Interrupt">Interrupt</option>
+                                    <option value="Discontinue">Discontinue</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Adherence / toxicity narrative</label><textarea id="oral-narrative-${rx.id}" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-outline btn-sm" onclick="submitOralReview(${rx.id})">Record Review</button>
+                    </div>
+                    <div class="med-card">
+                        <div class="med-card-title">Hold / Restart / Discontinue</div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Action</label>
+                                <select id="oral-holdtype-${rx.id}" class="form-select">
+                                    <option value="Hold">Hold</option>
+                                    <option value="Restart">Restart</option>
+                                    <option value="Discontinue">Discontinue</option>
+                                </select>
+                            </div>
+                            <div class="form-group"><label class="form-label">Patient contacted?</label>
+                                <select id="oral-contacted-${rx.id}" class="form-select"><option value="false">Not yet</option><option value="true">Yes</option></select>
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Reason</label><textarea id="oral-holdreason-${rx.id}" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-outline btn-sm" onclick="submitOralHoldEvent(${rx.id})">Record</button>
+                    </div>
+                    ${detail.hold_events.length ? `<div class="section-sub">Last action: ${escapeHtml(detail.hold_events[0].event_type)} — ${detail.hold_events[0].patient_notification_status === 'HOLD_NOT_COMMUNICATED' ? '⚠️ patient not yet contacted' : '✅ patient contacted'}</div>` : ''}
+                    ` : ''}
+                </div>
+            `;
+        }
+
+        async function submitOralCounselling(rxId) {
+            if (!document.getElementById(`counsel-${rxId}`).checked) { toast('Confirm counselling was delivered first', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/oral-therapy-prescriptions/${rxId}/counselling`, { checklist: [{ item: 'Full counselling', covered: true }] });
+                toast('Counselling recorded', 'success');
+                loadOralTherapyWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitOralDispense(rxId) {
+            try {
+                await Api.post(`${CCA_API}/oral-therapy-prescriptions/${rxId}/dispense`, {
+                    quantity_dispensed: document.getElementById(`oral-qty-${rxId}`).value,
+                    batch_lot: document.getElementById(`oral-batch-${rxId}`).value,
+                    days_supply: document.getElementById(`oral-days-${rxId}`).value,
+                });
+                toast('Dispensing recorded', 'success');
+                loadOralTherapyWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitOralReview(rxId) {
+            try {
+                await Api.post(`${CCA_API}/oral-therapy-prescriptions/${rxId}/reviews`, {
+                    adherence_method: document.getElementById(`oral-adhmethod-${rxId}`).value,
+                    adherence_narrative: document.getElementById(`oral-narrative-${rxId}`).value,
+                    dose_decision: document.getElementById(`oral-decision-${rxId}`).value,
+                });
+                toast('Review recorded', 'success');
+                loadOralTherapyWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitOralHoldEvent(rxId) {
+            const reason = document.getElementById(`oral-holdreason-${rxId}`).value.trim();
+            if (!reason) { toast('Reason is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/oral-therapy-prescriptions/${rxId}/hold-events`, {
+                    event_type: document.getElementById(`oral-holdtype-${rxId}`).value,
+                    patient_contacted: document.getElementById(`oral-contacted-${rxId}`).value === 'true',
+                    reason,
+                });
+                toast('Recorded', 'success');
+                loadOralTherapyWorklist();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

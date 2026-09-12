@@ -51,6 +51,8 @@ from ..models_cca import (
     SurveillancePlan, SurveillanceVisit, SurveillanceInvestigation, LateEffectRecord,
     SurvivorshipCarePlanDocument, RecurrenceSuspicionEvent, SurveillanceRecallEntry,
     SurvivorshipReferral,
+    OralTherapyPrescription, OralTherapyCounselling, OralTherapyDispensing,
+    OralTherapyReview, OralTherapyHoldEvent,
 )
 from ..cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
@@ -6703,6 +6705,328 @@ async def update_referral_status(
     db.commit()
     db.refresh(row)
     return {"status": "success", "referral": _survivorship_referral_dict(row)}
+
+
+# ---------------------------------------------------------
+# Oral / Continuous Anticancer Therapy (Product 1 vs Product 2 gap report, Batch 9: C.14)
+# -- completely missing before this batch. See OralTherapyPrescription's docstring in
+# models_cca.py for what's deliberately not ported (achievable-dose/days-supply/adherence
+# calculators, interaction checker).
+# ---------------------------------------------------------
+
+def _oral_rx_dict(rx: OralTherapyPrescription) -> dict:
+    return {
+        "id": rx.id, "patient_id": rx.patient_id, "regimen_id": rx.regimen_id, "drug": rx.drug,
+        "formulation_strength": rx.formulation_strength, "dose_basis": rx.dose_basis,
+        "final_prescribed_dose": rx.final_prescribed_dose, "frequency": rx.frequency,
+        "schedule_pattern": rx.schedule_pattern, "cycle_length_days": rx.cycle_length_days,
+        "days_on_off": rx.days_on_off, "start_date": rx.start_date.isoformat() if rx.start_date else None,
+        "planned_duration_or_cycles": rx.planned_duration_or_cycles, "food_instruction": rx.food_instruction,
+        "handling_precautions": rx.handling_precautions, "missed_dose_instruction": rx.missed_dose_instruction,
+        "vomited_dose_instruction": rx.vomited_dose_instruction, "status": rx.status,
+        "supersedes_id": rx.supersedes_id, "signer_email": rx.signer_email,
+        "signed_at": rx.signed_at.isoformat() if rx.signed_at else None, "created_by": rx.created_by,
+    }
+
+
+def _oral_counselling_dict(c: OralTherapyCounselling) -> dict:
+    return {
+        "id": c.id, "prescription_id": c.prescription_id, "checklist": c.checklist or [],
+        "language": c.language, "interpreter_used": c.interpreter_used, "carer_present": c.carer_present,
+        "adherence_aids_provided": c.adherence_aids_provided, "counselled_by": c.counselled_by,
+        "counselled_at": c.counselled_at.isoformat() if c.counselled_at else None,
+    }
+
+
+def _oral_dispensing_dict(d: OralTherapyDispensing) -> dict:
+    return {
+        "id": d.id, "prescription_id": d.prescription_id, "quantity_dispensed": d.quantity_dispensed,
+        "batch_lot": d.batch_lot, "expiry_date": d.expiry_date.isoformat() if d.expiry_date else None,
+        "days_supply": d.days_supply, "dispensed_by": d.dispensed_by, "checked_by": d.checked_by,
+        "collected_by": d.collected_by, "returned_unused_quantity": d.returned_unused_quantity,
+        "status": d.status, "dispensed_at": d.dispensed_at.isoformat() if d.dispensed_at else None,
+    }
+
+
+def _oral_review_dict(r: OralTherapyReview) -> dict:
+    return {
+        "id": r.id, "prescription_id": r.prescription_id, "adherence_method": r.adherence_method,
+        "doses_reported_taken": r.doses_reported_taken, "doses_missed": r.doses_missed,
+        "doses_missed_reasons": r.doses_missed_reasons, "adherence_narrative": r.adherence_narrative,
+        "toxicity_event_id": r.toxicity_event_id, "monitoring_results_reviewed": r.monitoring_results_reviewed,
+        "dose_decision": r.dose_decision, "next_review_date": r.next_review_date.isoformat() if r.next_review_date else None,
+        "reviewed_by": r.reviewed_by, "reviewed_at": r.reviewed_at.isoformat() if r.reviewed_at else None,
+    }
+
+
+def _oral_hold_event_dict(h: OralTherapyHoldEvent) -> dict:
+    return {
+        "id": h.id, "prescription_id": h.prescription_id, "event_type": h.event_type,
+        "interruption_start_date": h.interruption_start_date.isoformat() if h.interruption_start_date else None,
+        "last_dose_taken_date": h.last_dose_taken_date.isoformat() if h.last_dose_taken_date else None,
+        "reason": h.reason, "restart_criteria": h.restart_criteria,
+        "restart_date": h.restart_date.isoformat() if h.restart_date else None,
+        "restart_dose_label": h.restart_dose_label, "remaining_supply_disposition": h.remaining_supply_disposition,
+        "patient_contacted": bool(h.patient_contacted), "patient_notification_status": h.patient_notification_status,
+    }
+
+
+@router.post("/oral-therapy-prescriptions")
+async def create_oral_therapy_prescription(
+    request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    org_id = _org_id(current_user)
+    body = await request.json()
+    patient_id = _require_patient_id(body)
+    _get_org_patient(db, patient_id, org_id)
+    _require_clinician(current_user)
+    drug = (body.get("drug") or "").strip()
+    if not drug:
+        raise HTTPException(422, "drug is required")
+
+    def _parse_date(key):
+        value = body.get(key)
+        return datetime.fromisoformat(value).date() if value else None
+
+    rx = OralTherapyPrescription(
+        patient_id=patient_id, regimen_id=body.get("regimen_id"), drug=drug,
+        formulation_strength=body.get("formulation_strength"), dose_basis=body.get("dose_basis"),
+        final_prescribed_dose=body.get("final_prescribed_dose"), frequency=body.get("frequency"),
+        schedule_pattern=body.get("schedule_pattern"), cycle_length_days=body.get("cycle_length_days"),
+        days_on_off=body.get("days_on_off"), start_date=_parse_date("start_date"),
+        planned_duration_or_cycles=body.get("planned_duration_or_cycles"), food_instruction=body.get("food_instruction"),
+        handling_precautions=body.get("handling_precautions"), missed_dose_instruction=body.get("missed_dose_instruction"),
+        vomited_dose_instruction=body.get("vomited_dose_instruction"), supersedes_id=body.get("supersedes_id"),
+        created_by=_actor(current_user),
+    )
+    db.add(rx)
+    db.commit()
+    db.refresh(rx)
+    return {"status": "success", "prescription": _oral_rx_dict(rx)}
+
+
+@router.put("/oral-therapy-prescriptions/{id}")
+async def update_oral_therapy_prescription(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    rx = db.query(OralTherapyPrescription).filter(OralTherapyPrescription.id == id).first()
+    if not rx:
+        raise HTTPException(404, "Prescription not found")
+    _check_patient_in_org(db, rx.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    if rx.status != "DRAFT":
+        raise HTTPException(409, "Only a DRAFT prescription can be edited -- sign a new version instead")
+    body = await request.json()
+    for field in (
+        "formulation_strength", "dose_basis", "final_prescribed_dose", "frequency", "schedule_pattern",
+        "cycle_length_days", "days_on_off", "planned_duration_or_cycles", "food_instruction",
+        "handling_precautions", "missed_dose_instruction", "vomited_dose_instruction",
+    ):
+        if field in body:
+            setattr(rx, field, body[field])
+    if body.get("start_date"):
+        rx.start_date = datetime.fromisoformat(body["start_date"]).date()
+    db.commit()
+    db.refresh(rx)
+    return {"status": "success", "prescription": _oral_rx_dict(rx)}
+
+
+@router.post("/oral-therapy-prescriptions/{id}/sign")
+def sign_oral_therapy_prescription(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Hard stop per the reference spec's ORL-020: a missed-dose instruction must exist
+    before a self-administered prescription can be signed -- unlike an infusion order, the
+    patient has no nurse present to ask."""
+    rx = db.query(OralTherapyPrescription).filter(OralTherapyPrescription.id == id).first()
+    if not rx:
+        raise HTTPException(404, "Prescription not found")
+    _check_patient_in_org(db, rx.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    if rx.status != "DRAFT":
+        raise HTTPException(409, f"Only a DRAFT prescription can be signed (current status: {rx.status})")
+    if not (rx.missed_dose_instruction or "").strip():
+        raise HTTPException(409, "Cannot sign: missed_dose_instruction is required")
+    actor = _actor(current_user)
+    rx.status = "SIGNED"
+    rx.signer_email = actor
+    rx.signer_role = current_user.get("role")
+    rx.signed_at = datetime.utcnow()
+    if rx.supersedes_id:
+        prior = db.query(OralTherapyPrescription).filter(OralTherapyPrescription.id == rx.supersedes_id).first()
+        if prior and prior.status not in ("DISCONTINUED", "COMPLETED"):
+            prior.status = "DISCONTINUED"
+    publish(
+        db, "ORAL_THERAPY_PRESCRIPTION_SIGNED", patient_id=rx.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Oral therapy prescription signed: {rx.drug}", category="ORAL_THERAPY",
+        description=f"{actor} signed an oral therapy prescription for {rx.drug}.",
+    )
+    db.commit()
+    db.refresh(rx)
+    return {"status": "success", "prescription": _oral_rx_dict(rx)}
+
+
+@router.get("/oral-therapy-prescriptions/{id}")
+def get_oral_therapy_prescription(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    rx = db.query(OralTherapyPrescription).filter(OralTherapyPrescription.id == id).first()
+    if not rx:
+        raise HTTPException(404, "Prescription not found")
+    _check_patient_in_org(db, rx.patient_id, _org_id(current_user))
+    return {
+        "prescription": _oral_rx_dict(rx),
+        "counsellings": [_oral_counselling_dict(c) for c in db.query(OralTherapyCounselling).filter(OralTherapyCounselling.prescription_id == id).all()],
+        "dispensings": [_oral_dispensing_dict(d) for d in db.query(OralTherapyDispensing).filter(OralTherapyDispensing.prescription_id == id).all()],
+        "reviews": [_oral_review_dict(r) for r in db.query(OralTherapyReview).filter(OralTherapyReview.prescription_id == id).order_by(OralTherapyReview.id.desc()).all()],
+        "hold_events": [_oral_hold_event_dict(h) for h in db.query(OralTherapyHoldEvent).filter(OralTherapyHoldEvent.prescription_id == id).order_by(OralTherapyHoldEvent.id.desc()).all()],
+    }
+
+
+@router.get("/patients/{patient_id}/oral-therapy-prescriptions")
+def list_oral_therapy_prescriptions(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(OralTherapyPrescription).filter(OralTherapyPrescription.patient_id == patient_id).order_by(OralTherapyPrescription.id.desc()).all()
+    return {"prescriptions": [_oral_rx_dict(r) for r in rows]}
+
+
+@router.post("/oral-therapy-prescriptions/{id}/counselling")
+async def add_oral_therapy_counselling(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    rx = db.query(OralTherapyPrescription).filter(OralTherapyPrescription.id == id).first()
+    if not rx:
+        raise HTTPException(404, "Prescription not found")
+    _check_patient_in_org(db, rx.patient_id, _org_id(current_user))
+    if rx.status == "DRAFT":
+        raise HTTPException(409, "Cannot counsel a patient on an unsigned prescription")
+    body = await request.json()
+    row = OralTherapyCounselling(
+        prescription_id=id, patient_id=rx.patient_id, checklist=body.get("checklist"),
+        language=body.get("language"), interpreter_used=body.get("interpreter_used"),
+        carer_present=body.get("carer_present"), adherence_aids_provided=body.get("adherence_aids_provided"),
+        counselled_by=_actor(current_user),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "counselling": _oral_counselling_dict(row)}
+
+
+@router.post("/oral-therapy-prescriptions/{id}/dispense")
+async def dispense_oral_therapy(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    """Blocked until counselling has been recorded at least once (ORL-050) -- the reference
+    spec applies this specifically to first dispensing; we apply the same simple gate
+    (a counselling record exists) to every dispense rather than tracking a separate
+    first-vs-refill distinction, which the underlying safety concern doesn't need."""
+    rx = db.query(OralTherapyPrescription).filter(OralTherapyPrescription.id == id).first()
+    if not rx:
+        raise HTTPException(404, "Prescription not found")
+    _check_patient_in_org(db, rx.patient_id, _org_id(current_user))
+    if rx.status == "DRAFT":
+        raise HTTPException(409, "Cannot dispense an unsigned prescription")
+    counselled = db.query(OralTherapyCounselling).filter(OralTherapyCounselling.prescription_id == id).first()
+    if not counselled:
+        raise HTTPException(409, "Cannot dispense: counselling has not been recorded for this prescription")
+    body = await request.json()
+    row = OralTherapyDispensing(
+        prescription_id=id, patient_id=rx.patient_id, quantity_dispensed=body.get("quantity_dispensed"),
+        batch_lot=body.get("batch_lot"), days_supply=body.get("days_supply"),
+        checked_by=body.get("checked_by"), collected_by=body.get("collected_by"),
+        returned_unused_quantity=body.get("returned_unused_quantity"), dispensed_by=_actor(current_user),
+    )
+    if body.get("expiry_date"):
+        row.expiry_date = datetime.fromisoformat(body["expiry_date"]).date()
+    db.add(row)
+    # First successful dispense moves the prescription into active therapy -- Dispensed and
+    # Active are treated as the same operational moment for a continuous oral therapy
+    # (unlike a one-off infusion order), so this collapses those two reference-spec states.
+    if rx.status in ("SIGNED",):
+        rx.status = "ACTIVE"
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "dispensing": _oral_dispensing_dict(row)}
+
+
+@router.post("/oral-therapy-prescriptions/{id}/reviews")
+async def add_oral_therapy_review(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    rx = db.query(OralTherapyPrescription).filter(OralTherapyPrescription.id == id).first()
+    if not rx:
+        raise HTTPException(404, "Prescription not found")
+    _check_patient_in_org(db, rx.patient_id, _org_id(current_user))
+    body = await request.json()
+
+    def _parse_date(key):
+        value = body.get(key)
+        return datetime.fromisoformat(value).date() if value else None
+
+    row = OralTherapyReview(
+        prescription_id=id, patient_id=rx.patient_id, adherence_method=body.get("adherence_method"),
+        doses_reported_taken=body.get("doses_reported_taken"), doses_missed=body.get("doses_missed"),
+        doses_missed_reasons=body.get("doses_missed_reasons"), adherence_narrative=body.get("adherence_narrative"),
+        toxicity_event_id=body.get("toxicity_event_id"), monitoring_results_reviewed=body.get("monitoring_results_reviewed"),
+        dose_decision=body.get("dose_decision"), next_review_date=_parse_date("next_review_date"),
+        reviewed_by=_actor(current_user),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "review": _oral_review_dict(row)}
+
+
+@router.post("/oral-therapy-prescriptions/{id}/hold-events")
+async def create_oral_therapy_hold_event(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    """Hold / Restart / Discontinue (SCR-ORL-005). The clinical decision takes effect on
+    the prescription's status immediately; patient_notification_status independently tracks
+    whether the patient has actually been told, per ORL-070 -- see
+    POST .../oral-therapy-hold-events/{id}/confirm-contact."""
+    rx = db.query(OralTherapyPrescription).filter(OralTherapyPrescription.id == id).first()
+    if not rx:
+        raise HTTPException(404, "Prescription not found")
+    _check_patient_in_org(db, rx.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    event_type = body.get("event_type")
+    reason = (body.get("reason") or "").strip()
+    if event_type not in ("Hold", "Restart", "Discontinue"):
+        raise HTTPException(422, "event_type must be one of Hold, Restart, Discontinue")
+    if not reason:
+        raise HTTPException(422, "reason is required")
+
+    def _parse_date(key):
+        value = body.get(key)
+        return datetime.fromisoformat(value).date() if value else None
+
+    patient_contacted = bool(body.get("patient_contacted", False))
+    row = OralTherapyHoldEvent(
+        prescription_id=id, patient_id=rx.patient_id, event_type=event_type, reason=reason,
+        interruption_start_date=_parse_date("interruption_start_date"), last_dose_taken_date=_parse_date("last_dose_taken_date"),
+        restart_criteria=body.get("restart_criteria"), restart_date=_parse_date("restart_date"),
+        restart_dose_label=body.get("restart_dose_label"), remaining_supply_disposition=body.get("remaining_supply_disposition"),
+        patient_contacted=patient_contacted,
+        patient_notification_status="COMMUNICATED" if patient_contacted else "HOLD_NOT_COMMUNICATED",
+        created_by=_actor(current_user),
+    )
+    db.add(row)
+    rx.status = {"Hold": "ON_HOLD", "Restart": "ACTIVE", "Discontinue": "DISCONTINUED"}[event_type]
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "hold_event": _oral_hold_event_dict(row)}
+
+
+@router.post("/oral-therapy-hold-events/{id}/confirm-contact")
+def confirm_oral_therapy_hold_contact(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    row = db.query(OralTherapyHoldEvent).filter(OralTherapyHoldEvent.id == id).first()
+    if not row:
+        raise HTTPException(404, "Hold event not found")
+    _check_patient_in_org(db, row.patient_id, _org_id(current_user))
+    row.patient_contacted = True
+    row.patient_notification_status = "COMMUNICATED"
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "hold_event": _oral_hold_event_dict(row)}
 
 
 # ---------------------------------------------------------

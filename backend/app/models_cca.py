@@ -1664,3 +1664,139 @@ class SurvivorshipReferral(Base):
     follow_up_owner = Column(String(200), nullable=True)
     created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Oral / Continuous Anticancer Therapy (Product 1 vs Product 2 gap report, Batch 9: C.14)
+# -- completely missing before this batch (self-administered therapy had no backend
+# representation at all, unlike the infusion-chair TreatmentOrder/InfusionMedicationAdministration
+# pipeline). Every dosing-adjacent field here is clinician/pharmacist-typed, never
+# computed -- final_prescribed_dose mirrors TreatmentOrderDrugLine.planned_dose's own
+# documented reasoning (standing repo rule: no dose-calculation logic). Explicitly NOT
+# ported from the reference spec: the achievable-dose-from-strengths check, the
+# days-supply/adherence-percentage/pill-count-discrepancy calculators, and the
+# drug-interaction checker -- all computed/threshold logic this repo does not implement.
+# ---------------------------------------------------------------------------
+
+class OralTherapyPrescription(Base):
+    """Oral Therapy Prescription (SCR-ORL-001) -- prescribed with the same rigour as an
+    infusion order, recognising the administration itself happens unobserved at home.
+    supersedes_id mirrors TreatmentOrder's own dose-change-is-a-new-version convention: a
+    dose/schedule change is a new prescription row, never a silent edit to a signed one."""
+    __tablename__ = "cca_oral_therapy_prescriptions"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    regimen_id = Column(Integer, ForeignKey("cca_regimens.id"), nullable=True)
+    drug = Column(String(200), nullable=False)
+    formulation_strength = Column(String(100), nullable=True)  # clinician-typed, e.g. "150mg capsule" -- never dose-calculated
+    dose_basis = Column(String(30), nullable=True)  # reference only: fixed, mg_kg, mg_m2, auc
+    final_prescribed_dose = Column(String(200), nullable=True)  # clinician-typed, never computed
+    frequency = Column(String(100), nullable=True)
+    schedule_pattern = Column(String(100), nullable=True)  # Continuous, Cyclical, Intermittent, Loading then Maintenance
+    cycle_length_days = Column(Integer, nullable=True)
+    days_on_off = Column(String(50), nullable=True)  # e.g. "14 on / 7 off"
+    start_date = Column(Date, nullable=True)
+    planned_duration_or_cycles = Column(String(100), nullable=True)
+    food_instruction = Column(String(100), nullable=True)
+    handling_precautions = Column(Text, nullable=True)
+    # Reference spec calls this out explicitly: a structured, drug-specific instruction,
+    # never blank and never generic (ORL-020) -- enforced as required at sign time, not at
+    # draft time, so a clinician can still start drafting before it's decided.
+    missed_dose_instruction = Column(Text, nullable=True)
+    vomited_dose_instruction = Column(Text, nullable=True)
+    # DRAFT -> SIGNED -> DISPENSED -> ACTIVE -> ON_HOLD / DISCONTINUED / COMPLETED
+    status = Column(String(30), default="DRAFT")
+    supersedes_id = Column(Integer, ForeignKey("cca_oral_therapy_prescriptions.id"), nullable=True)
+    signer_email = Column(String(200), nullable=True)
+    signer_role = Column(String(50), nullable=True)
+    signed_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class OralTherapyCounselling(Base):
+    """Oral Therapy Counselling (SCR-ORL-002) -- gates first dispensing (ORL-050), the same
+    way PharmacyVerification gates PharmacyPreparation in the infusion pipeline. `checklist`
+    is a list of {item, covered, material_version, understanding} dicts, one per counselling
+    topic (dose/timing, food instruction, missed/vomited dose, storage, handling, side
+    effects, red flags, monitoring, interactions, refill process, contact number,
+    adherence) -- structured the same way PharmacyVerification/InfusionIndependentVerification
+    already use a JSON checklist for a fixed set of attestations."""
+    __tablename__ = "cca_oral_therapy_counsellings"
+    id = Column(Integer, primary_key=True)
+    prescription_id = Column(Integer, ForeignKey("cca_oral_therapy_prescriptions.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    checklist = Column(JSON, nullable=True)
+    language = Column(String(50), nullable=True)
+    interpreter_used = Column(Boolean, nullable=True)
+    carer_present = Column(Boolean, nullable=True)
+    adherence_aids_provided = Column(Text, nullable=True)
+    counselled_by = Column(String(200))
+    counselled_at = Column(DateTime, default=datetime.utcnow)
+
+
+class OralTherapyDispensing(Base):
+    """Dispensing & Refill (SCR-ORL-003). days_supply/returned_unused_quantity are
+    pharmacist-typed values, never reconciled against a computed expected-remaining figure
+    (reference spec's CALC-162 -- deliberately not ported, standing repo rule)."""
+    __tablename__ = "cca_oral_therapy_dispensings"
+    id = Column(Integer, primary_key=True)
+    prescription_id = Column(Integer, ForeignKey("cca_oral_therapy_prescriptions.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    quantity_dispensed = Column(String(100), nullable=True)
+    batch_lot = Column(String(100), nullable=True)
+    expiry_date = Column(Date, nullable=True)
+    days_supply = Column(String(50), nullable=True)  # pharmacist-typed, never computed
+    dispensed_by = Column(String(200))
+    checked_by = Column(String(200), nullable=True)
+    collected_by = Column(String(200), nullable=True)
+    returned_unused_quantity = Column(String(100), nullable=True)
+    status = Column(String(30), default="Dispensed")
+    dispensed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class OralTherapyReview(Base):
+    """Adherence & Toxicity Review (SCR-ORL-004). adherence_narrative is the pharmacist/
+    clinician's own written assessment, never a computed adherence percentage (reference
+    spec's CALC-163 -- deliberately not ported)."""
+    __tablename__ = "cca_oral_therapy_reviews"
+    id = Column(Integer, primary_key=True)
+    prescription_id = Column(Integer, ForeignKey("cca_oral_therapy_prescriptions.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    adherence_method = Column(String(100), nullable=True)  # Patient report, Pill count, Diary, Refill history, Electronic monitoring
+    doses_reported_taken = Column(String(100), nullable=True)
+    doses_missed = Column(String(100), nullable=True)
+    doses_missed_reasons = Column(Text, nullable=True)
+    adherence_narrative = Column(Text, nullable=True)
+    toxicity_event_id = Column(Integer, ForeignKey("cca_toxicity_events.id"), nullable=True)
+    monitoring_results_reviewed = Column(Text, nullable=True)
+    # Continue Unchanged, Reduce, Interrupt, Restart, Discontinue -- a clinician's chosen
+    # label, mirroring TreatmentOrder.dose_modification_percent's own documented reasoning.
+    dose_decision = Column(String(50), nullable=True)
+    next_review_date = Column(Date, nullable=True)
+    reviewed_by = Column(String(200))
+    reviewed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class OralTherapyHoldEvent(Base):
+    """Oral Therapy Hold / Restart / Discontinue (SCR-ORL-005). Because the patient
+    administers the drug themselves, a hold is not effective until they've actually been
+    told -- patient_notification_status stays HOLD_NOT_COMMUNICATED until
+    patient_contacted is recorded true (ORL-070), mirroring the reference spec's own
+    reasoning without any computed logic involved."""
+    __tablename__ = "cca_oral_therapy_hold_events"
+    id = Column(Integer, primary_key=True)
+    prescription_id = Column(Integer, ForeignKey("cca_oral_therapy_prescriptions.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    event_type = Column(String(30), nullable=False)  # Hold, Restart, Discontinue
+    interruption_start_date = Column(Date, nullable=True)
+    last_dose_taken_date = Column(Date, nullable=True)
+    reason = Column(Text, nullable=False)
+    restart_criteria = Column(Text, nullable=True)
+    restart_date = Column(Date, nullable=True)
+    restart_dose_label = Column(String(200), nullable=True)  # e.g. "Same dose" / "Reduced -- see new prescription version"
+    remaining_supply_disposition = Column(String(100), nullable=True)
+    patient_contacted = Column(Boolean, default=False)
+    patient_notification_status = Column(String(30), default="HOLD_NOT_COMMUNICATED")  # HOLD_NOT_COMMUNICATED, COMMUNICATED
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
