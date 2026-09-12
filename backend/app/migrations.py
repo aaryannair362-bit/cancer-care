@@ -225,6 +225,11 @@ ADDITIVE_COLUMNS = [
     ("cca_orders", "order_set_master_id", "INTEGER"),
     # Final gap-closing round: Treatment consent linkage per TreatmentPlan.
     ("cca_consents", "treatment_plan_id", "INTEGER"),
+    # Final gap-closing round: MDT minute-capture depth -- per-participant quorum timing +
+    # structured dissent.
+    ("cca_mdt_participants", "arrived_at", "TIMESTAMP"),
+    ("cca_mdt_participants", "departed_at", "TIMESTAMP"),
+    ("cca_mdt_participants", "dissenting_opinion", "TEXT"),
 ]
 
 

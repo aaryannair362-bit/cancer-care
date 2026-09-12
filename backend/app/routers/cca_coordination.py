@@ -189,6 +189,9 @@ def _participant_out(p: MDTParticipant) -> dict:
         "id": p.id, "case_id": p.case_id, "specialist_name": p.specialist_name,
         "specialist_role": p.specialist_role, "invitation_status": p.invitation_status,
         "attendance_status": p.attendance_status,
+        "arrived_at": p.arrived_at.isoformat() if p.arrived_at else None,
+        "departed_at": p.departed_at.isoformat() if p.departed_at else None,
+        "dissenting_opinion": p.dissenting_opinion,
     }
 
 
@@ -251,6 +254,80 @@ async def update_participant(participant_id: int, request: Request, db: Session 
         )
     db.commit()
     return {"status": "success", "participant": _participant_out(participant)}
+
+
+# ---------------------------------------------------------------------------
+# MDT minute-capture depth (gap review item 17) -- per-participant quorum timing (check-in/
+# check-out, server-timestamped like every other recorded_at in this codebase, never a
+# client-supplied time) and structured dissent, distinct from MDTMeetingMinutes'
+# free-text options_considered.
+# ---------------------------------------------------------------------------
+
+@router.post("/mdt/participants/{participant_id}/check-in")
+def check_in_participant(participant_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_mdt_coordinator(current_user)
+    participant = db.query(MDTParticipant).filter(MDTParticipant.id == participant_id).first()
+    if not participant:
+        raise HTTPException(404, "Participant not found")
+    _check_patient_in_org(db, _get_org_case(db, participant.case_id, _org_id(current_user)).patient_id, _org_id(current_user))
+    participant.arrived_at = datetime.utcnow()
+    participant.attendance_status = "Present"
+    db.commit()
+    db.refresh(participant)
+    return {"status": "success", "participant": _participant_out(participant)}
+
+
+@router.post("/mdt/participants/{participant_id}/check-out")
+def check_out_participant(participant_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_mdt_coordinator(current_user)
+    participant = db.query(MDTParticipant).filter(MDTParticipant.id == participant_id).first()
+    if not participant:
+        raise HTTPException(404, "Participant not found")
+    _check_patient_in_org(db, _get_org_case(db, participant.case_id, _org_id(current_user)).patient_id, _org_id(current_user))
+    if not participant.arrived_at:
+        raise HTTPException(409, "Cannot check out a participant who never checked in")
+    participant.departed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(participant)
+    return {"status": "success", "participant": _participant_out(participant)}
+
+
+@router.post("/mdt/participants/{participant_id}/dissent")
+async def record_participant_dissent(participant_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    participant = db.query(MDTParticipant).filter(MDTParticipant.id == participant_id).first()
+    if not participant:
+        raise HTTPException(404, "Participant not found")
+    case = _get_org_case(db, participant.case_id, _org_id(current_user))
+    body = await request.json()
+    opinion = (body.get("dissenting_opinion") or "").strip()
+    if not opinion:
+        raise HTTPException(422, "dissenting_opinion is required")
+    participant.dissenting_opinion = opinion
+    actor = _actor(current_user)
+    publish(
+        db, "MDT_DISSENT_RECORDED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Dissenting opinion recorded: {participant.specialist_name}", category="MDT",
+        description=f"{participant.specialist_name} ({participant.specialist_role}) recorded a dissenting opinion on case #{case.id}.",
+        mdt_case_id=case.id, participant_id=participant.id,
+    )
+    db.commit()
+    db.refresh(participant)
+    return {"status": "success", "participant": _participant_out(participant)}
+
+
+@router.get("/mdt/cases/{case_id}/quorum")
+def get_mdt_quorum(case_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Quorum established from actual checked-in participants -- pure read-time aggregation,
+    never a computed voting/majority judgment (quorum sufficiency is for the chair to
+    decide, not this system)."""
+    case = _get_org_case(db, case_id, _org_id(current_user))
+    participants = db.query(MDTParticipant).filter(MDTParticipant.case_id == case.id).all()
+    checked_in = [p for p in participants if p.arrived_at is not None]
+    return {
+        "case_id": case.id, "invited_count": len(participants), "checked_in_count": len(checked_in),
+        "dissenting_count": len([p for p in participants if p.dissenting_opinion]),
+        "participants": [_participant_out(p) for p in participants],
+    }
 
 
 # ---------------------------------------------------------------------------

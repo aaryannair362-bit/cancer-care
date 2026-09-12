@@ -270,8 +270,18 @@
                         </div>
                         <button class="btn-outline" onclick="submitMdtSchedule(${caseId})">📅 Save Schedule</button>
                         <hr style="margin:16px 0; border:none; border-top:1px solid var(--line);" />
-                        <div class="section-title" style="font-size:14px; margin-bottom:8px;">Participants</div>
-                        ${participants.participants.map(p => `<div class="participant-row">${escapeHtml(p.specialist_name)} (${escapeHtml(p.specialist_role)}) — ${escapeHtml(p.invitation_status)}</div>`).join('') || '<div class="participant-row">None added yet.</div>'}
+                        <div class="section-title" style="font-size:14px; margin-bottom:8px;">Participants &amp; Quorum</div>
+                        <div class="section-sub" style="margin-bottom:8px;" id="mdtc-quorum-${caseId}">Quorum: ${participants.participants.filter(p => p.arrived_at).length} / ${participants.participants.length} checked in</div>
+                        ${participants.participants.map(p => `
+                            <div class="participant-row" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
+                                <span>${escapeHtml(p.specialist_name)} (${escapeHtml(p.specialist_role)}) — ${escapeHtml(p.invitation_status)}${p.arrived_at ? (p.departed_at ? ' · Departed' : ' · Present') : ''}${p.dissenting_opinion ? ' · ⚠ Dissenting' : ''}</span>
+                                <span>
+                                    ${!p.arrived_at ? `<button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="submitParticipantCheckIn(${caseId}, ${p.id})">Check In</button>` : (!p.departed_at ? `<button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="submitParticipantCheckOut(${caseId}, ${p.id})">Check Out</button>` : '')}
+                                    <button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="promptParticipantDissent(${caseId}, ${p.id})">Record Dissent</button>
+                                </span>
+                                ${p.dissenting_opinion ? `<div style="width:100%; font-size:11.5px; color:var(--rose-badge-text);">${escapeHtml(p.dissenting_opinion)}</div>` : ''}
+                            </div>
+                        `).join('') || '<div class="participant-row">None added yet.</div>'}
                         <div class="form-grid-2" style="margin-top:12px;">
                             <div class="form-group" style="margin-bottom:8px;"><input type="text" id="mdtc-pname-${caseId}" class="form-input" placeholder="Specialist name" /></div>
                             <div class="form-group" style="margin-bottom:8px;"><input type="text" id="mdtc-prole-${caseId}" class="form-input" placeholder="Role, e.g. Radiologist" /></div>
@@ -351,6 +361,38 @@
             try {
                 await Api.post(`${CCA_API}/mdt/cases/${caseId}/participants`, { specialist_name: name, specialist_role: role });
                 toast('Participant added', 'success');
+                openMdtCase(caseId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // MDT minute-capture depth (final gap-closing round, item 17) -- per-participant
+        // quorum timing + structured dissent.
+        async function submitParticipantCheckIn(caseId, participantId) {
+            try {
+                await Api.post(`${CCA_API}/mdt/participants/${participantId}/check-in`, {});
+                toast('Checked in', 'success');
+                openMdtCase(caseId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitParticipantCheckOut(caseId, participantId) {
+            try {
+                await Api.post(`${CCA_API}/mdt/participants/${participantId}/check-out`, {});
+                toast('Checked out', 'success');
+                openMdtCase(caseId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function promptParticipantDissent(caseId, participantId) {
+            const opinion = prompt('Dissenting opinion:');
+            if (!opinion) return;
+            submitParticipantDissent(caseId, participantId, opinion);
+        }
+
+        async function submitParticipantDissent(caseId, participantId, opinion) {
+            try {
+                await Api.post(`${CCA_API}/mdt/participants/${participantId}/dissent`, { dissenting_opinion: opinion });
+                toast('Dissent recorded', 'success');
                 openMdtCase(caseId);
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }

@@ -598,6 +598,12 @@ class MDTParticipant(Base):
     specialist_role = Column(String(100), nullable=False)
     invitation_status = Column(String(20), default="NotInvited")  # NotInvited|Invited|Accepted|Declined|Pending
     attendance_status = Column(String(20), nullable=True)  # Present|Absent|JoinedRemotely
+    # Per-participant quorum timing + structured dissent (gap review item 17, MDT
+    # minute-capture depth) -- previously there was no way to establish quorum from actual
+    # arrival/departure times, and a dissenting opinion had nowhere structured to live.
+    arrived_at = Column(DateTime, nullable=True)
+    departed_at = Column(DateTime, nullable=True)
+    dissenting_opinion = Column(Text, nullable=True)
     added_at = Column(DateTime, default=datetime.utcnow)
 
 class CCAExternalAccess(Base):
