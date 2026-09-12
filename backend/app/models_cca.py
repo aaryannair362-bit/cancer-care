@@ -1229,6 +1229,17 @@ class InfusionReactionEvent(Base):
     directed_by = Column(String(200), nullable=True)
     reported_by = Column(String(200))
     reported_at = Column(DateTime, default=datetime.utcnow)
+    # Rechallenge decision (reference MAR-023, safety/dataflow-critical follow-up round) --
+    # future_rechallenge_decision/future_precautions are what "gets written back" so a future
+    # order/administration can see them: rather than a shared CCAPatient allergy field (this
+    # codebase's standing convention explicitly avoids that, see PreTreatmentSafetyCheck's
+    # docstring), routers/cca.py exposes a read-time query over these fields
+    # (GET /patients/{id}/reaction-precautions) so nothing is duplicated.
+    rechallenge_attempted = Column(Boolean, nullable=True)
+    rechallenge_outcome = Column(Text, nullable=True)
+    future_rechallenge_decision = Column(String(50), nullable=True)  # Permitted with premedication, Permitted with slower rate, Permitted after desensitisation, Not permitted, Clinician to decide
+    future_precautions = Column(Text, nullable=True)
+    rechallenge_decided_by = Column(String(200), nullable=True)
 
 
 class ExtravasationEvent(Base):
@@ -1900,3 +1911,65 @@ class SystemicTherapyHoldDecision(Base):
     resumed_by = Column(String(200), nullable=True)
     decided_by = Column(String(200))
     decided_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CumulativeDoseRecord(Base):
+    """Cumulative Dose Surveillance registry (reference SCR-PHA-009) -- a running total per
+    patient/agent, built as a plain sum over these rows rather than a stored total, so it can
+    never drift from its sources. dose_value is a pharmacist/clinician-typed value, never
+    computed, and no ceiling/threshold comparison is computed anywhere from it (standing repo
+    rule) -- only the registry and traceability the reference separately calls out (PHA-090:
+    "a ceiling computed only from doses given in this institution is dangerously wrong",
+    hence the explicit External/Prior source and external_source_detail below)."""
+    __tablename__ = "cca_cumulative_dose_records"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    agent = Column(String(200), nullable=False)
+    source = Column(String(30), default="Internal")  # Internal, External/Prior
+    administration_id = Column(Integer, ForeignKey("cca_infusion_medication_administrations.id"), nullable=True)
+    dose_value = Column(String(100), nullable=True)
+    unit = Column(String(50), nullable=True)
+    cycle_reference = Column(String(100), nullable=True)
+    external_source_detail = Column(Text, nullable=True)  # e.g. "Prior institution, 2024, 4 cycles"
+    flagged_for_review = Column(Boolean, default=False)
+    flagged_reason = Column(Text, nullable=True)
+    monitoring_status = Column(String(30), nullable=True)  # clinician/pharmacist-set, e.g. Not due, Due, Overdue, Completed
+    recorded_by = Column(String(200))
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PharmacyReturnEvent(Base):
+    """Return from unit (reference SCR-PHA-010) -- a dispensed-but-unused product returned to
+    pharmacy, with its disposition. Distinct from PharmacyPreparation's own wastage fields
+    (wastage AT preparation time, e.g. a partial vial) -- this is wastage/return AFTER
+    release, from the treatment unit back to pharmacy."""
+    __tablename__ = "cca_pharmacy_return_events"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_drug_line_id = Column(Integer, ForeignKey("cca_treatment_order_drug_lines.id"), nullable=True)
+    batch_number = Column(String(100), nullable=True)
+    quantity_returned = Column(String(100), nullable=True)
+    reason = Column(String(100), nullable=True)  # Treatment cancelled, Patient declined, Not required, Expired, Other
+    disposition = Column(String(50), nullable=True)  # Destroyed, Returned to stock, Returned to supplier
+    returned_by = Column(String(200))
+    received_by = Column(String(200), nullable=True)
+    returned_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PharmacyRecallEvent(Base):
+    """Product recall (reference SCR-PHA-010) -- organization-level, not patient data (see
+    ClinicalMaster's own reasoning for why org-level records stay out of cca_seed.py's
+    per-patient force_reset). affected patients are traced at read time via
+    PharmacyPreparation.batch_number (PHA-100's lot traceability), never duplicated here."""
+    __tablename__ = "cca_pharmacy_recall_events"
+    id = Column(Integer, primary_key=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    drug_name = Column(String(200), nullable=False)
+    batch_number = Column(String(100), nullable=False)
+    recall_reason = Column(Text, nullable=False)
+    recall_level = Column(String(30), nullable=True)  # Class I, Class II, Class III, Precautionary
+    status = Column(String(30), default="OPEN")  # OPEN, CLOSED
+    initiated_by = Column(String(200))
+    initiated_at = Column(DateTime, default=datetime.utcnow)
+    closed_by = Column(String(200), nullable=True)
+    closed_at = Column(DateTime, nullable=True)

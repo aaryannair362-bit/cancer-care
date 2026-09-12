@@ -26,7 +26,7 @@ from .models_cca import (
     SurvivorshipReferral,
     OralTherapyPrescription, OralTherapyCounselling, OralTherapyDispensing,
     OralTherapyReview, OralTherapyHoldEvent,
-    SystemicTherapyHoldDecision,
+    SystemicTherapyHoldDecision, CumulativeDoseRecord, PharmacyReturnEvent,
 )
 from .models_cca_oncology_ext import (
     TreatmentOrderDrugLine, RadiationPrescription, CCARadiationPhase, RadiationFraction,
@@ -74,8 +74,9 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # OralTherapyPrescription parent, all with their own patient_id.
             OralTherapyCounselling, OralTherapyDispensing, OralTherapyReview,
             OralTherapyHoldEvent, OralTherapyPrescription,
-            # Safety/dataflow-critical follow-up round.
-            SystemicTherapyHoldDecision,
+            # Safety/dataflow-critical follow-up round. PharmacyRecallEvent is organization-
+            # level (like ClinicalMaster), not patient data, so it stays out of this list.
+            SystemicTherapyHoldDecision, CumulativeDoseRecord, PharmacyReturnEvent,
             # Day Care / Treatment Order / Pharmacy universe (Phases 1-7 and Batches 1-2 of the
             # Product 1 vs Product 2 gap-closing initiative) -- previously entirely missing from
             # this reset, so repeated demo/reset calls accumulated stale TreatmentOrder rows that

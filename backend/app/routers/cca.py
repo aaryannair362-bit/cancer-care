@@ -54,7 +54,7 @@ from ..models_cca import (
     OralTherapyPrescription, OralTherapyCounselling, OralTherapyDispensing,
     OralTherapyReview, OralTherapyHoldEvent,
     ClinicalMaster, ClinicalMasterItem,
-    SystemicTherapyHoldDecision,
+    SystemicTherapyHoldDecision, CumulativeDoseRecord, PharmacyReturnEvent, PharmacyRecallEvent,
 )
 from ..cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
@@ -7345,6 +7345,183 @@ def list_hold_decisions(patient_id: int, db: Session = Depends(get_cca_db), curr
     _get_org_patient(db, patient_id, _org_id(current_user))
     rows = db.query(SystemicTherapyHoldDecision).filter(SystemicTherapyHoldDecision.patient_id == patient_id).order_by(SystemicTherapyHoldDecision.id.desc()).all()
     return {"hold_decisions": [_hold_decision_dict(h) for h in rows]}
+
+
+# ---------------------------------------------------------
+# Cumulative Dose Surveillance + Wastage/Returns/Recalls (reference SCR-PHA-009/010) --
+# safety/dataflow-critical follow-up round. The registry and lot-traceability parts of
+# these screens, never the ceiling/ threshold math (standing repo rule).
+# ---------------------------------------------------------
+
+def _cumulative_dose_record_dict(r: CumulativeDoseRecord) -> dict:
+    return {
+        "id": r.id, "patient_id": r.patient_id, "agent": r.agent, "source": r.source,
+        "administration_id": r.administration_id, "dose_value": r.dose_value, "unit": r.unit,
+        "cycle_reference": r.cycle_reference, "external_source_detail": r.external_source_detail,
+        "flagged_for_review": bool(r.flagged_for_review), "flagged_reason": r.flagged_reason,
+        "monitoring_status": r.monitoring_status, "recorded_by": r.recorded_by,
+        "recorded_at": r.recorded_at.isoformat() if r.recorded_at else None,
+    }
+
+
+@router.post("/patients/{patient_id}/cumulative-dose-records")
+async def add_cumulative_dose_record(
+    patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    if not (is_cca_pharmacist(current_user) or is_cca_oncologist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only Pharmacy or an oncologist may record a cumulative dose entry")
+    body = await request.json()
+    agent = (body.get("agent") or "").strip()
+    if not agent:
+        raise HTTPException(422, "agent is required")
+    row = CumulativeDoseRecord(
+        patient_id=patient_id, agent=agent, source=body.get("source", "Internal"),
+        administration_id=body.get("administration_id"), dose_value=body.get("dose_value"), unit=body.get("unit"),
+        cycle_reference=body.get("cycle_reference"), external_source_detail=body.get("external_source_detail"),
+        monitoring_status=body.get("monitoring_status"), recorded_by=_actor(current_user),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "record": _cumulative_dose_record_dict(row)}
+
+
+@router.get("/patients/{patient_id}/cumulative-dose-records")
+def list_cumulative_dose_records(
+    patient_id: int, agent: Optional[str] = None, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    """The registry view -- every contributing dose (internal administrations and
+    externally-entered prior exposure alike) for this patient, optionally filtered to one
+    agent. The running total is a plain sum a caller can compute over dose_value entries
+    that share a unit; this endpoint deliberately does not compute or compare that total
+    against anything (standing repo rule)."""
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    query = db.query(CumulativeDoseRecord).filter(CumulativeDoseRecord.patient_id == patient_id)
+    if agent:
+        query = query.filter(CumulativeDoseRecord.agent == agent)
+    rows = query.order_by(CumulativeDoseRecord.agent.asc(), CumulativeDoseRecord.id.asc()).all()
+    return {"records": [_cumulative_dose_record_dict(r) for r in rows]}
+
+
+@router.post("/cumulative-dose-records/{id}/flag")
+async def flag_cumulative_dose_record(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    row = db.query(CumulativeDoseRecord).filter(CumulativeDoseRecord.id == id).first()
+    if not row:
+        raise HTTPException(404, "Record not found")
+    _check_patient_in_org(db, row.patient_id, _org_id(current_user))
+    body = await request.json()
+    row.flagged_for_review = True
+    row.flagged_reason = body.get("flagged_reason")
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "record": _cumulative_dose_record_dict(row)}
+
+
+def _pharmacy_return_dict(r: PharmacyReturnEvent) -> dict:
+    return {
+        "id": r.id, "patient_id": r.patient_id, "treatment_order_drug_line_id": r.treatment_order_drug_line_id,
+        "batch_number": r.batch_number, "quantity_returned": r.quantity_returned, "reason": r.reason,
+        "disposition": r.disposition, "returned_by": r.returned_by, "received_by": r.received_by,
+        "returned_at": r.returned_at.isoformat() if r.returned_at else None,
+    }
+
+
+@router.post("/patients/{patient_id}/pharmacy-returns")
+async def create_pharmacy_return(
+    patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    if not (is_cca_pharmacist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only Pharmacy may record a product return")
+    body = await request.json()
+    row = PharmacyReturnEvent(
+        patient_id=patient_id, treatment_order_drug_line_id=body.get("treatment_order_drug_line_id"),
+        batch_number=body.get("batch_number"), quantity_returned=body.get("quantity_returned"),
+        reason=body.get("reason"), disposition=body.get("disposition"),
+        received_by=body.get("received_by"), returned_by=_actor(current_user),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"status": "success", "return_event": _pharmacy_return_dict(row)}
+
+
+def _pharmacy_recall_dict(r: PharmacyRecallEvent) -> dict:
+    return {
+        "id": r.id, "drug_name": r.drug_name, "batch_number": r.batch_number, "recall_reason": r.recall_reason,
+        "recall_level": r.recall_level, "status": r.status, "initiated_by": r.initiated_by,
+        "initiated_at": r.initiated_at.isoformat() if r.initiated_at else None,
+        "closed_by": r.closed_by, "closed_at": r.closed_at.isoformat() if r.closed_at else None,
+    }
+
+
+@router.post("/pharmacy-recalls")
+async def create_pharmacy_recall(
+    request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    if not (is_cca_pharmacist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only Pharmacy or Admin may initiate a recall")
+    org_id = _org_id(current_user)
+    body = await request.json()
+    drug_name = (body.get("drug_name") or "").strip()
+    batch_number = (body.get("batch_number") or "").strip()
+    recall_reason = (body.get("recall_reason") or "").strip()
+    if not (drug_name and batch_number and recall_reason):
+        raise HTTPException(422, "drug_name, batch_number and recall_reason are required")
+    recall = PharmacyRecallEvent(
+        organization_id=org_id, drug_name=drug_name, batch_number=batch_number, recall_reason=recall_reason,
+        recall_level=body.get("recall_level"), initiated_by=_actor(current_user),
+    )
+    db.add(recall)
+    db.commit()
+    db.refresh(recall)
+    return {"status": "success", "recall": _pharmacy_recall_dict(recall)}
+
+
+@router.get("/pharmacy-recalls")
+def list_pharmacy_recalls(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    org_id = _org_id(current_user)
+    rows = db.query(PharmacyRecallEvent).filter(PharmacyRecallEvent.organization_id == org_id).order_by(PharmacyRecallEvent.id.desc()).all()
+    return {"recalls": [_pharmacy_recall_dict(r) for r in rows]}
+
+
+@router.get("/pharmacy-recalls/{id}/affected-patients")
+def get_recall_affected_patients(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Traces a recall to every patient who received a preparation from the recalled batch
+    (PHA-100's lot traceability) -- a plain join over PharmacyPreparation.batch_number,
+    computed at read time, never duplicated storage."""
+    org_id = _org_id(current_user)
+    recall = db.query(PharmacyRecallEvent).filter(PharmacyRecallEvent.id == id, PharmacyRecallEvent.organization_id == org_id).first()
+    if not recall:
+        raise HTTPException(404, "Recall not found")
+    preps = db.query(PharmacyPreparation).filter(PharmacyPreparation.batch_number == recall.batch_number).all()
+    patient_ids = sorted({p.patient_id for p in preps})
+    patients = db.query(CCAPatient).filter(CCAPatient.id.in_(patient_ids), CCAPatient.organization_id == org_id).all() if patient_ids else []
+    return {
+        "recall": _pharmacy_recall_dict(recall),
+        "affected_patients": [{"id": p.id, "name": p.name, "mrn": p.mrn} for p in patients],
+    }
+
+
+@router.post("/pharmacy-recalls/{id}/close")
+def close_pharmacy_recall(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not (is_cca_pharmacist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only Pharmacy or Admin may close a recall")
+    org_id = _org_id(current_user)
+    recall = db.query(PharmacyRecallEvent).filter(PharmacyRecallEvent.id == id, PharmacyRecallEvent.organization_id == org_id).first()
+    if not recall:
+        raise HTTPException(404, "Recall not found")
+    if recall.status == "CLOSED":
+        raise HTTPException(409, "This recall is already closed")
+    recall.status = "CLOSED"
+    recall.closed_by = _actor(current_user)
+    recall.closed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(recall)
+    return {"status": "success", "recall": _pharmacy_recall_dict(recall)}
 
 
 # ---------------------------------------------------------
