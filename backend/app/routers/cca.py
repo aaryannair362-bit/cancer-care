@@ -6138,6 +6138,42 @@ async def create_treatment_completion(
     return {"status": "success", "treatment_completion": _treatment_completion_dict(completion)}
 
 
+@router.get("/treatment-completions/worklist")
+def treatment_completion_worklist(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """The Treatment Completion Worklist (reference SCR-CMP-001, worklist/dashboard
+    follow-up round) -- every patient with a completion review across the whole
+    organization, not just one patient at a time. Registered before the /{id} route below
+    so "worklist" is never swallowed as an id path parameter. summary_status/
+    distribution_status are read straight off the linked TreatmentSummary/
+    TreatmentSummaryDistribution rows, never computed."""
+    org_id = _org_id(current_user)
+    rows = db.query(TreatmentCompletion).join(
+        CCAPatient, CCAPatient.id == TreatmentCompletion.patient_id
+    ).filter(CCAPatient.organization_id == org_id).order_by(TreatmentCompletion.id.desc()).all()
+
+    results = []
+    for c in rows:
+        patient = db.query(CCAPatient).filter(CCAPatient.id == c.patient_id).first()
+        summary = db.query(TreatmentSummary).filter(TreatmentSummary.completion_id == c.id).order_by(TreatmentSummary.id.desc()).first()
+        distributions = db.query(TreatmentSummaryDistribution).filter(TreatmentSummaryDistribution.summary_id == summary.id).all() if summary else []
+        if not distributions:
+            distribution_status = "Not sent"
+        elif any(d.status != "Acknowledged" for d in distributions):
+            distribution_status = "Pending"
+        else:
+            distribution_status = "Acknowledged"
+        results.append({
+            "completion_id": c.id, "patient_id": c.patient_id, "patient_name": patient.name if patient else None,
+            "mrn": patient.mrn if patient else None, "cancer_episode_ref": c.cancer_episode_ref,
+            "completion_type": c.completion_type,
+            "treatment_end_date": c.treatment_end_date.isoformat() if c.treatment_end_date else None,
+            "completion_status": c.status, "signed_by": c.signed_by,
+            "summary_status": summary.status if summary else "Not started",
+            "distribution_status": distribution_status,
+        })
+    return {"worklist": results, "total": len(results)}
+
+
 @router.get("/treatment-completions/{id}")
 def get_treatment_completion(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     completion = db.query(TreatmentCompletion).filter(TreatmentCompletion.id == id).first()
@@ -6154,7 +6190,9 @@ def get_treatment_completion(id: int, db: Session = Depends(get_cca_db), current
 
 @router.get("/patients/{patient_id}/treatment-completions")
 def list_treatment_completions(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
-    """The Treatment Completion Worklist (SCR-CMP-001), scoped to one patient."""
+    """Every completion review on record for one patient (a component of SCR-CMP-001's
+    worklist -- see the org-wide GET /treatment-completions/worklist below for the actual
+    cross-patient screen)."""
     _get_org_patient(db, patient_id, _org_id(current_user))
     rows = db.query(TreatmentCompletion).filter(TreatmentCompletion.patient_id == patient_id).order_by(TreatmentCompletion.id.desc()).all()
     return {"treatment_completions": [_treatment_completion_dict(c) for c in rows]}
