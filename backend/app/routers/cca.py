@@ -41,6 +41,7 @@ from ..models_cca import (
     CarePlanVersion, CarePlanTask, TreatmentPlan, TreatmentPlanVersion, TreatmentSession,
     TreatmentOrder, TreatmentEvent,
     ToxicityEvent, SeriousAdverseEventReport, TreatmentClearance, ResponseAssessment, CCAJourneyEvent,
+    TargetLesion, LesionMeasurement, ProgressionRecurrenceEvent,
     PreTreatmentSafetyCheck, VascularAccessAssessment, PharmacyReadiness,
     InfusionMedicationAdministration, InfusionAdministrationEvent, InfusionMonitoringObservation,
     TreatmentHoldEvent, InfusionReactionEvent, ExtravasationEvent, TreatmentDayCompletion,
@@ -6480,6 +6481,152 @@ async def record_response_assessment(
             "confirmed": resp.confirmed
         }
     }
+
+
+# ---------------------------------------------------------
+# 11a. Structured, longitudinal per-lesion tracking (gap review item 6) + Progression/
+# Recurrence events -- shared by Response Assessment and Radiology, both of which
+# previously relied only on an unstructured JSON blob for lesion data. baseline/nadir/
+# current below are computed at read time from measured_on ordering (earliest, smallest,
+# latest recorded value) -- never a stored classification, and never a RECIST percent-
+# change/threshold computation (standing repo rule).
+# ---------------------------------------------------------
+
+def _lesion_measurement_dict(m: LesionMeasurement) -> dict:
+    return {
+        "id": m.id, "lesion_id": m.lesion_id, "result_id": m.result_id,
+        "measured_on": m.measured_on.isoformat() if m.measured_on else None,
+        "longest_diameter_mm": m.longest_diameter_mm, "short_axis_mm": m.short_axis_mm,
+        "present": bool(m.present), "notes": m.notes, "measured_by": m.measured_by,
+    }
+
+
+def _lesion_dict(l: TargetLesion, measurements: list) -> dict:
+    measured = [m for m in measurements if m.longest_diameter_mm is not None]
+    ordered = sorted(measured, key=lambda m: m.measured_on)
+    return {
+        "id": l.id, "patient_id": l.patient_id, "lesion_label": l.lesion_label, "organ_site": l.organ_site,
+        "is_target": bool(l.is_target), "identified_on": l.identified_on.isoformat() if l.identified_on else None,
+        "identified_by": l.identified_by, "status": l.status,
+        "baseline_diameter_mm": ordered[0].longest_diameter_mm if ordered else None,
+        "nadir_diameter_mm": min((m.longest_diameter_mm for m in ordered), default=None),
+        "current_diameter_mm": ordered[-1].longest_diameter_mm if ordered else None,
+        "measurement_count": len(measurements),
+        "measurements": [_lesion_measurement_dict(m) for m in sorted(measurements, key=lambda m: m.measured_on)],
+    }
+
+
+@router.post("/patients/{patient_id}/target-lesions", status_code=201)
+async def create_target_lesion(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    label = (body.get("lesion_label") or "").strip()
+    if not label:
+        raise HTTPException(422, "lesion_label is required")
+    lesion = TargetLesion(
+        patient_id=patient_id, lesion_label=label, organ_site=body.get("organ_site"),
+        is_target=bool(body.get("is_target", True)),
+        identified_on=datetime.fromisoformat(body["identified_on"]).date() if body.get("identified_on") else datetime.utcnow().date(),
+        identified_by=_actor(current_user),
+    )
+    db.add(lesion)
+    db.commit()
+    db.refresh(lesion)
+    return {"status": "success", "lesion": _lesion_dict(lesion, [])}
+
+
+@router.get("/patients/{patient_id}/target-lesions")
+def list_target_lesions(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    lesions = db.query(TargetLesion).filter(TargetLesion.patient_id == patient_id).order_by(TargetLesion.id).all()
+    lesion_ids = [l.id for l in lesions]
+    all_measurements = db.query(LesionMeasurement).filter(LesionMeasurement.lesion_id.in_(lesion_ids)).all() if lesion_ids else []
+    by_lesion: dict = {}
+    for m in all_measurements:
+        by_lesion.setdefault(m.lesion_id, []).append(m)
+    return {"lesions": [_lesion_dict(l, by_lesion.get(l.id, [])) for l in lesions]}
+
+
+def _get_org_lesion(db: Session, lesion_id: int, org_id: int) -> TargetLesion:
+    lesion = db.query(TargetLesion).filter(TargetLesion.id == lesion_id).first()
+    if not lesion:
+        raise HTTPException(404, "Target lesion not found")
+    _check_patient_in_org(db, lesion.patient_id, org_id)
+    return lesion
+
+
+@router.post("/target-lesions/{id}/measurements", status_code=201)
+async def add_lesion_measurement(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    lesion = _get_org_lesion(db, id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    present = bool(body.get("present", True))
+    if present and body.get("longest_diameter_mm") is None:
+        raise HTTPException(422, "longest_diameter_mm is required when present is true")
+    measurement = LesionMeasurement(
+        lesion_id=lesion.id, result_id=body.get("result_id"),
+        measured_on=datetime.fromisoformat(body["measured_on"]).date() if body.get("measured_on") else datetime.utcnow().date(),
+        longest_diameter_mm=body.get("longest_diameter_mm"), short_axis_mm=body.get("short_axis_mm"),
+        present=present, notes=body.get("notes"), measured_by=_actor(current_user),
+    )
+    db.add(measurement)
+    if not present:
+        lesion.status = "RESOLVED"
+    db.commit()
+    db.refresh(measurement)
+    return {"status": "success", "measurement": _lesion_measurement_dict(measurement)}
+
+
+@router.get("/target-lesions/{id}/measurements")
+def list_lesion_measurements(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    lesion = _get_org_lesion(db, id, _org_id(current_user))
+    rows = db.query(LesionMeasurement).filter(LesionMeasurement.lesion_id == lesion.id).order_by(LesionMeasurement.measured_on).all()
+    return {"measurements": [_lesion_measurement_dict(m) for m in rows]}
+
+
+def _progression_event_dict(e: ProgressionRecurrenceEvent) -> dict:
+    return {
+        "id": e.id, "patient_id": e.patient_id, "episode_id": e.episode_id, "event_type": e.event_type,
+        "detected_on": e.detected_on.isoformat() if e.detected_on else None, "site": e.site,
+        "evidence": e.evidence, "response_assessment_id": e.response_assessment_id,
+        "clinical_impact": e.clinical_impact, "next_steps": e.next_steps, "reported_by": e.reported_by,
+    }
+
+
+@router.post("/patients/{patient_id}/progression-recurrence-events", status_code=201)
+async def create_progression_recurrence_event(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    event_type = body.get("event_type")
+    if event_type not in ("Progression", "Recurrence", "New Primary"):
+        raise HTTPException(422, "event_type must be one of Progression, Recurrence, New Primary")
+    actor = _actor(current_user)
+    event = ProgressionRecurrenceEvent(
+        patient_id=patient_id, episode_id=body.get("episode_id"), event_type=event_type,
+        detected_on=datetime.fromisoformat(body["detected_on"]).date() if body.get("detected_on") else datetime.utcnow().date(),
+        site=body.get("site"), evidence=body.get("evidence"), response_assessment_id=body.get("response_assessment_id"),
+        clinical_impact=body.get("clinical_impact"), next_steps=body.get("next_steps"), reported_by=actor,
+    )
+    db.add(event)
+    db.flush()
+    publish(
+        db, "PROGRESSION_RECURRENCE_RECORDED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title=f"{event_type} recorded", category="FOLLOW_UP",
+        description=f"{actor} recorded a {event_type.lower()} event" + (f" at {event.site}" if event.site else "") + ".",
+        progression_event_id=event.id,
+    )
+    db.commit()
+    db.refresh(event)
+    return {"status": "success", "event": _progression_event_dict(event)}
+
+
+@router.get("/patients/{patient_id}/progression-recurrence-events")
+def list_progression_recurrence_events(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(ProgressionRecurrenceEvent).filter(ProgressionRecurrenceEvent.patient_id == patient_id).order_by(ProgressionRecurrenceEvent.detected_on.desc()).all()
+    return {"events": [_progression_event_dict(e) for e in rows]}
 
 
 # ---------------------------------------------------------

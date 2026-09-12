@@ -1043,6 +1043,68 @@ class ResponseAssessment(Base):
     recorded_by = Column(String(200))
     recorded_at = Column(DateTime, default=datetime.utcnow)
 
+
+# ---------------------------------------------------------------------------
+# Structured, longitudinal per-lesion tracking (gap review item 6) -- ResponseAssessment's
+# `lesions` JSON blob above and Radiology's CCAResult.structured_report JSON blob both
+# previously had no real baseline->nadir->current tracking; this is the shared, durable home
+# for that. No RECIST percent-change/threshold computation lives here (standing repo rule) --
+# response_category on ResponseAssessment stays entirely the clinician's own judgment;
+# baseline/nadir/current are just the earliest/smallest/latest recorded measurement, read at
+# request time, never a stored classification that could drift out of sync.
+# ---------------------------------------------------------------------------
+
+class TargetLesion(Base):
+    """A lesion identified for longitudinal tracking. is_target distinguishes RECIST target
+    lesions (measured, sum-tracked) from non-target lesions (present/absent only) -- always
+    the radiologist/clinician's own designation."""
+    __tablename__ = "cca_target_lesions"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    lesion_label = Column(String(100), nullable=False)  # e.g. "Lesion 1 -- Liver segment VI"
+    organ_site = Column(String(200), nullable=True)
+    is_target = Column(Boolean, default=True)
+    identified_on = Column(Date, nullable=True)
+    identified_by = Column(String(200), nullable=True)
+    status = Column(String(30), default="ACTIVE")  # ACTIVE, RESOLVED, NEW
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class LesionMeasurement(Base):
+    """One measurement of one TargetLesion at one imaging timepoint -- longest_diameter_mm
+    is always what the radiologist/clinician measured and typed in, never computed."""
+    __tablename__ = "cca_lesion_measurements"
+    id = Column(Integer, primary_key=True)
+    lesion_id = Column(Integer, ForeignKey("cca_target_lesions.id"), nullable=False)
+    result_id = Column(Integer, ForeignKey("cca_results.id"), nullable=True)
+    measured_on = Column(Date, nullable=False)
+    longest_diameter_mm = Column(Float, nullable=True)
+    short_axis_mm = Column(Float, nullable=True)  # for lymph nodes, per RECIST convention
+    present = Column(Boolean, default=True)  # False = lesion no longer visible at this timepoint
+    notes = Column(Text, nullable=True)
+    measured_by = Column(String(200), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ProgressionRecurrenceEvent(Base):
+    """A distinct Progression/Recurrence event -- previously the only record of "when did
+    this patient's disease progress/recur" was whatever a ResponseAssessment row's
+    response_category happened to say. event_type is always the clinician's own
+    classification, never inferred from measurements."""
+    __tablename__ = "cca_progression_recurrence_events"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    episode_id = Column(Integer, ForeignKey("cca_cancer_episodes.id"), nullable=True)
+    event_type = Column(String(30), nullable=False)  # Progression, Recurrence, New Primary
+    detected_on = Column(Date, nullable=False)
+    site = Column(String(200), nullable=True)
+    evidence = Column(Text, nullable=True)
+    response_assessment_id = Column(Integer, ForeignKey("cca_response_assessments.id"), nullable=True)
+    clinical_impact = Column(Text, nullable=True)
+    next_steps = Column(Text, nullable=True)
+    reported_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 class CCAJourneyEvent(Base):
     __tablename__ = "cca_journey_events"
     id = Column(Integer, primary_key=True)

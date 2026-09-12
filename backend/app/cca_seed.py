@@ -12,6 +12,7 @@ from .models_cca import (
     CCABiomarkerResult, CCAOrder, CCAResult, StagingRecord, StagingEvidence,
     GuidelineContext, ClinicalBrief, MDTCase, MDTDecision, CarePlan,
     CarePlanTask, TreatmentPlan, TreatmentSession, ToxicityEvent, SeriousAdverseEventReport,
+    TargetLesion, LesionMeasurement, ProgressionRecurrenceEvent,
     TreatmentClearance, ResponseAssessment, CCAJourneyEvent,
     TreatmentOrder, TreatmentEvent, PharmacyReadiness, PreTreatmentSafetyCheck,
     VascularAccessAssessment, InfusionMedicationAdministration, InfusionAdministrationEvent,
@@ -124,6 +125,9 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # Has its own patient_id -- optionally references a ToxicityEvent, deleted
             # before ToxicityEvent itself just below.
             SeriousAdverseEventReport, ToxicityEvent,
+            # Has its own patient_id; its child LesionMeasurement rows (keyed by lesion_id,
+            # no patient_id of their own) are deleted above via lesion_ids lookup.
+            ProgressionRecurrenceEvent, TargetLesion,
             TreatmentSession, TreatmentPlan, CarePlanTask, CarePlan, MDTDecision,
             MDTCase, ClinicalBrief, GuidelineContext, StagingRecord,
             CCAResult, CCAOrder, CCABiomarkerResult, CCACancerDiagnosis,
@@ -164,6 +168,17 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
                     db.query(child_model).filter(
                         child_model.admission_id.in_(inpatient_admission_ids)
                     ).delete(synchronize_session=False)
+            # LesionMeasurement has no patient_id of its own -- delete it via its parent
+            # TargetLesion ids before TargetLesion itself is deleted below.
+            target_lesion_ids = [
+                row.id for row in db.query(TargetLesion.id).filter(
+                    TargetLesion.patient_id.in_(org_patient_ids)
+                ).all()
+            ]
+            if target_lesion_ids:
+                db.query(LesionMeasurement).filter(
+                    LesionMeasurement.lesion_id.in_(target_lesion_ids)
+                ).delete(synchronize_session=False)
             # StagingEvidence has no patient_id of its own -- delete it via its
             # parent StagingRecord ids before StagingRecord itself is deleted below.
             staging_record_ids = [

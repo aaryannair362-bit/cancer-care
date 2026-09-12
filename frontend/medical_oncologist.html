@@ -276,6 +276,7 @@
             <a class="sidebar-nav-item" id="nav-surveillance" onclick="showTab('surveillance')"><div class="nav-item-left"><span>🔭</span><span>Surveillance</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-inpatient" onclick="showTab('inpatient')"><div class="nav-item-left"><span>🛏️</span><span>Inpatient</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-toxicity" onclick="showTab('toxicity')"><div class="nav-item-left"><span>⚠️</span><span>Toxicity Register</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-lesions" onclick="showTab('lesions')"><div class="nav-item-left"><span>📏</span><span>Response Tracking</span></div><span class="nav-chevron">›</span></a>
 
             <div class="sidebar-section-title">CLINICAL INTELLIGENCE / COORDINATION</div>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
@@ -500,6 +501,13 @@
                 <div id="toxicity-content"><!-- Populated via JS: loadToxicityRegisterView() --></div>
             </div>
 
+            <!-- ===== RESPONSE / LESION TRACKING (final gap-closing round, item 6) ===== -->
+            <div id="view-lesions" class="view-panel">
+                <h1 class="page-title">Response Tracking</h1>
+                <p class="page-subtitle">Structured, longitudinal per-lesion measurements (baseline/nadir/current) and distinct Progression/Recurrence events.</p>
+                <div id="lesions-content"><!-- Populated via JS: loadLesionTrackingView() --></div>
+            </div>
+
             <!-- ===== NEXUS: real 13(+1)-section clinical brief (renderNexusBrief, cca-summary.js)
                  above a coordination-task board that is still static/mock ===== -->
             <div id="view-nexus" class="view-panel">
@@ -643,6 +651,7 @@
             if (tab === 'surveillance') loadSurveillanceView();
             if (tab === 'inpatient') loadInpatientView();
             if (tab === 'toxicity') loadToxicityRegisterView();
+            if (tab === 'lesions') loadLesionTrackingView();
             if (tab === 'guideline') loadGuidelinePathway();
             if (tab === 'staging') loadStagingWorkspace();
             if (tab === 'mdt') loadMdtWorkspace();
@@ -3109,6 +3118,107 @@
                 await Api.post(`${CCA_API}/sae-reports/${saeId}/submit`, { reported_to: reportedTo });
                 toast('SAE report submitted', 'success');
                 loadToxicityRegisterView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---------------------------------------------------------------
+        // Response / Lesion Tracking (final gap-closing round, item 6)
+        // ---------------------------------------------------------------
+        async function loadLesionTrackingView() {
+            const container = document.getElementById('lesions-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient above, or from Patients, to open their response tracking.</p></div>'; return; }
+            try {
+                const [lesionsData, eventsData] = await Promise.all([
+                    Api.get(`${CCA_API}/patients/${currentPatientId}/target-lesions`),
+                    Api.get(`${CCA_API}/patients/${currentPatientId}/progression-recurrence-events`),
+                ]);
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-title">Target / Non-Target Lesions</div>
+                        ${lesionsData.lesions.length ? lesionsData.lesions.map(l => `
+                            <div class="checklist-row" style="display:block;">
+                                <strong>${escapeHtml(l.lesion_label)}</strong> ${l.is_target ? '<span class="badge badge-blue">Target</span>' : '<span class="badge badge-amber">Non-target</span>'} <span class="badge ${l.status === 'RESOLVED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(l.status)}</span>
+                                <div style="font-size:12px; color:var(--ink-500); margin-top:4px;">${escapeHtml(l.organ_site || '')} — Baseline ${l.baseline_diameter_mm ?? '—'}mm · Nadir ${l.nadir_diameter_mm ?? '—'}mm · Current ${l.current_diameter_mm ?? '—'}mm (${l.measurement_count} measurement(s))</div>
+                                <div class="form-grid-2" style="margin-top:8px;">
+                                    <div class="form-group"><label class="form-label">Measured on</label><input type="date" id="lm-date-${l.id}" class="form-input" /></div>
+                                    <div class="form-group"><label class="form-label">Longest diameter (mm)</label><input type="number" step="0.1" id="lm-diameter-${l.id}" class="form-input" /></div>
+                                </div>
+                                <button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="submitLesionMeasurement(${l.id})">Add Measurement</button>
+                            </div>
+                        `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No lesions being tracked.</p>'}
+                        <button class="btn-outline" style="margin-top:10px;" onclick="toggleLesionForm()">+ Add Lesion</button>
+                        <div id="lesion-create-form"></div>
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title">Progression / Recurrence Events</div>
+                        ${eventsData.events.length ? eventsData.events.map(e => `<div class="checklist-row" style="display:block;"><strong>${escapeHtml(e.event_type)}</strong> — ${escapeHtml(e.site || '')} (${e.detected_on}): ${escapeHtml(e.evidence || '')}</div>`).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No progression/recurrence events recorded.</p>'}
+                        <button class="btn-outline" style="margin-top:10px;" onclick="toggleProgressionForm()">+ Record Progression/Recurrence</button>
+                        <div id="progression-create-form"></div>
+                    </div>
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        function toggleLesionForm() {
+            const host = document.getElementById('lesion-create-form');
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div class="form-grid-2" style="margin-top:10px;">
+                    <div class="form-group"><label class="form-label">Lesion label *</label><input type="text" id="lesion-label" class="form-input" placeholder="e.g. Lesion 1 -- Liver segment VI" /></div>
+                    <div class="form-group"><label class="form-label">Organ site</label><input type="text" id="lesion-site" class="form-input" /></div>
+                </div>
+                <label style="display:inline-flex; align-items:center; gap:6px; font-size:12.5px; margin-bottom:10px;"><input type="checkbox" id="lesion-is-target" checked/> Target lesion</label><br/>
+                <button class="btn-navy" onclick="submitCreateLesion()">Add Lesion</button>
+            `;
+        }
+
+        async function submitCreateLesion() {
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/target-lesions`, {
+                    lesion_label: document.getElementById('lesion-label').value, organ_site: document.getElementById('lesion-site').value || undefined,
+                    is_target: document.getElementById('lesion-is-target').checked,
+                });
+                toast('Lesion added', 'success');
+                loadLesionTrackingView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitLesionMeasurement(lesionId) {
+            try {
+                await Api.post(`${CCA_API}/target-lesions/${lesionId}/measurements`, {
+                    measured_on: document.getElementById(`lm-date-${lesionId}`).value || undefined,
+                    longest_diameter_mm: Number(document.getElementById(`lm-diameter-${lesionId}`).value) || undefined,
+                });
+                toast('Measurement recorded', 'success');
+                loadLesionTrackingView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function toggleProgressionForm() {
+            const host = document.getElementById('progression-create-form');
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div class="form-grid-2" style="margin-top:10px;">
+                    <div class="form-group"><label class="form-label">Event type</label>
+                        <select id="prog-type" class="form-select"><option>Progression</option><option>Recurrence</option><option>New Primary</option></select>
+                    </div>
+                    <div class="form-group"><label class="form-label">Site</label><input type="text" id="prog-site" class="form-input" /></div>
+                </div>
+                <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Evidence</label><input type="text" id="prog-evidence" class="form-input" /></div>
+                <button class="btn-navy" onclick="submitProgressionEvent()">Record Event</button>
+            `;
+        }
+
+        async function submitProgressionEvent() {
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/progression-recurrence-events`, {
+                    event_type: document.getElementById('prog-type').value, site: document.getElementById('prog-site').value || undefined,
+                    evidence: document.getElementById('prog-evidence').value || undefined,
+                });
+                toast('Event recorded', 'success');
+                loadLesionTrackingView();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
