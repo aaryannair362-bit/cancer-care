@@ -55,6 +55,8 @@ def patient(db_session, oncologist):
 
 
 def _create_phase(client, onc_headers, patient_id):
+    # RO Consultation gate (gap review item 9) -- required before a course can be prescribed.
+    client.post(f"/api/cca/patients/{patient_id}/radiation-consultations", headers=onc_headers, json={"cied_present": False})
     rx = client.post("/api/cca/radiation-prescriptions", headers=onc_headers, json={
         "patient_id": patient_id, "diagnosis": "Breast Cancer", "intent": "Curative", "technique": "IMRT",
     })

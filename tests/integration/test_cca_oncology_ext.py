@@ -102,6 +102,9 @@ def test_demo_patient_get_or_create_is_idempotent(client, auth_headers, oncologi
 def _create_rx(client, headers, patient_id, **overrides):
     """Creates the COURSE shell only -- no dose/site/fraction fields live here anymore
     (Oncology Review Results PDF item 3: those are per-phase, see _create_phase)."""
+    # RO Consultation gate (gap review item 9) -- required before a course can be
+    # prescribed.
+    client.post(f"/api/cca/patients/{patient_id}/radiation-consultations", headers=headers, json={"cied_present": False})
     return client.post("/api/cca/radiation-prescriptions", headers=headers, json={
         "patient_id": patient_id, "diagnosis": "Left breast carcinoma", **overrides,
     }).json()["radiation_prescription"]

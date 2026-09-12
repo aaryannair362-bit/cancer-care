@@ -30,7 +30,7 @@ from ..models_cca_oncology_ext import (
     RadiationInterruption, RadiationOnTreatmentVisit,
     RadiationDiscrepancyRecord, RadiationPreTreatmentVerification,
     RadiationTreatmentUnit, RadiationEquipmentQARecord, RadiationEquipmentIssue,
-    RadiationInVivoDosimetry,
+    RadiationInVivoDosimetry, RadiationOncologyConsultation,
     Regimen, RegimenDrugLine, SurgicalPlan, TreatmentPlanPhase,
     SurgicalIntraOpMonitoring, SurgicalOperativeNote, SurgicalSpecimen, SurgicalBloodTransfusion,
     ClinicalProcedureNote, PalliativeTreatmentOrder,
@@ -281,6 +281,49 @@ def get_or_create_demo_patient(db: Session = Depends(get_cca_db), current_user: 
 # Radiation Oncology
 # ---------------------------------------------------------------------------
 
+def _rt_consultation_out(c: RadiationOncologyConsultation) -> dict:
+    return {
+        "id": c.id, "patient_id": c.patient_id, "cied_present": c.cied_present, "cied_type": c.cied_type,
+        "cied_management_plan": c.cied_management_plan, "prior_rt_received": c.prior_rt_received,
+        "prior_rt_site": c.prior_rt_site, "prior_rt_summary": c.prior_rt_summary,
+        "cumulative_prior_oar_dose_note": c.cumulative_prior_oar_dose_note,
+        "contraindications_checklist": c.contraindications_checklist or {}, "contraindications_note": c.contraindications_note,
+        "consulted_by": c.consulted_by, "consulted_at": c.consulted_at.isoformat() if c.consulted_at else None,
+    }
+
+
+@router.post("/patients/{patient_id}/radiation-consultations", status_code=201)
+async def create_radiation_consultation(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """RO Consultation (SCR-RO-002, gap review item 9) -- captures CIED/pacemaker status and
+    prior-RT/re-irradiation history before a course can be prescribed; see
+    create_radiation_prescription's gate below."""
+    _require_modality_signer(current_user, "radiation")
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    cied_present = body.get("cied_present")
+    if cied_present and not (body.get("cied_management_plan") or "").strip():
+        raise HTTPException(422, "cied_management_plan is required when cied_present is true")
+    consultation = RadiationOncologyConsultation(
+        patient_id=patient_id, cied_present=cied_present, cied_type=body.get("cied_type"),
+        cied_management_plan=body.get("cied_management_plan"), prior_rt_received=body.get("prior_rt_received"),
+        prior_rt_site=body.get("prior_rt_site"), prior_rt_summary=body.get("prior_rt_summary"),
+        cumulative_prior_oar_dose_note=body.get("cumulative_prior_oar_dose_note"),
+        contraindications_checklist=body.get("contraindications_checklist"),
+        contraindications_note=body.get("contraindications_note"), consulted_by=_actor(current_user),
+    )
+    db.add(consultation)
+    db.commit()
+    db.refresh(consultation)
+    return {"status": "success", "consultation": _rt_consultation_out(consultation)}
+
+
+@router.get("/patients/{patient_id}/radiation-consultations")
+def list_radiation_consultations(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(RadiationOncologyConsultation).filter(RadiationOncologyConsultation.patient_id == patient_id).order_by(RadiationOncologyConsultation.id.desc()).all()
+    return {"consultations": [_rt_consultation_out(c) for c in rows]}
+
+
 @router.post("/radiation-prescriptions", status_code=201)
 async def create_radiation_prescription(request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     """Creates the COURSE shell only -- site/dose/fractions are added per-phase via
@@ -293,6 +336,17 @@ async def create_radiation_prescription(request: Request, db: Session = Depends(
     if patient_id is None:
         raise HTTPException(422, "patient_id is required")
     _get_org_patient(db, patient_id, _org_id(current_user))
+
+    # RO Consultation gate (gap review item 9) -- a course cannot be prescribed until a
+    # consultation has addressed CIED/pacemaker management, matching this codebase's other
+    # precondition gates (e.g. Pre-Treatment Verification before a fraction can deliver).
+    consultation = db.query(RadiationOncologyConsultation).filter(
+        RadiationOncologyConsultation.patient_id == patient_id
+    ).order_by(RadiationOncologyConsultation.id.desc()).first()
+    if not consultation:
+        raise HTTPException(409, "A Radiation Oncology Consultation (CIED status, prior-RT history) is required before prescribing a course")
+    if consultation.cied_present and not consultation.cied_management_plan:
+        raise HTTPException(409, "The patient's CIED management plan must be documented before prescribing a course")
 
     rx = RadiationPrescription(
         patient_id=patient_id, mdt_case_id=body.get("mdt_case_id"), diagnosis=body.get("diagnosis"),

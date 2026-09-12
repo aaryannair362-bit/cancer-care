@@ -39,7 +39,7 @@ from .models_cca_oncology_ext import (
     TreatmentOrderDrugLine, RadiationPrescription, CCARadiationPhase, RadiationFraction,
     RadiationInterruption, RadiationOnTreatmentVisit,
     RadiationDiscrepancyRecord, RadiationPreTreatmentVerification,
-    RadiationInVivoDosimetry,
+    RadiationInVivoDosimetry, RadiationOncologyConsultation,
 )
 from .models_cca_inpatient import (
     InpatientAdmission, InpatientHistoryAndPhysical, InpatientProblemListItem,
@@ -122,6 +122,9 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # Has its own patient_id -- CCARadiationPhase/RadiationFraction (its FK children,
             # no patient_id of their own) are already deleted above by this point.
             RadiationPrescription,
+            # Has its own patient_id -- independent of RadiationPrescription (a consultation
+            # can predate any course being prescribed).
+            RadiationOncologyConsultation,
             CCAJourneyEvent, ResponseAssessment, TreatmentClearance,
             # Has its own patient_id -- optionally references a ToxicityEvent, deleted
             # before ToxicityEvent itself just below.

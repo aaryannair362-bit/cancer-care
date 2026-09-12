@@ -18,6 +18,28 @@ from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integ
 from .models import Base
 
 
+class RadiationOncologyConsultation(Base):
+    """RO Consultation (SCR-RO-002, gap review item 9) -- previously nothing captured CIED/
+    pacemaker status, prior-RT/re-irradiation history, or RT-specific contraindications
+    before a course could be prescribed. cumulative_prior_oar_dose_note and prior_rt_summary
+    are clinician-typed reference values (e.g. what a prior facility's summary reported),
+    never computed by this system -- no dose arithmetic lives here (standing repo rule)."""
+    __tablename__ = "cca_radiation_oncology_consultations"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    cied_present = Column(Boolean, nullable=True)  # Cardiac Implantable Electronic Device (pacemaker/ICD)
+    cied_type = Column(String(100), nullable=True)
+    cied_management_plan = Column(Text, nullable=True)  # required when cied_present is True
+    prior_rt_received = Column(Boolean, nullable=True)
+    prior_rt_site = Column(String(200), nullable=True)
+    prior_rt_summary = Column(Text, nullable=True)
+    cumulative_prior_oar_dose_note = Column(Text, nullable=True)
+    contraindications_checklist = Column(JSON, nullable=True)  # {"pregnancy_excluded": true, "connective_tissue_disease_reviewed": true, ...}
+    contraindications_note = Column(Text, nullable=True)
+    consulted_by = Column(String(200))
+    consulted_at = Column(DateTime, default=datetime.utcnow)
+
+
 class RadiationPrescription(Base):
     """A radiation oncologist's COURSE-level record, distinct from a Medical Oncology
     TreatmentPlan/TreatmentOrder (Oncology Review Results PDF item 2). Authorization to

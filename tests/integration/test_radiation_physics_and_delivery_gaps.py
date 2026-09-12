@@ -61,6 +61,8 @@ def patient(db_session, oncologist):
 
 
 def _phase_at_physics_qa(client, onc_headers, physicist_headers, patient_id, number_of_fractions=2):
+    # RO Consultation gate (gap review item 9) -- required before a course can be prescribed.
+    client.post(f"/api/cca/patients/{patient_id}/radiation-consultations", headers=onc_headers, json={"cied_present": False})
     rx_id = client.post("/api/cca/radiation-prescriptions", headers=onc_headers, json={
         "patient_id": patient_id, "diagnosis": "Breast Cancer", "intent": "Curative", "technique": "IMRT",
     }).json()["radiation_prescription"]["id"]
