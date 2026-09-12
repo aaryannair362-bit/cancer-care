@@ -368,6 +368,11 @@ class CCAOrder(Base):
     collected_at = Column(DateTime, nullable=True)
     specimen_container = Column(String(100), nullable=True)
     rejection_reason = Column(String(255), nullable=True)
+    # Investigations result-trend/overdue view (gap review item 11) -- optional, clinician-set
+    # expectation, never an auto-computed turnaround SLA. overdue is a plain date comparison
+    # against this at read time, never a hardcoded day-count threshold.
+    expected_result_by = Column(Date, nullable=True)
+    order_set_master_id = Column(Integer, ForeignKey("cca_clinical_masters.id"), nullable=True)
 
 class CCAResult(Base):
     __tablename__ = "cca_results"

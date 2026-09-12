@@ -437,6 +437,15 @@
                     </div>
 
                     <div class="section-card">
+                        <div class="section-title">Apply Investigation Order Set</div>
+                        <div class="section-sub" style="margin-bottom:10px;">Raises one order per investigation in a published panel (final gap-closing round, item 11).</div>
+                        <div id="order-set-select-container"><!-- Populated via JS: loadOrderSetOptions() --></div>
+                        <div class="form-group" style="margin:10px 0;"><label class="form-label">Clinical indication</label><input type="text" id="order-set-indication" class="form-input" /></div>
+                        <button class="btn-outline" onclick="submitApplyOrderSet()">Apply Order Set</button>
+                        <div id="order-set-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
+                    </div>
+
+                    <div class="section-card">
                         <div style="display:flex; justify-content:flex-end;">
                             <button class="btn-navy" onclick="submitConsultationNote()">✍️ Finalise Consultation Note</button>
                         </div>
@@ -767,6 +776,7 @@
                 document.getElementById('consult-hdr-journey').textContent = p.journey_state;
                 document.getElementById('consult-hdr-onc').textContent = p.primary_oncologist || 'Unassigned';
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
+            loadOrderSetOptions();
 
             renderPillRow('intent-pills', ['Curative', 'Adjuvant', 'Neoadjuvant', 'Palliative', 'Supportive'], { value: selectedIntent });
             renderPillRow('modality-pills', ['Surgery', 'Systemic therapy', 'Radiation', 'Combined modality', 'Other'], { value: selectedModality });
@@ -3219,6 +3229,33 @@
                 });
                 toast('Event recorded', 'success');
                 loadLesionTrackingView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // Investigations order-set/panel layer (final gap-closing round, item 11)
+        async function loadOrderSetOptions() {
+            const host = document.getElementById('order-set-select-container');
+            if (!host) return;
+            try {
+                const data = await Api.get(`${CCA_API}/clinical-masters?master_type=ORDER_SET`);
+                const published = (data.masters || []).filter(m => m.status === 'PUBLISHED');
+                host.innerHTML = published.length
+                    ? `<select id="order-set-select" class="form-select">${published.map(m => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('')}</select>`
+                    : '<p style="font-size:12.5px; color:var(--ink-500);">No published order sets configured yet (Admin can create one under Clinical Masters).</p>';
+            } catch (err) { host.innerHTML = ''; }
+        }
+
+        async function submitApplyOrderSet() {
+            const select = document.getElementById('order-set-select');
+            if (!select) { toast('No order set selected', 'error'); return; }
+            const indication = document.getElementById('order-set-indication').value;
+            if (!indication) { toast('Clinical indication is required', 'error'); return; }
+            try {
+                const res = await Api.post(`${CCA_API}/order-sets/${select.value}/apply`, {
+                    patient_id: currentPatientId, clinical_indication: indication,
+                });
+                document.getElementById('order-set-status').textContent = `✅ ${res.orders.length} order(s) raised.`;
+                toast(`${res.orders.length} order(s) raised`, 'success');
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

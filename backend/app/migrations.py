@@ -218,6 +218,11 @@ ADDITIVE_COLUMNS = [
     # Final gap-closing round: Front Desk duplicate-merge (flag-and-link, not a full
     # historical-record migration -- see CCAPatient.merged_into_patient_id's docstring).
     ("cca_patients", "merged_into_patient_id", "INTEGER"),
+    # Final gap-closing round: Investigations result-trend/overdue view + order-set/panel
+    # layer (reusing the existing ClinicalMaster/ClinicalMasterItem pair with a new
+    # ORDER_SET master_type, rather than a bespoke table).
+    ("cca_orders", "expected_result_by", "DATE"),
+    ("cca_orders", "order_set_master_id", "INTEGER"),
 ]
 
 

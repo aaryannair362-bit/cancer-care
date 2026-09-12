@@ -1925,7 +1925,9 @@ async def raise_order(
         priority=body.get("priority", "ROUTINE"),
         staging_relevant=body.get("staging_relevant", True),
         status="RAISED",
-        requested_by=_actor(current_user)
+        requested_by=_actor(current_user),
+        expected_result_by=datetime.fromisoformat(body["expected_result_by"]).date() if body.get("expected_result_by") else None,
+        order_set_master_id=body.get("order_set_master_id"),
     )
     db.add(order)
     db.flush()
@@ -8343,6 +8345,10 @@ CLINICAL_MASTER_TYPES = (
     "FACILITY", "DEPARTMENT", "CLINICIAN_ROSTER", "FORMULARY", "LAB_CATALOGUE",
     "RADIOLOGY_PROTOCOL", "SURGERY_TEMPLATE", "PATHOLOGY_SYNOPTIC_TEMPLATE",
     "CONSENT_TEMPLATE", "VALUE_SET", "UNIT_NORMALIZATION",
+    # Investigations order-set/panel layer (gap review item 11) -- reuses this generic
+    # master/item pair rather than a bespoke table; each ClinicalMasterItem.fields holds one
+    # investigation's {order_type, item_name, item_code}.
+    "ORDER_SET",
 )
 
 
@@ -8537,6 +8543,110 @@ def delete_clinical_master_item(id: int, db: Session = Depends(get_cca_db), curr
     db.delete(item)
     db.commit()
     return {"status": "success"}
+
+
+# ---------------------------------------------------------
+# Investigations order-set/panel layer + result-trend/overdue view (gap review item 11) --
+# order sets reuse the ClinicalMaster/ClinicalMasterItem pair above (master_type ORDER_SET)
+# rather than a bespoke table. "Overdue" is always a plain comparison against
+# CCAOrder.expected_result_by, a clinician-set expectation -- never an auto-computed
+# turnaround SLA or hardcoded day-count threshold.
+# ---------------------------------------------------------
+
+@router.post("/order-sets/{master_id}/apply", status_code=201)
+async def apply_order_set(master_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Raises one CCAOrder per item in a published ORDER_SET master for the given patient --
+    the same clinical_indication is applied to every resulting order."""
+    _require_clinician(current_user)
+    org_id = _org_id(current_user)
+    master = db.query(ClinicalMaster).filter(
+        ClinicalMaster.id == master_id, ClinicalMaster.organization_id == org_id, ClinicalMaster.master_type == "ORDER_SET"
+    ).first()
+    if not master:
+        raise HTTPException(404, "Order set not found")
+    if master.status != "PUBLISHED":
+        raise HTTPException(409, "Only a PUBLISHED order set can be applied")
+    body = await request.json()
+    patient_id = _require_patient_id(body)
+    _get_org_patient(db, patient_id, org_id)
+    indication = (body.get("clinical_indication") or "").strip()
+    if not indication:
+        raise HTTPException(422, "clinical_indication is required")
+    items = db.query(ClinicalMasterItem).filter(ClinicalMasterItem.master_id == master.id).order_by(ClinicalMasterItem.sequence_number.asc()).all()
+    if not items:
+        raise HTTPException(409, "This order set has no items")
+    expected_result_by = datetime.fromisoformat(body["expected_result_by"]).date() if body.get("expected_result_by") else None
+    actor = _actor(current_user)
+    created = []
+    for item in items:
+        fields = item.fields or {}
+        order = CCAOrder(
+            patient_id=patient_id, order_type=fields.get("order_type", "LAB"),
+            item_name=fields.get("item_name", "Unnamed investigation"), item_code=fields.get("item_code"),
+            clinical_indication=indication, priority=body.get("priority", "ROUTINE"),
+            status="RAISED", requested_by=actor, expected_result_by=expected_result_by,
+            order_set_master_id=master.id,
+        )
+        db.add(order)
+        created.append(order)
+    db.flush()
+    publish(
+        db, "ORDER_SET_APPLIED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Order set applied: {master.name}", category="INVESTIGATION",
+        description=f"{actor} applied order set '{master.name}' ({len(created)} investigation(s)).",
+        order_set_master_id=master.id,
+    )
+    db.commit()
+    for order in created:
+        db.refresh(order)
+    return {"status": "success", "orders": [{"id": o.id, "item_name": o.item_name, "order_type": o.order_type, "status": o.status} for o in created]}
+
+
+@router.get("/patients/{patient_id}/investigations-trend")
+def get_investigations_trend(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Groups every order+result for this patient by item_name, chronologically -- pure
+    read-time aggregation, never a computed trend statistic."""
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    orders = db.query(CCAOrder).filter(CCAOrder.patient_id == patient_id).order_by(CCAOrder.ordered_at).all()
+    order_ids = [o.id for o in orders]
+    results = db.query(CCAResult).filter(CCAResult.order_id.in_(order_ids)).all() if order_ids else []
+    results_by_order = {r.order_id: r for r in results}
+    today = datetime.utcnow().date()
+    by_item: dict = {}
+    for o in orders:
+        overdue = bool(
+            o.expected_result_by and o.expected_result_by < today
+            and o.status not in ("RESULTED", "ACKNOWLEDGED", "CLOSED", "CANCELLED")
+        )
+        result = results_by_order.get(o.id)
+        by_item.setdefault(o.item_name, []).append({
+            "order_id": o.id, "order_type": o.order_type, "status": o.status,
+            "ordered_at": o.ordered_at.isoformat() if o.ordered_at else None,
+            "expected_result_by": o.expected_result_by.isoformat() if o.expected_result_by else None,
+            "overdue": overdue,
+            "result_summary": (result.impression or result.findings_text) if result else None,
+            "resulted_at": result.resulted_at.isoformat() if result and result.resulted_at else None,
+        })
+    return {"trend": [{"item_name": name, "entries": entries} for name, entries in by_item.items()]}
+
+
+@router.get("/investigations/overdue")
+def list_overdue_investigations(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    org_id = _org_id(current_user)
+    today = datetime.utcnow().date()
+    rows = db.query(CCAOrder, CCAPatient).join(CCAPatient, CCAOrder.patient_id == CCAPatient.id).filter(
+        CCAPatient.organization_id == org_id, CCAOrder.expected_result_by.isnot(None),
+        CCAOrder.expected_result_by < today,
+        CCAOrder.status.notin_(["RESULTED", "ACKNOWLEDGED", "CLOSED", "CANCELLED"]),
+    ).order_by(CCAOrder.expected_result_by.asc()).all()
+    return {"overdue": [
+        {
+            "order_id": o.id, "patient_id": p.id, "patient_name": p.name, "patient_mrn": p.mrn,
+            "item_name": o.item_name, "order_type": o.order_type, "status": o.status,
+            "expected_result_by": o.expected_result_by.isoformat(),
+        }
+        for o, p in rows
+    ]}
 
 
 # ---------------------------------------------------------
