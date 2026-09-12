@@ -11,7 +11,7 @@ from .models_cca import (
     CCADocument, ClinicalFact, CCAContradiction, CCACancerDiagnosis,
     CCABiomarkerResult, CCAOrder, CCAResult, StagingRecord, StagingEvidence,
     GuidelineContext, ClinicalBrief, MDTCase, MDTDecision, CarePlan,
-    CarePlanTask, TreatmentPlan, TreatmentSession, ToxicityEvent,
+    CarePlanTask, TreatmentPlan, TreatmentSession, ToxicityEvent, SeriousAdverseEventReport,
     TreatmentClearance, ResponseAssessment, CCAJourneyEvent,
     TreatmentOrder, TreatmentEvent, PharmacyReadiness, PreTreatmentSafetyCheck,
     VascularAccessAssessment, InfusionMedicationAdministration, InfusionAdministrationEvent,
@@ -120,7 +120,10 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # Has its own patient_id -- CCARadiationPhase/RadiationFraction (its FK children,
             # no patient_id of their own) are already deleted above by this point.
             RadiationPrescription,
-            CCAJourneyEvent, ResponseAssessment, TreatmentClearance, ToxicityEvent,
+            CCAJourneyEvent, ResponseAssessment, TreatmentClearance,
+            # Has its own patient_id -- optionally references a ToxicityEvent, deleted
+            # before ToxicityEvent itself just below.
+            SeriousAdverseEventReport, ToxicityEvent,
             TreatmentSession, TreatmentPlan, CarePlanTask, CarePlan, MDTDecision,
             MDTCase, ClinicalBrief, GuidelineContext, StagingRecord,
             CCAResult, CCAOrder, CCABiomarkerResult, CCACancerDiagnosis,

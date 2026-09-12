@@ -275,6 +275,7 @@
             <a class="sidebar-nav-item" id="nav-oraltherapy" onclick="showTab('oraltherapy')"><div class="nav-item-left"><span>💊</span><span>Oral Therapy</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-surveillance" onclick="showTab('surveillance')"><div class="nav-item-left"><span>🔭</span><span>Surveillance</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-inpatient" onclick="showTab('inpatient')"><div class="nav-item-left"><span>🛏️</span><span>Inpatient</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-toxicity" onclick="showTab('toxicity')"><div class="nav-item-left"><span>⚠️</span><span>Toxicity Register</span></div><span class="nav-chevron">›</span></a>
 
             <div class="sidebar-section-title">CLINICAL INTELLIGENCE / COORDINATION</div>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
@@ -492,6 +493,13 @@
                 <div id="inpatient-content"><!-- Populated via JS: loadInpatientView() --></div>
             </div>
 
+            <!-- ===== TOXICITY REGISTER + SAE (final gap-closing round, item 5) ===== -->
+            <div id="view-toxicity" class="view-panel">
+                <h1 class="page-title">Toxicity Register</h1>
+                <p class="page-subtitle">Every toxicity term grouped with its peak/latest grade and timeline (SCR-TOX-001), plus Serious/Reportable Adverse Event filing (SCR-TOX-004).</p>
+                <div id="toxicity-content"><!-- Populated via JS: loadToxicityRegisterView() --></div>
+            </div>
+
             <!-- ===== NEXUS: real 13(+1)-section clinical brief (renderNexusBrief, cca-summary.js)
                  above a coordination-task board that is still static/mock ===== -->
             <div id="view-nexus" class="view-panel">
@@ -634,6 +642,7 @@
             if (tab === 'oraltherapy') loadOralTherapyPrescribingView();
             if (tab === 'surveillance') loadSurveillanceView();
             if (tab === 'inpatient') loadInpatientView();
+            if (tab === 'toxicity') loadToxicityRegisterView();
             if (tab === 'guideline') loadGuidelinePathway();
             if (tab === 'staging') loadStagingWorkspace();
             if (tab === 'mdt') loadMdtWorkspace();
@@ -3010,6 +3019,96 @@
                 await Api.post(`${CCA_API}/inpatient/discharge-summaries/${summaryId}/sign`);
                 toast('Discharge summary signed', 'success');
                 loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---------------------------------------------------------------
+        // Toxicity Register + SAE (final gap-closing round, item 5)
+        // ---------------------------------------------------------------
+        async function loadToxicityRegisterView() {
+            const container = document.getElementById('toxicity-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient above, or from Patients, to open their toxicity register.</p></div>'; return; }
+            try {
+                const [reg, sae] = await Promise.all([
+                    Api.get(`${CCA_API}/patients/${currentPatientId}/toxicity-register`),
+                    Api.get(`${CCA_API}/patients/${currentPatientId}/sae-reports`),
+                ]);
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-title">Register (by term, worst-first)</div>
+                        ${reg.register.length ? reg.register.map(r => `
+                            <div class="checklist-row" style="display:block;">
+                                <strong>${escapeHtml(r.term)}</strong>
+                                <span class="badge ${r.peak_grade >= 3 ? 'badge-rose' : (r.peak_grade > 0 ? 'badge-amber' : 'badge-green')}">Peak Grade ${r.peak_grade}</span>
+                                ${r.ongoing ? '<span class="badge badge-amber" style="margin-left:4px;">Ongoing</span>' : ''}
+                                <div style="font-size:12px; color:var(--ink-500); margin-top:4px;">Latest grade ${r.latest_grade} · ${r.days_since_last_grading != null ? r.days_since_last_grading + ' day(s) since last graded' : ''} · ${r.timeline.length} entr${r.timeline.length === 1 ? 'y' : 'ies'}</div>
+                            </div>
+                        `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No toxicity events recorded.</p>'}
+                    </div>
+                    <div class="section-card">
+                        <div class="section-head"><div class="section-title">Serious/Reportable Adverse Events</div><span class="badge badge-blue">${reg.sae_report_count} on record</span></div>
+                        ${sae.sae_reports.map(s => `
+                            <div class="checklist-row" style="display:block;">
+                                <strong>${escapeHtml(s.event_description)}</strong> <span class="badge ${s.status === 'SUBMITTED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(s.status)}</span>
+                                <div style="font-size:12px; color:var(--ink-500); margin-top:4px;">${(s.seriousness_criteria || []).join(', ')} — Outcome: ${escapeHtml(s.outcome || '—')}</div>
+                                ${s.status !== 'SUBMITTED' ? `<button class="btn-outline" style="font-size:11px; padding:4px 8px; margin-top:6px;" onclick="promptSubmitSae(${s.id})">Submit</button>` : `<div style="font-size:12px; color:var(--ink-500);">Reported to ${escapeHtml(s.reported_to || '')}</div>`}
+                            </div>
+                        `).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No SAE reports filed.</p>'}
+                        <button class="btn-outline" style="margin-top:10px;" onclick="toggleSaeForm()">+ File SAE Report</button>
+                        <div id="sae-create-form"></div>
+                    </div>
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        const SAE_CRITERIA = ['Death', 'Life-threatening', 'Hospitalization', 'Disability', 'Congenital Anomaly', 'Other Medically Important'];
+
+        function toggleSaeForm() {
+            const host = document.getElementById('sae-create-form');
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div style="margin-top:10px;">
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Event description *</label><input type="text" id="sae-desc" class="form-input" /></div>
+                    <div style="margin-bottom:10px;">
+                        ${SAE_CRITERIA.map(c => `<label style="display:inline-flex; align-items:center; gap:4px; font-size:12.5px; margin-right:10px;"><input type="checkbox" class="sae-criterion" value="${c}"/> ${c}</label>`).join('')}
+                    </div>
+                    <div class="form-grid-2" style="margin-bottom:10px;">
+                        <div class="form-group"><label class="form-label">Causality assessment</label>
+                            <select id="sae-causality" class="form-select"><option>Certain</option><option>Probable</option><option>Possible</option><option>Unlikely</option><option>Unrelated</option></select>
+                        </div>
+                        <div class="form-group"><label class="form-label">Outcome</label>
+                            <select id="sae-outcome" class="form-select"><option>Recovered</option><option>Recovering</option><option>Not Recovered</option><option>Recovered With Sequelae</option><option>Fatal</option><option>Unknown</option></select>
+                        </div>
+                    </div>
+                    <button class="btn-navy" onclick="submitSaeReport()">File SAE Report</button>
+                </div>
+            `;
+        }
+
+        async function submitSaeReport() {
+            const criteria = Array.from(document.querySelectorAll('.sae-criterion:checked')).map(el => el.value);
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/sae-reports`, {
+                    seriousness_criteria: criteria, event_description: document.getElementById('sae-desc').value,
+                    causality_assessment: document.getElementById('sae-causality').value, outcome: document.getElementById('sae-outcome').value,
+                });
+                toast('SAE report filed', 'success');
+                loadToxicityRegisterView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function promptSubmitSae(saeId) {
+            const reportedTo = prompt('Reported to (e.g. Institutional Ethics Committee, Sponsor pharmacovigilance):');
+            if (!reportedTo) return;
+            submitSaeSubmission(saeId, reportedTo);
+        }
+
+        async function submitSaeSubmission(saeId, reportedTo) {
+            try {
+                await Api.post(`${CCA_API}/sae-reports/${saeId}/submit`, { reported_to: reportedTo });
+                toast('SAE report submitted', 'success');
+                loadToxicityRegisterView();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

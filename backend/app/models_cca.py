@@ -990,6 +990,32 @@ class ToxicityEvent(Base):
     ongoing = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
+class SeriousAdverseEventReport(Base):
+    """Serious/Reportable Adverse Event workflow (SCR-TOX-004, gap review item) --
+    previously the only entry point for an SAE was the same generic grade/term
+    ToxicityEvent row as any other toxicity, with no seriousness criteria or
+    regulatory-reporting fields anywhere. causality_assessment and outcome are always the
+    clinician's own typed judgment, never computed by this system."""
+    __tablename__ = "cca_serious_adverse_event_reports"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    toxicity_event_id = Column(Integer, ForeignKey("cca_toxicity_events.id"), nullable=True)
+    seriousness_criteria = Column(JSON, nullable=False)  # ["Death", "Life-threatening", "Hospitalization", "Disability", "Congenital Anomaly", "Other Medically Important"]
+    event_description = Column(Text, nullable=False)
+    onset_date = Column(Date, nullable=True)
+    causality_assessment = Column(String(30), nullable=True)  # Certain, Probable, Possible, Unlikely, Unrelated
+    action_taken_with_treatment = Column(String(50), nullable=True)  # Dose Not Changed, Dose Reduced, Treatment Interrupted, Treatment Discontinued, Not Applicable
+    outcome = Column(String(50), nullable=True)  # Recovered, Recovering, Not Recovered, Recovered With Sequelae, Fatal, Unknown
+    narrative = Column(Text, nullable=True)
+    reported_to = Column(String(300), nullable=True)  # e.g. Institutional Ethics Committee, CDSCO, Sponsor pharmacovigilance
+    report_date = Column(Date, nullable=True)
+    status = Column(String(30), default="DRAFT")  # DRAFT, SUBMITTED
+    reported_by = Column(String(200))
+    submitted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class TreatmentClearance(Base):
     __tablename__ = "cca_treatment_clearances"
     id = Column(Integer, primary_key=True)

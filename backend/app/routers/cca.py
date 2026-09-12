@@ -40,7 +40,7 @@ from ..models_cca import (
     ClinicalBrief, MDTCase, MDTDecision, CarePlan,
     CarePlanVersion, CarePlanTask, TreatmentPlan, TreatmentPlanVersion, TreatmentSession,
     TreatmentOrder, TreatmentEvent,
-    ToxicityEvent, TreatmentClearance, ResponseAssessment, CCAJourneyEvent,
+    ToxicityEvent, SeriousAdverseEventReport, TreatmentClearance, ResponseAssessment, CCAJourneyEvent,
     PreTreatmentSafetyCheck, VascularAccessAssessment, PharmacyReadiness,
     InfusionMedicationAdministration, InfusionAdministrationEvent, InfusionMonitoringObservation,
     TreatmentHoldEvent, InfusionReactionEvent, ExtravasationEvent, TreatmentDayCompletion,
@@ -4476,6 +4476,128 @@ async def record_toxicity(
             "baseline_value": tox.baseline_value
         }
     }
+
+
+# ---------------------------------------------------------
+# Toxicity Register/Timeline (SCR-TOX-001) + Serious/Reportable Adverse Event workflow
+# (SCR-TOX-004) -- final gap-closing round. The register is pure read-time aggregation over
+# the existing ToxicityEvent rows (grouped by term, peak grade, latest grade, a plain
+# days-since-last-grading count -- never a computed clinical score/threshold); SAE is the
+# one genuinely new table, since ToxicityEvent has no seriousness/regulatory-reporting
+# fields at all. causality_assessment and outcome are always the clinician's own typed
+# judgment, never computed here.
+# ---------------------------------------------------------
+
+def _toxicity_event_dict(t: ToxicityEvent) -> dict:
+    return {
+        "id": t.id, "term": t.term, "grade": t.grade, "baseline_value": t.baseline_value,
+        "grading_standard": t.grading_standard, "onset_date": t.onset_date.isoformat() if t.onset_date else None,
+        "ongoing": bool(t.ongoing),
+    }
+
+
+@router.get("/patients/{patient_id}/toxicity-register")
+def get_toxicity_register(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    events = db.query(ToxicityEvent).filter(ToxicityEvent.patient_id == patient_id).order_by(ToxicityEvent.onset_date).all()
+    by_term: dict = {}
+    for e in events:
+        by_term.setdefault(e.term, []).append(e)
+    today = datetime.utcnow().date()
+    register = []
+    for term, rows in by_term.items():
+        rows_sorted = sorted(rows, key=lambda r: (r.onset_date or today))
+        latest = rows_sorted[-1]
+        days_since_last_grading = (today - latest.onset_date).days if latest.onset_date else None
+        register.append({
+            "term": term, "peak_grade": max(r.grade for r in rows_sorted), "latest_grade": latest.grade,
+            "ongoing": bool(latest.ongoing), "days_since_last_grading": days_since_last_grading,
+            "timeline": [_toxicity_event_dict(r) for r in rows_sorted],
+        })
+    register.sort(key=lambda r: r["peak_grade"], reverse=True)
+    sae_reports = db.query(SeriousAdverseEventReport).filter(SeriousAdverseEventReport.patient_id == patient_id).count()
+    return {"register": register, "sae_report_count": sae_reports}
+
+
+def _sae_dict(s: SeriousAdverseEventReport) -> dict:
+    return {
+        "id": s.id, "patient_id": s.patient_id, "toxicity_event_id": s.toxicity_event_id,
+        "seriousness_criteria": s.seriousness_criteria or [], "event_description": s.event_description,
+        "onset_date": s.onset_date.isoformat() if s.onset_date else None,
+        "causality_assessment": s.causality_assessment, "action_taken_with_treatment": s.action_taken_with_treatment,
+        "outcome": s.outcome, "narrative": s.narrative, "reported_to": s.reported_to,
+        "report_date": s.report_date.isoformat() if s.report_date else None, "status": s.status,
+        "reported_by": s.reported_by, "submitted_at": s.submitted_at.isoformat() if s.submitted_at else None,
+    }
+
+
+_SAE_CRITERIA = ("Death", "Life-threatening", "Hospitalization", "Disability", "Congenital Anomaly", "Other Medically Important")
+
+
+@router.post("/patients/{patient_id}/sae-reports", status_code=201)
+async def create_sae_report(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    org_id = _org_id(current_user)
+    _get_org_patient(db, patient_id, org_id)
+    _require_clinical_or_nursing_role(current_user)
+    body = await request.json()
+    criteria = body.get("seriousness_criteria") or []
+    if not criteria or any(c not in _SAE_CRITERIA for c in criteria):
+        raise HTTPException(422, f"seriousness_criteria must be a non-empty list drawn from {_SAE_CRITERIA}")
+    description = (body.get("event_description") or "").strip()
+    if not description:
+        raise HTTPException(422, "event_description is required")
+    toxicity_event_id = body.get("toxicity_event_id")
+    if toxicity_event_id is not None:
+        tox = db.query(ToxicityEvent).filter(ToxicityEvent.id == toxicity_event_id, ToxicityEvent.patient_id == patient_id).first()
+        if not tox:
+            raise HTTPException(422, "toxicity_event_id does not reference a toxicity event for this patient")
+    actor = _actor(current_user)
+    sae = SeriousAdverseEventReport(
+        patient_id=patient_id, toxicity_event_id=toxicity_event_id, seriousness_criteria=criteria,
+        event_description=description,
+        onset_date=datetime.fromisoformat(body["onset_date"]).date() if body.get("onset_date") else None,
+        causality_assessment=body.get("causality_assessment"), action_taken_with_treatment=body.get("action_taken_with_treatment"),
+        outcome=body.get("outcome"), narrative=body.get("narrative"), reported_by=actor,
+    )
+    db.add(sae)
+    db.flush()
+    publish(
+        db, "SAE_REPORTED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title="Serious Adverse Event reported", category="TOXICITY",
+        description=f"{actor} reported an SAE: {description}", sae_report_id=sae.id,
+    )
+    db.commit()
+    db.refresh(sae)
+    return {"status": "success", "sae_report": _sae_dict(sae)}
+
+
+@router.get("/patients/{patient_id}/sae-reports")
+def list_sae_reports(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(SeriousAdverseEventReport).filter(SeriousAdverseEventReport.patient_id == patient_id).order_by(SeriousAdverseEventReport.id.desc()).all()
+    return {"sae_reports": [_sae_dict(s) for s in rows]}
+
+
+@router.post("/sae-reports/{id}/submit")
+async def submit_sae_report(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    sae = db.query(SeriousAdverseEventReport).filter(SeriousAdverseEventReport.id == id).first()
+    if not sae:
+        raise HTTPException(404, "SAE report not found")
+    _check_patient_in_org(db, sae.patient_id, _org_id(current_user))
+    _require_clinical_or_nursing_role(current_user)
+    if sae.status == "SUBMITTED":
+        raise HTTPException(409, "This SAE report is already submitted")
+    body = await request.json()
+    reported_to = (body.get("reported_to") or "").strip()
+    if not reported_to:
+        raise HTTPException(422, "reported_to is required before submission")
+    sae.reported_to = reported_to
+    sae.report_date = datetime.fromisoformat(body["report_date"]).date() if body.get("report_date") else datetime.utcnow().date()
+    sae.status = "SUBMITTED"
+    sae.submitted_at = datetime.utcnow()
+    db.commit()
+    db.refresh(sae)
+    return {"status": "success", "sae_report": _sae_dict(sae)}
 
 
 _VALID_CLEARANCE_DECISIONS = {"CLEARED", "CLEARED_DOSE_REDUCTION", "HELD", "DEFERRED", "DISCONTINUED"}
