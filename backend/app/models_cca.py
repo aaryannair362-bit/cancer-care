@@ -159,6 +159,45 @@ class CCAIntakeAssessment(Base):
     status = Column(String(30), default="COMPLETED")
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
+class MedicationReconciliationEntry(Base):
+    """Nurse Intake medication reconciliation (gap review item 12) -- one row per medication
+    reconciled at an intake visit. dose/frequency are always the nurse's own typed record of
+    what the patient reports taking, never computed or validated against a dosing rule."""
+    __tablename__ = "cca_medication_reconciliation_entries"
+    id = Column(Integer, primary_key=True)
+    intake_assessment_id = Column(Integer, ForeignKey("cca_intake_assessments.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    drug_name = Column(String(200), nullable=False)
+    dose = Column(String(100), nullable=True)
+    frequency = Column(String(100), nullable=True)
+    route = Column(String(50), nullable=True)
+    source = Column(String(50), nullable=True)  # Patient-reported, Prescription bottle, Pharmacy record, Outside facility
+    action = Column(String(30), nullable=True)  # Continue, Hold, Discontinue, Modify per new order
+    action_reason = Column(Text, nullable=True)
+    reconciled_by = Column(String(200))
+    reconciled_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AdverseReactionHistoryEntry(Base):
+    """Standing adverse-reaction/allergy history (gap review item 12) -- previously the only
+    allergy capture anywhere in this codebase was PreTreatmentSafetyCheck's own per-treatment-
+    day attestation (see its docstring: "not a new shared CCAPatient allergy field... out of
+    scope for this module"). This is that shared list, updated at intake. severity is always
+    the clinician's own classification, never computed."""
+    __tablename__ = "cca_adverse_reaction_history_entries"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    intake_assessment_id = Column(Integer, ForeignKey("cca_intake_assessments.id"), nullable=True)
+    allergen = Column(String(200), nullable=False)
+    reaction_description = Column(Text, nullable=True)
+    severity = Column(String(30), nullable=True)  # Mild, Moderate, Severe
+    onset = Column(String(100), nullable=True)  # free text, e.g. "Childhood", "2019", "Unknown"
+    status = Column(String(30), default="Active")  # Active, Resolved, Unconfirmed
+    recorded_by = Column(String(200))
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+
+
 class CCADocument(Base):
     __tablename__ = "cca_documents"
     id = Column(Integer, primary_key=True)

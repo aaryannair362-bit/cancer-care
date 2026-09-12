@@ -34,6 +34,7 @@ from ..models_cca_oncology_ext import (
 )
 from ..models_cca import (
     CCAPatient, CCAConsent, CCAQueueEvent, CCAEncounter, CCAIntakeAssessment,
+    MedicationReconciliationEntry, AdverseReactionHistoryEntry,
     CCADocument, CCADocumentPage, ClinicalFact, CCAContradiction, CCACancerDiagnosis,
     CCABiomarkerResult, CCAOrder, CCAResult, StagingRecord, StagingEvidence,
     GuidelineRegistry, TreatmentPlanGuidelineLink,
@@ -1765,6 +1766,103 @@ async def complete_nurse_intake(
             "pain_score": intake.pain_score
         }
     }
+
+
+# ---------------------------------------------------------
+# Nurse Intake: Medication Reconciliation + Adverse Reaction History (gap review item 12) --
+# previously neither existed anywhere in this codebase (see PreTreatmentSafetyCheck's own
+# docstring, which explicitly notes a shared allergy list was "out of scope" when that
+# module was built). dose/frequency/severity are always the nurse's own typed record, never
+# computed or validated against a dosing/safety rule.
+# ---------------------------------------------------------
+
+def _med_reconciliation_out(m: MedicationReconciliationEntry) -> dict:
+    return {
+        "id": m.id, "intake_assessment_id": m.intake_assessment_id, "drug_name": m.drug_name,
+        "dose": m.dose, "frequency": m.frequency, "route": m.route, "source": m.source,
+        "action": m.action, "action_reason": m.action_reason, "reconciled_by": m.reconciled_by,
+        "reconciled_at": m.reconciled_at.isoformat() if m.reconciled_at else None,
+    }
+
+
+@router.post("/intake-assessments/{id}/medication-reconciliation", status_code=201)
+async def add_medication_reconciliation(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_clinical_or_nursing_role(current_user)
+    intake = db.query(CCAIntakeAssessment).filter(CCAIntakeAssessment.id == id).first()
+    if not intake:
+        raise HTTPException(404, "Intake assessment not found")
+    _check_patient_in_org(db, intake.patient_id, _org_id(current_user))
+    body = await request.json()
+    drug_name = (body.get("drug_name") or "").strip()
+    if not drug_name:
+        raise HTTPException(422, "drug_name is required")
+    entry = MedicationReconciliationEntry(
+        intake_assessment_id=intake.id, patient_id=intake.patient_id, drug_name=drug_name,
+        dose=body.get("dose"), frequency=body.get("frequency"), route=body.get("route"),
+        source=body.get("source"), action=body.get("action", "Continue"), action_reason=body.get("action_reason"),
+        reconciled_by=_actor(current_user),
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return {"status": "success", "reconciliation_entry": _med_reconciliation_out(entry)}
+
+
+@router.get("/intake-assessments/{id}/medication-reconciliation")
+def list_medication_reconciliation(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    intake = db.query(CCAIntakeAssessment).filter(CCAIntakeAssessment.id == id).first()
+    if not intake:
+        raise HTTPException(404, "Intake assessment not found")
+    _check_patient_in_org(db, intake.patient_id, _org_id(current_user))
+    rows = db.query(MedicationReconciliationEntry).filter(MedicationReconciliationEntry.intake_assessment_id == intake.id).order_by(MedicationReconciliationEntry.id.desc()).all()
+    return {"reconciliation_entries": [_med_reconciliation_out(m) for m in rows]}
+
+
+def _adverse_reaction_out(a: AdverseReactionHistoryEntry) -> dict:
+    return {
+        "id": a.id, "patient_id": a.patient_id, "allergen": a.allergen, "reaction_description": a.reaction_description,
+        "severity": a.severity, "onset": a.onset, "status": a.status, "recorded_by": a.recorded_by,
+        "recorded_at": a.recorded_at.isoformat() if a.recorded_at else None,
+    }
+
+
+@router.post("/patients/{patient_id}/adverse-reaction-history", status_code=201)
+async def add_adverse_reaction(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_clinical_or_nursing_role(current_user)
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    allergen = (body.get("allergen") or "").strip()
+    if not allergen:
+        raise HTTPException(422, "allergen is required")
+    entry = AdverseReactionHistoryEntry(
+        patient_id=patient_id, intake_assessment_id=body.get("intake_assessment_id"), allergen=allergen,
+        reaction_description=body.get("reaction_description"), severity=body.get("severity"),
+        onset=body.get("onset"), status=body.get("status", "Active"), recorded_by=_actor(current_user),
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return {"status": "success", "adverse_reaction": _adverse_reaction_out(entry)}
+
+
+@router.get("/patients/{patient_id}/adverse-reaction-history")
+def list_adverse_reactions(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(AdverseReactionHistoryEntry).filter(AdverseReactionHistoryEntry.patient_id == patient_id).order_by(AdverseReactionHistoryEntry.id.desc()).all()
+    return {"adverse_reactions": [_adverse_reaction_out(a) for a in rows]}
+
+
+@router.post("/adverse-reaction-history/{id}/resolve")
+def resolve_adverse_reaction(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    entry = db.query(AdverseReactionHistoryEntry).filter(AdverseReactionHistoryEntry.id == id).first()
+    if not entry:
+        raise HTTPException(404, "Adverse reaction history entry not found")
+    _check_patient_in_org(db, entry.patient_id, _org_id(current_user))
+    _require_clinical_or_nursing_role(current_user)
+    entry.status = "Resolved"
+    db.commit()
+    db.refresh(entry)
+    return {"status": "success", "adverse_reaction": _adverse_reaction_out(entry)}
 
 
 @router.post("/encounters/{id}/note/draft")

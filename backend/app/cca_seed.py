@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from .models_cca import (
     CCAPatient, CCAConsent, CCAQueueEvent, CCAEncounter, CCAIntakeAssessment,
+    MedicationReconciliationEntry, AdverseReactionHistoryEntry,
     CCADocument, ClinicalFact, CCAContradiction, CCACancerDiagnosis,
     CCABiomarkerResult, CCAOrder, CCAResult, StagingRecord, StagingEvidence,
     GuidelineContext, ClinicalBrief, MDTCase, MDTDecision, CarePlan,
@@ -142,7 +143,11 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             TreatmentSession, TreatmentPlan, CarePlanTask, CarePlan, MDTDecision,
             MDTCase, ClinicalBrief, GuidelineContext, StagingRecord,
             CCAResult, CCAOrder, CCABiomarkerResult, CCACancerDiagnosis,
-            CCAContradiction, ClinicalFact, CCADocument, CCAIntakeAssessment,
+            CCAContradiction, ClinicalFact, CCADocument,
+            # Both have their own patient_id but also reference CCAIntakeAssessment (nullable
+            # for AdverseReactionHistoryEntry) -- deleted before CCAIntakeAssessment itself.
+            MedicationReconciliationEntry, AdverseReactionHistoryEntry,
+            CCAIntakeAssessment,
             CCAEncounter, CCAQueueEvent, CCAConsent
         ]
         if org_patient_ids:

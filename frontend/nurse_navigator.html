@@ -1797,6 +1797,41 @@
             container.appendChild(row);
         }
 
+        // Final gap-closing round, item 12 -- previously the medication/allergy rows above
+        // were purely local DOM manipulation, never sent to the backend (only the two
+        // review checkboxes were persisted, into an unstructured note field). Only rows the
+        // nurse actually typed into (real <input> elements from addMedicationRow/
+        // addAllergyRow) are submitted -- the two static example rows above are demo display
+        // only and have no inputs to read.
+        async function submitReconciliationAndAllergies(intakeAssessmentId) {
+            const medRows = document.querySelectorAll('#medication-rows-container .med-row-grid');
+            for (const row of medRows) {
+                const inputs = row.querySelectorAll('input');
+                if (!inputs.length || !inputs[0].value.trim()) continue;
+                try {
+                    await Api.post(`/cca/intake-assessments/${intakeAssessmentId}/medication-reconciliation`, {
+                        drug_name: inputs[0].value, dose: inputs[1] ? inputs[1].value : undefined,
+                        frequency: inputs[2] ? inputs[2].value : undefined, action: inputs[3] ? inputs[3].value : undefined,
+                        source: inputs[4] ? inputs[4].value : undefined,
+                    });
+                } catch (err) { /* one bad row shouldn't block the rest of the handoff */ }
+            }
+
+            const allergyRows = document.querySelectorAll('#new-allergy-rows-container .allergy-alert-box');
+            for (const row of allergyRows) {
+                const textInputs = row.querySelectorAll('input[type="text"]');
+                const select = row.querySelector('select');
+                if (!textInputs.length || !textInputs[0].value.trim()) continue;
+                try {
+                    await Api.post(`/cca/patients/${currentPatientId}/adverse-reaction-history`, {
+                        allergen: textInputs[0].value, severity: select ? select.value : undefined,
+                        reaction_description: textInputs[1] ? textInputs[1].value : undefined,
+                        intake_assessment_id: intakeAssessmentId,
+                    });
+                } catch (err) { /* one bad row shouldn't block the rest of the handoff */ }
+            }
+        }
+
         function addCustomSymptom() {
             const input = document.getElementById('new-symptom-input');
             const value = input.value.trim();
@@ -1970,7 +2005,8 @@ async function completeHandoff() {
                     const enc = await Api.post(`/cca/patients/${currentPatientId}/encounters`, {});
                     currentEncounterId = enc.encounter.id;
                 }
-                await Api.post(`/cca/encounters/${currentEncounterId}/intake`, intakePayload);
+                const intakeResult = await Api.post(`/cca/encounters/${currentEncounterId}/intake`, intakePayload);
+                await submitReconciliationAndAllergies(intakeResult.intake.id);
 
                 document.getElementById('complete-handoff-line').textContent = `Handoff sent to ${dest}`;
                 document.getElementById('complete-priority').textContent = priority;
