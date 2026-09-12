@@ -70,6 +70,8 @@ def _result_out(r: CCAResult) -> dict:
         "acknowledged_by": r.acknowledged_by,
         "acknowledged_at": r.acknowledged_at.isoformat() if r.acknowledged_at else None,
         "critical_acknowledged_by": r.critical_acknowledged_by,
+        "critical_notified_to": r.critical_notified_to, "critical_notification_method": r.critical_notification_method,
+        "critical_escalation_required": bool(r.critical_escalation_required), "critical_escalated_to": r.critical_escalated_to,
         "resulted_at": r.resulted_at.isoformat() if r.resulted_at else None,
         "supersedes_id": r.supersedes_id, "superseded_by_id": r.superseded_by_id,
         "amendment_reason": r.amendment_reason, "amended_by": r.amended_by,
@@ -250,6 +252,53 @@ def finalize_imaging_report(result_id: int, db: Session = Depends(get_cca_db), c
 def pathology_worklist(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     _require_diagnostics_read(current_user, is_cca_pathologist)
     return {"worklist": _worklist(db, _org_id(current_user), "PATHOLOGY")}
+
+
+@router.get("/pathology/quality-dashboard")
+def pathology_quality_dashboard(overdue_hours: int = 72, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Pathology Quality / TAT Dashboard (reference SCR-PAT-018, worklist/dashboard
+    follow-up round) -- volume by status, turn-around-time, overdue reports and the
+    critical-result/amendment counts, all plain aggregation over CCAOrder/CCAResult rows
+    that already exist. overdue_hours is an operational TAT threshold the caller can adjust
+    for display filtering (default 72h) -- not a clinical/dosage judgment, the same class of
+    "elapsed time since an operational event" arithmetic already used by the Live Infusion
+    Board's observation_overdue flag."""
+    _require_diagnostics_read(current_user, is_cca_pathologist)
+    org_id = _org_id(current_user)
+    now = datetime.utcnow()
+    orders = db.query(CCAOrder).join(
+        CCAPatient, CCAPatient.id == CCAOrder.patient_id
+    ).filter(CCAPatient.organization_id == org_id, CCAOrder.order_type == "PATHOLOGY").all()
+
+    by_status = {}
+    overdue = []
+    for o in orders:
+        by_status[o.status] = by_status.get(o.status, 0) + 1
+        has_final = db.query(CCAResult.id).filter(CCAResult.order_id == o.id, CCAResult.report_status == "Finalized").first()
+        if not has_final and o.ordered_at and (now - o.ordered_at).total_seconds() / 3600 > overdue_hours:
+            overdue.append({"order_id": o.id, "patient_id": o.patient_id, "item_name": o.item_name, "hours_open": round((now - o.ordered_at).total_seconds() / 3600, 1)})
+
+    # CCAResult has no organization_id of its own -- scope via this org's own pathology
+    # orders above rather than a second cross-table lookup.
+    order_ids = [o.id for o in orders]
+    finalized_results = db.query(CCAResult).filter(
+        CCAResult.order_id.in_(order_ids), CCAResult.report_status == "Finalized"
+    ).all() if order_ids else []
+    tat_hours = [
+        (r.finalized_at - r.resulted_at).total_seconds() / 3600
+        for r in finalized_results if r.finalized_at and r.resulted_at
+    ]
+    amendment_count = sum(1 for r in finalized_results if r.amendment_reason)
+    critical_results = [r for r in finalized_results if r.is_critical]
+    critical_notified = sum(1 for r in critical_results if r.critical_notified_to)
+
+    return {
+        "total_orders": len(orders), "orders_by_status": by_status,
+        "average_tat_hours": round(sum(tat_hours) / len(tat_hours), 1) if tat_hours else None,
+        "overdue_reports": overdue, "overdue_count": len(overdue), "overdue_threshold_hours": overdue_hours,
+        "amendment_count": amendment_count,
+        "critical_result_count": len(critical_results), "critical_notified_count": critical_notified,
+    }
 
 
 @router.get("/pathology/orders/{order_id}")

@@ -239,6 +239,7 @@
         const ccaUser = Auth.requirePage(['CCAPathologist', 'Doctor', 'Admin']);
         const CCA_API = '/cca';
         let currentPatientId = null;
+        let currentPathologyOrderId = null;
 
         function showTab(tab) {
             document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
@@ -317,11 +318,29 @@
 
         function openPatient(id) { currentPatientId = id; document.getElementById('mol-patient-id').value = id; showTab('pathology'); }
 
+        async function renderPathologyQualityDashboard() {
+            try {
+                const d = await Api.get(`${CCA_API}/pathology/quality-dashboard`);
+                return `
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Quality / TAT Dashboard</div>
+                        <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px;">
+                            <div><div style="font-size:11px; color:var(--ink-500); text-transform:uppercase; margin-bottom:2px;">Total Orders</div><div style="font-size:18px; font-weight:700; color:var(--ink-900);">${d.total_orders}</div></div>
+                            <div><div style="font-size:11px; color:var(--ink-500); text-transform:uppercase; margin-bottom:2px;">Avg TAT</div><div style="font-size:18px; font-weight:700; color:var(--ink-900);">${d.average_tat_hours != null ? d.average_tat_hours + 'h' : '—'}</div></div>
+                            <div><div style="font-size:11px; color:var(--ink-500); text-transform:uppercase; margin-bottom:2px;">Overdue (&gt;${d.overdue_threshold_hours}h)</div><div style="font-size:18px; font-weight:700; color:${d.overdue_count ? 'var(--rose-badge-text)' : 'var(--ink-900)'};">${d.overdue_count}</div></div>
+                            <div><div style="font-size:11px; color:var(--ink-500); text-transform:uppercase; margin-bottom:2px;">Critical (notified)</div><div style="font-size:18px; font-weight:700; color:var(--ink-900);">${d.critical_result_count} (${d.critical_notified_count})</div></div>
+                        </div>
+                    </div>
+                `;
+            } catch (err) { return ''; }
+        }
+
         async function loadPathologyWorklist() {
             const container = document.getElementById('pathology-content');
             try {
+                const dashboardCard = await renderPathologyQualityDashboard();
                 const data = await Api.get(`${CCA_API}/pathology/worklist`);
-                container.innerHTML = `<div class="section-card"><div class="section-title" style="margin-bottom:14px;">Pathology Cases</div>` +
+                container.innerHTML = dashboardCard + `<div class="section-card"><div class="section-title" style="margin-bottom:14px;">Pathology Cases</div>` +
                     (data.worklist.length ? data.worklist.map(o => `
                         <div class="worklist-row">
                             <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(o.patient_name)}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(o.patient_mrn)}</div></div>
@@ -346,6 +365,7 @@
 
         async function openPathologyOrder(orderId) {
             const detail = document.getElementById('pathology-order-detail');
+            currentPathologyOrderId = orderId;
             try {
                 const data = await Api.get(`${CCA_API}/pathology/orders/${orderId}`);
                 const o = data.order;
@@ -353,11 +373,39 @@
                 const sr = (current && current.structured_report) || {};
                 const isFinalized = current && current.report_status === 'Finalized';
                 const val = k => escapeHtml(sr[k] != null ? String(sr[k]) : '');
+                const accession = data.accession;
+                const isAccepted = accession && accession.status === 'ACCEPTED';
+
+                if (!isAccepted) {
+                    // Specimen Receipt & Accession gate (reference SCR-PAT-002, safety/dataflow-
+                    // critical follow-up round) -- the report form is blocked server-side until
+                    // this is done, so it must be reachable here too.
+                    detail.innerHTML = `
+                        <div class="section-title">${escapeHtml(o.item_name)}</div>
+                        <div class="section-sub" style="margin-bottom:14px;">Indication: ${escapeHtml(o.clinical_indication || 'Not recorded')}</div>
+                        ${accession && accession.status === 'QUARANTINED' ? `<div style="background:var(--rose-badge-bg); color:var(--rose-badge-text); padding:8px 12px; border-radius:var(--radius-sm); font-size:12.5px; margin-bottom:14px;">Specimen quarantined: ${escapeHtml(accession.discrepancy_note || '')}. Report drafting is blocked until this is resolved.</div>` : ''}
+                        <div class="section-sub" style="margin-bottom:12px;">This specimen must be received and accessioned before a report can be drafted.</div>
+                        <div class="form-grid-3">
+                            <div class="form-group"><label class="form-label">Accession Number *</label><input type="text" id="acc-number-${orderId}" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Container Count</label><input type="number" id="acc-containers-${orderId}" class="form-input" value="1" /></div>
+                            <div class="form-group"><label class="form-label">Condition on Receipt</label>
+                                <select id="acc-condition-${orderId}" class="form-select">
+                                    <option>Intact</option><option>Leaking</option><option>Damaged Packaging</option><option>Fixative Insufficient</option><option>Other</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-checkbox-row"><input type="checkbox" id="acc-label-${orderId}" checked/> <label for="acc-label-${orderId}">Labelling concordant with request form</label></div>
+                        <div class="form-group" style="margin-bottom:14px;"><label class="form-label">Discrepancy Note (required if condition is not Intact or labelling is discordant)</label><textarea id="acc-note-${orderId}" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-navy" onclick="submitSpecimenAccession(${orderId})">Accession Specimen</button>
+                    `;
+                    return;
+                }
 
                 detail.innerHTML = `
                     <div class="section-title">${escapeHtml(o.item_name)} ${current ? `<span class="badge ${isFinalized ? 'badge-green' : 'badge-amber'}" style="margin-left:8px;">${escapeHtml(current.report_status)}</span>` : ''}</div>
-                    <div class="section-sub" style="margin-bottom:14px;">Indication: ${escapeHtml(o.clinical_indication || 'Not recorded')}</div>
+                    <div class="section-sub" style="margin-bottom:14px;">Indication: ${escapeHtml(o.clinical_indication || 'Not recorded')} · Accession ${escapeHtml(accession.accession_number)}</div>
                     ${current && current.amendment_reason ? `<div style="background:var(--amber-badge-bg); color:var(--amber-badge-text); padding:8px 12px; border-radius:var(--radius-sm); font-size:12.5px; margin-bottom:14px;">Amendment of report #${current.supersedes_id} — ${escapeHtml(current.amendment_reason)}</div>` : ''}
+                    ${current && current.is_critical ? renderCriticalResultPanel(current) : ''}
                     <fieldset id="path-fieldset-${orderId}" ${isFinalized ? 'disabled' : ''} style="border:none; padding:0;">
                         <div class="form-grid-3">
                             <div class="form-group"><label class="form-label">Site *</label><input type="text" id="path-site" class="form-input" value="${val('site')}" /></div>
@@ -398,6 +446,61 @@
                         <div id="amend-form-${orderId}"></div>
                     `}
                 `;
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitSpecimenAccession(orderId) {
+            try {
+                const res = await Api.post(`${CCA_API}/pathology/orders/${orderId}/accession`, {
+                    accession_number: document.getElementById(`acc-number-${orderId}`).value,
+                    container_count: Number(document.getElementById(`acc-containers-${orderId}`).value) || null,
+                    condition_on_receipt: document.getElementById(`acc-condition-${orderId}`).value,
+                    labelling_concordant: document.getElementById(`acc-label-${orderId}`).checked,
+                    discrepancy_note: document.getElementById(`acc-note-${orderId}`).value,
+                });
+                toast(res.accession.status === 'QUARANTINED' ? 'Specimen quarantined -- resolve the discrepancy to proceed' : 'Specimen accessioned', res.accession.status === 'QUARANTINED' ? 'error' : 'success');
+                openPathologyOrder(orderId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function renderCriticalResultPanel(result) {
+            const notified = !!result.critical_notified_to;
+            return `
+                <div class="inline-panel reaction" style="margin-bottom:14px;">
+                    <div class="inline-panel-title">⚠️ Critical Result</div>
+                    ${notified
+                        ? `<div style="font-size:12.5px; margin-bottom:8px;">Notified: <strong>${escapeHtml(result.critical_notified_to)}</strong> via ${escapeHtml(result.critical_notification_method || '—')}</div>
+                           ${result.critical_escalated_to ? `<div style="font-size:12.5px;">Escalated to: <strong>${escapeHtml(result.critical_escalated_to)}</strong></div>` : `<button class="btn-outline btn-sm" onclick="escalateCriticalResult(${result.id})">Escalate</button>`}`
+                        : `<div class="form-grid-2" style="margin-bottom:8px;">
+                               <div class="form-group"><label class="form-label">Notified To</label><input type="text" id="crit-notified-${result.id}" class="form-input" /></div>
+                               <div class="form-group"><label class="form-label">Method</label>
+                                   <select id="crit-method-${result.id}" class="form-select"><option>Phone</option><option>In-Person</option><option>Secure Message</option><option>Other</option></select>
+                               </div>
+                           </div>
+                           <button class="btn-navy btn-sm" onclick="submitCriticalNotification(${result.id})">Record Notification</button>`
+                    }
+                </div>
+            `;
+        }
+
+        async function submitCriticalNotification(resultId) {
+            try {
+                await Api.post(`${CCA_API}/results/${resultId}/notify-critical`, {
+                    notified_to: document.getElementById(`crit-notified-${resultId}`).value,
+                    notification_method: document.getElementById(`crit-method-${resultId}`).value,
+                });
+                toast('Critical result notification recorded', 'success');
+                if (currentPathologyOrderId) openPathologyOrder(currentPathologyOrderId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function escalateCriticalResult(resultId) {
+            const escalatedTo = prompt('Escalate to (name/role):');
+            if (!escalatedTo) return;
+            try {
+                await Api.post(`${CCA_API}/results/${resultId}/escalate-critical`, { escalated_to: escalatedTo });
+                toast('Escalated', 'success');
+                if (currentPathologyOrderId) openPathologyOrder(currentPathologyOrderId);
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
