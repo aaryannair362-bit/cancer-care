@@ -274,6 +274,7 @@
             <a class="sidebar-nav-item" id="nav-completion" onclick="showTab('completion')"><div class="nav-item-left"><span>🏁</span><span>Treatment Completion</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-oraltherapy" onclick="showTab('oraltherapy')"><div class="nav-item-left"><span>💊</span><span>Oral Therapy</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-surveillance" onclick="showTab('surveillance')"><div class="nav-item-left"><span>🔭</span><span>Surveillance</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-inpatient" onclick="showTab('inpatient')"><div class="nav-item-left"><span>🛏️</span><span>Inpatient</span></div><span class="nav-chevron">›</span></a>
 
             <div class="sidebar-section-title">CLINICAL INTELLIGENCE / COORDINATION</div>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
@@ -484,6 +485,13 @@
                 <div id="surveillance-content"><!-- Populated via JS: loadSurveillanceView() --></div>
             </div>
 
+            <!-- ===== INPATIENT ONCOLOGY (final gap-closing round, item 3) ===== -->
+            <div id="view-inpatient" class="view-panel">
+                <h1 class="page-title">Inpatient Oncology</h1>
+                <p class="page-subtitle">Admission, oncology H&amp;P, problem list, systemic-therapy-linked MAR, ward rounds, nursing flowsheet, deterioration/escalation, goals of care, transfer/handover, discharge summary, and death documentation.</p>
+                <div id="inpatient-content"><!-- Populated via JS: loadInpatientView() --></div>
+            </div>
+
             <!-- ===== NEXUS: real 13(+1)-section clinical brief (renderNexusBrief, cca-summary.js)
                  above a coordination-task board that is still static/mock ===== -->
             <div id="view-nexus" class="view-panel">
@@ -625,6 +633,7 @@
             if (tab === 'completion') loadTreatmentCompletionView();
             if (tab === 'oraltherapy') loadOralTherapyPrescribingView();
             if (tab === 'surveillance') loadSurveillanceView();
+            if (tab === 'inpatient') loadInpatientView();
             if (tab === 'guideline') loadGuidelinePathway();
             if (tab === 'staging') loadStagingWorkspace();
             if (tab === 'mdt') loadMdtWorkspace();
@@ -2654,6 +2663,353 @@
                 await Api.post(`${CCA_API}/mdt/cases/${caseId}/approve`, { disposition, reason });
                 toast(`Recommendation ${disposition.toLowerCase()}ed`, 'success');
                 loadMdtWorkspace();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---------------------------------------------------------------
+        // Inpatient Oncology (final gap-closing round, item 3) -- one admission at a time,
+        // with compact add-forms for each sub-record type rather than a separate tab per
+        // reference screen (matches this file's existing Treatment Completion panel density).
+        // ---------------------------------------------------------------
+        let currentAdmissionId = null;
+        const INPATIENT_STATUS_BADGE = {
+            BED_REQUESTED: 'badge-amber', ADMITTED: 'badge-green', TRANSFERRED: 'badge-blue',
+            DISCHARGED: 'badge-blue', DECEASED: 'badge-rose',
+        };
+
+        async function loadInpatientView() {
+            const container = document.getElementById('inpatient-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient above, or from Patients, to open their inpatient record.</p></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/inpatient/admissions`);
+                const admissions = data.admissions || [];
+                const active = admissions.find(a => a.id === currentAdmissionId) || admissions.find(a => a.status !== 'DISCHARGED' && a.status !== 'DECEASED') || admissions[0];
+                currentAdmissionId = active ? active.id : null;
+
+                const listSection = `
+                    <div class="section-card">
+                        <div class="section-title">Admissions</div>
+                        ${admissions.length ? admissions.map(a => `
+                            <div class="mdt-case-row" style="cursor:pointer;" onclick="currentAdmissionId=${a.id}; loadInpatientView();">
+                                <div><div style="font-size:13.5px; font-weight:600;">${escapeHtml(a.admission_reason)}</div><div style="font-size:12px; color:var(--ink-500);">${escapeHtml(a.ward || 'No ward yet')}${a.bed ? ' / ' + escapeHtml(a.bed) : ''}</div></div>
+                                <span class="badge ${INPATIENT_STATUS_BADGE[a.status] || 'badge-blue'}">${escapeHtml(a.status.replace(/_/g, ' '))}</span>
+                            </div>
+                        `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No inpatient admissions on record.</p>'}
+                        <button class="btn-outline" style="margin-top:10px;" onclick="toggleAdmissionForm()">+ Request Admission</button>
+                        <div id="admission-create-form"></div>
+                    </div>
+                `;
+                if (!active) { container.innerHTML = listSection; return; }
+                container.innerHTML = listSection + await renderAdmissionDetail(active);
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        function toggleAdmissionForm() {
+            const host = document.getElementById('admission-create-form');
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div class="form-group" style="margin:10px 0;"><label class="form-label">Admission reason *</label><input type="text" id="adm-reason" class="form-input" /></div>
+                <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Admitting diagnosis</label><input type="text" id="adm-diagnosis" class="form-input" /></div>
+                <button class="btn-navy" onclick="submitAdmissionRequest()">Request Admission</button>
+            `;
+        }
+
+        async function submitAdmissionRequest() {
+            try {
+                const res = await Api.post(`${CCA_API}/inpatient/admissions`, {
+                    patient_id: currentPatientId, admission_reason: document.getElementById('adm-reason').value,
+                    admitting_diagnosis: document.getElementById('adm-diagnosis').value || undefined,
+                });
+                currentAdmissionId = res.admission.id;
+                toast('Admission requested', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function renderAdmissionDetail(a) {
+            const [hpData, problemsData, medsData, roundsData, flowData, deteriorationData, goalsData, transfersData, dischargeData] = await Promise.all([
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/history-physical`).catch(() => ({history_physical: null})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/problems`).catch(() => ({problems: []})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/medications`).catch(() => ({medications: []})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/ward-rounds`).catch(() => ({ward_round_notes: []})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/flowsheet`).catch(() => ({flowsheet_entries: []})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/deterioration-events`).catch(() => ({deterioration_events: []})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/goals-of-care`).catch(() => ({goals_of_care: []})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/transfers`).catch(() => ({transfers: []})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/discharge-summary`).catch(() => ({discharge_summary: null})),
+            ]);
+            const hp = hpData.history_physical;
+            const discharge = dischargeData.discharge_summary;
+
+            return `
+                <div class="section-card">
+                    <div class="section-head">
+                        <div><div class="section-title">${escapeHtml(a.admission_reason)}</div><div class="section-sub">${escapeHtml(a.admitting_diagnosis || '')}</div></div>
+                        <span class="badge ${INPATIENT_STATUS_BADGE[a.status] || 'badge-blue'}">${escapeHtml(a.status.replace(/_/g, ' '))}</span>
+                    </div>
+                    ${a.status === 'BED_REQUESTED' ? `
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Ward *</label><input type="text" id="adm-ward" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Bed</label><input type="text" id="adm-bed" class="form-input" /></div>
+                        </div>
+                        <button class="btn-navy" onclick="submitAdmit(${a.id})">Admit</button>
+                    ` : ''}
+                    ${['ADMITTED', 'TRANSFERRED'].includes(a.status) ? `<button class="btn-outline" onclick="submitDischarge(${a.id})">Discharge</button> <button class="btn-outline" style="margin-left:8px;" onclick="toggleDeathForm(${a.id})">Document Death</button><div id="death-form-${a.id}"></div>` : ''}
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Oncology History &amp; Physical ${hp ? `<span class="badge ${hp.status === 'SIGNED' ? 'badge-green' : 'badge-amber'}" style="margin-left:6px;">${hp.status}</span>` : ''}</div>
+                    <fieldset ${hp && hp.status === 'SIGNED' ? 'disabled' : ''} style="border:none; padding:0;">
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Chief complaint *</label><input type="text" id="hp-cc" class="form-input" value="${escapeHtml(hp ? hp.chief_complaint || '' : '')}" /></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Current treatment summary</label><input type="text" id="hp-tx" class="form-input" value="${escapeHtml(hp ? hp.current_treatment_summary || '' : '')}" /></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Performance status</label><input type="text" id="hp-ps" class="form-input" value="${escapeHtml(hp ? hp.performance_status || '' : '')}" /></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Assessment &amp; plan</label><textarea id="hp-ap" class="form-textarea" rows="2">${escapeHtml(hp ? hp.assessment_and_plan || '' : '')}</textarea></div>
+                        <button class="btn-outline" onclick="submitHistoryPhysical(${a.id})">Save H&amp;P</button>
+                    </fieldset>
+                    ${hp && hp.status !== 'SIGNED' ? `<button class="btn-navy" style="margin-left:8px;" onclick="submitSignHp(${hp.id})">✍️ Sign H&amp;P</button>` : ''}
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Problem List</div>
+                    ${problemsData.problems.map(p => `<div class="checklist-row" style="display:flex; justify-content:space-between;"><span>${escapeHtml(p.problem)} <span class="badge ${p.status === 'Resolved' ? 'badge-green' : 'badge-amber'}">${escapeHtml(p.status)}</span></span>${p.status === 'Active' ? `<button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="submitResolveProblem(${p.id})">Resolve</button>` : ''}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No problems recorded.</p>'}
+                    <div class="form-grid-2" style="margin-top:10px;">
+                        <div class="form-group"><label class="form-label">Problem</label><input type="text" id="prob-desc" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Priority</label><select id="prob-priority" class="form-select"><option>Routine</option><option>Priority</option></select></div>
+                    </div>
+                    <button class="btn-outline" onclick="submitAddProblem(${a.id})">Add Problem</button>
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Medication Administration (systemic-therapy-linked MAR)</div>
+                    ${medsData.medications.map(m => `<div class="checklist-row" style="display:block;"><strong>${escapeHtml(m.drug_name)}</strong> ${escapeHtml(m.route || '')} — <span class="badge ${m.status === 'Given' ? 'badge-green' : (m.status === 'Scheduled' ? 'badge-amber' : 'badge-rose')}">${escapeHtml(m.status)}</span>${m.dose_administered ? ' — ' + escapeHtml(m.dose_administered) : ''}${m.status === 'Scheduled' ? ` <button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="promptAdministerMedication(${m.id})">Administer</button>` : ''}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No medications scheduled.</p>'}
+                    <div class="form-grid-2" style="margin-top:10px;">
+                        <div class="form-group"><label class="form-label">Drug name</label><input type="text" id="med-drug" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Route</label><input type="text" id="med-route" class="form-input" placeholder="IV, PO, SC..." /></div>
+                    </div>
+                    <button class="btn-outline" onclick="submitScheduleMedication(${a.id})">Schedule Medication</button>
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Ward Round Notes</div>
+                    ${roundsData.ward_round_notes.map(w => `<div class="checklist-row" style="display:block;"><strong>${escapeHtml(w.department || '')}</strong> — ${escapeHtml(w.assessment || '')} <em>${escapeHtml(w.plan || '')}</em></div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No ward round notes yet.</p>'}
+                    <div class="form-group" style="margin-top:10px;"><label class="form-label">Assessment *</label><input type="text" id="wr-assessment" class="form-input" /></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Plan *</label><input type="text" id="wr-plan" class="form-input" /></div>
+                    <button class="btn-outline" onclick="submitWardRound(${a.id})">Add Ward Round Note</button>
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Nursing Flowsheet</div>
+                    ${flowData.flowsheet_entries.map(f => `<div class="checklist-row">Pain ${f.pain_score ?? '—'}/10, ${escapeHtml(f.mobility_status || '')} — ${f.recorded_at ? new Date(f.recorded_at).toLocaleString() : ''}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No flowsheet entries yet (recorded by nursing).</p>'}
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Deterioration / Escalation</div>
+                    ${deteriorationData.deterioration_events.map(d => `<div class="checklist-row" style="display:block; color:var(--rose-badge-text);"><strong>${escapeHtml(d.trigger)}</strong>${d.escalated_to ? ' — escalated to ' + escapeHtml(d.escalated_to) : ''}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No deterioration events recorded.</p>'}
+                    <div class="form-group" style="margin-top:10px;"><label class="form-label">Trigger *</label><input type="text" id="det-trigger" class="form-input" /></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Escalated to</label><input type="text" id="det-escalated" class="form-input" /></div>
+                    <button class="btn-outline" onclick="submitDeteriorationEvent(${a.id})">Record Deterioration Event</button>
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Goals of Care</div>
+                    ${goalsData.goals_of_care.map(g => `<div class="checklist-row" style="display:block;"><strong>${escapeHtml(g.code_status)}</strong> — ${escapeHtml(g.summary || '')}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No goals-of-care discussion documented.</p>'}
+                    <div class="form-grid-2" style="margin-top:10px;">
+                        <div class="form-group"><label class="form-label">Code status</label>
+                            <select id="goc-status" class="form-select"><option>Full Code</option><option>DNR</option><option>DNI</option><option>Comfort Care</option></select>
+                        </div>
+                        <div class="form-group"><label class="form-label">Discussed with</label><input type="text" id="goc-with" class="form-input" /></div>
+                    </div>
+                    <button class="btn-outline" onclick="submitGoalsOfCare(${a.id})">Document Goals of Care</button>
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Transfer / Handover</div>
+                    ${transfersData.transfers.map(t => `<div class="checklist-row" style="display:block;">${escapeHtml(t.from_location || '')} → ${escapeHtml(t.to_location || '')}: ${escapeHtml(t.handover_summary)}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No transfers recorded.</p>'}
+                    <div class="form-grid-2" style="margin-top:10px;">
+                        <div class="form-group"><label class="form-label">To location</label><input type="text" id="tr-to" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Handover summary *</label><input type="text" id="tr-summary" class="form-input" /></div>
+                    </div>
+                    <button class="btn-outline" onclick="submitTransfer(${a.id})">Record Transfer</button>
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Oncology Discharge Summary ${discharge ? `<span class="badge ${discharge.status === 'SIGNED' ? 'badge-green' : 'badge-amber'}" style="margin-left:6px;">${discharge.status}</span>` : ''}</div>
+                    <fieldset ${discharge && discharge.status === 'SIGNED' ? 'disabled' : ''} style="border:none; padding:0;">
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Discharge diagnosis</label><input type="text" id="ds-diagnosis" class="form-input" value="${escapeHtml(discharge ? discharge.discharge_diagnosis || '' : '')}" /></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Hospital course</label><textarea id="ds-course" class="form-textarea" rows="2">${escapeHtml(discharge ? discharge.hospital_course || '' : '')}</textarea></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Follow-up plan</label><textarea id="ds-followup" class="form-textarea" rows="2">${escapeHtml(discharge ? discharge.follow_up_plan || '' : '')}</textarea></div>
+                        <button class="btn-outline" onclick="submitDischargeSummary(${a.id})">Save Discharge Summary</button>
+                    </fieldset>
+                    ${discharge && discharge.status !== 'SIGNED' ? `<button class="btn-navy" style="margin-left:8px;" onclick="submitSignDischargeSummary(${discharge.id})">✍️ Sign Discharge Summary</button>` : ''}
+                </div>
+            `;
+        }
+
+        async function submitAdmit(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/admit`, {
+                    ward: document.getElementById('adm-ward').value, bed: document.getElementById('adm-bed').value || undefined,
+                });
+                toast('Patient admitted', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitDischarge(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/discharge`, {});
+                toast('Patient discharged', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function toggleDeathForm(admissionId) {
+            const host = document.getElementById(`death-form-${admissionId}`);
+            if (!host) return;
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div class="section-card" style="background:var(--rose-badge-bg); margin-top:10px;">
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Immediate cause *</label><input type="text" id="dd-cause" class="form-input" /></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Certifying clinician *</label><input type="text" id="dd-clinician" class="form-input" /></div>
+                    <button class="btn-danger" onclick="submitDeathDocumentation(${admissionId})">Confirm Death Documentation</button>
+                </div>
+            `;
+        }
+
+        async function submitDeathDocumentation(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/death-documentation`, {
+                    immediate_cause: document.getElementById('dd-cause').value, certifying_clinician: document.getElementById('dd-clinician').value,
+                });
+                toast('Death documented', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitHistoryPhysical(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/history-physical`, {
+                    chief_complaint: document.getElementById('hp-cc').value, current_treatment_summary: document.getElementById('hp-tx').value,
+                    performance_status: document.getElementById('hp-ps').value, assessment_and_plan: document.getElementById('hp-ap').value,
+                });
+                toast('H&P saved', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitSignHp(hpId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/history-physicals/${hpId}/sign`);
+                toast('H&P signed', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitAddProblem(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/problems`, {
+                    problem: document.getElementById('prob-desc').value, priority: document.getElementById('prob-priority').value,
+                });
+                toast('Problem added', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitResolveProblem(problemId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/problems/${problemId}/resolve`, {});
+                toast('Problem resolved', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitScheduleMedication(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/medications`, {
+                    drug_name: document.getElementById('med-drug').value, route: document.getElementById('med-route').value || undefined,
+                });
+                toast('Medication scheduled', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function promptAdministerMedication(medId) {
+            const given = confirm('OK = mark Given. Cancel = record a Hold/Refusal/Omission instead.');
+            if (given) { submitAdministerMedication(medId, 'Given', prompt('Dose administered (optional):') || undefined); return; }
+            const reason = prompt('Reason (required for Held/Refused/Omitted):');
+            if (!reason) { toast('A reason is required', 'error'); return; }
+            const status = prompt('Status: Held, Refused, or Omitted?', 'Held') || 'Held';
+            submitAdministerMedication(medId, status, undefined, reason);
+        }
+
+        async function submitAdministerMedication(medId, status, doseAdministered, holdReason) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/medications/${medId}/administer`, {
+                    status, dose_administered: doseAdministered, hold_reason: holdReason,
+                });
+                toast(`Medication recorded as ${status}`, 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitWardRound(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/ward-rounds`, {
+                    assessment: document.getElementById('wr-assessment').value, plan: document.getElementById('wr-plan').value,
+                });
+                toast('Ward round note added', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitDeteriorationEvent(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/deterioration-events`, {
+                    trigger: document.getElementById('det-trigger').value, escalated_to: document.getElementById('det-escalated').value || undefined,
+                });
+                toast('Deterioration event recorded', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitGoalsOfCare(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/goals-of-care`, {
+                    code_status: document.getElementById('goc-status').value, goals_discussed_with: document.getElementById('goc-with').value || undefined,
+                });
+                toast('Goals of care documented', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitTransfer(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/transfers`, {
+                    to_location: document.getElementById('tr-to').value, handover_summary: document.getElementById('tr-summary').value,
+                });
+                toast('Transfer recorded', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitDischargeSummary(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/discharge-summary`, {
+                    discharge_diagnosis: document.getElementById('ds-diagnosis').value, hospital_course: document.getElementById('ds-course').value,
+                    follow_up_plan: document.getElementById('ds-followup').value,
+                });
+                toast('Discharge summary saved', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitSignDischargeSummary(summaryId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/discharge-summaries/${summaryId}/sign`);
+                toast('Discharge summary signed', 'success');
+                loadInpatientView();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

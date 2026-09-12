@@ -54,6 +54,7 @@ from .routers import cca
 from .routers import cca_diagnostics
 from .routers import cca_coordination
 from .routers import cca_oncology_ext
+from .routers import cca_inpatient
 from .routers import patient_portal
 from .cca_seed import seed_cca_database
 
@@ -103,6 +104,7 @@ app.include_router(cca.router)
 app.include_router(cca_diagnostics.router)
 app.include_router(cca_coordination.router)
 app.include_router(cca_oncology_ext.router)
+app.include_router(cca_inpatient.router)
 app.include_router(patient_portal.router)
 
 @app.exception_handler(json.JSONDecodeError)

@@ -39,6 +39,12 @@ from .models_cca_oncology_ext import (
     RadiationDiscrepancyRecord, RadiationPreTreatmentVerification,
     RadiationInVivoDosimetry,
 )
+from .models_cca_inpatient import (
+    InpatientAdmission, InpatientHistoryAndPhysical, InpatientProblemListItem,
+    InpatientMedicationAdministration, InpatientWardRoundNote, InpatientNursingFlowsheet,
+    InpatientDeteriorationEvent, InpatientGoalsOfCare, InpatientTransferHandover,
+    InpatientDischargeSummary, InpatientDeathDocumentation,
+)
 from .cca_engine import calculate_bsa
 
 
@@ -90,6 +96,9 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # before CCAResult/MDTCase (their optional FK targets), both deleted below.
             PathologyCustodyEvent, PathologyBlockSlide, PathologyFrozenSection,
             PathologySecondOpinion, PathologyMdtReviewNote,
+            # Inpatient Oncology (final gap-closing round) -- has its own patient_id; its
+            # admission_id-keyed children are deleted above via admission_ids lookup.
+            InpatientAdmission,
             # RadiationTreatmentUnit/RadiationEquipmentQARecord/RadiationEquipmentIssue are
             # organization-level equipment data (like ClinicalMaster/PharmacyRecallEvent
             # above), not patient data, so they stay out of this list too.
@@ -133,6 +142,25 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
                 db.query(MDTMeetingMinutes).filter(
                     MDTMeetingMinutes.case_id.in_(mdt_case_ids)
                 ).delete(synchronize_session=False)
+            # Inpatient Oncology (final gap-closing round) -- every child table here is keyed
+            # by admission_id only, no patient_id of its own, so all must be deleted via
+            # admission_ids lookup before InpatientAdmission itself is deleted below.
+            inpatient_admission_ids = [
+                row.id for row in db.query(InpatientAdmission.id).filter(
+                    InpatientAdmission.patient_id.in_(org_patient_ids)
+                ).all()
+            ]
+            if inpatient_admission_ids:
+                for child_model in (
+                    InpatientHistoryAndPhysical, InpatientProblemListItem,
+                    InpatientMedicationAdministration, InpatientWardRoundNote,
+                    InpatientNursingFlowsheet, InpatientDeteriorationEvent,
+                    InpatientGoalsOfCare, InpatientTransferHandover,
+                    InpatientDischargeSummary, InpatientDeathDocumentation,
+                ):
+                    db.query(child_model).filter(
+                        child_model.admission_id.in_(inpatient_admission_ids)
+                    ).delete(synchronize_session=False)
             # StagingEvidence has no patient_id of its own -- delete it via its
             # parent StagingRecord ids before StagingRecord itself is deleted below.
             staging_record_ids = [
