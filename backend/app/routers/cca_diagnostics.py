@@ -27,6 +27,7 @@ from ..models_cca import (
     TreatmentPlan, TreatmentOrder,
     PathologyBlockSlide, PathologyCustodyEvent, PathologyFrozenSection, PathologySecondOpinion,
     PathologyMdtReviewNote,
+    CancerEpisode,
 )
 from ..events import publish
 from .cca import get_cca_db, _org_id, _actor, _get_org_patient, _check_patient_in_org
@@ -856,7 +857,7 @@ def _biomarker_out(b: CCABiomarkerResult) -> dict:
         "result_as_reported": b.result_as_reported, "method": b.method, "platform": b.platform,
         "specimen": b.specimen, "adequacy": b.adequacy, "lab_name": b.lab_name,
         "reported_on": b.reported_on.isoformat() if b.reported_on else None, "status": b.status,
-        "confirmatory_required": b.confirmatory_required,
+        "confirmatory_required": b.confirmatory_required, "episode_id": b.episode_id,
     }
 
 
@@ -880,9 +881,18 @@ async def order_molecular_test(request: Request, db: Session = Depends(get_cca_d
         raise HTTPException(422, "patient_id and marker_name are required")
     _get_org_patient(db, patient_id, org_id)
 
+    # Cancer Episode link (gap report item 5) -- optional; a molecular test works unchanged
+    # without one.
+    episode_id = body.get("episode_id")
+    if episode_id is not None:
+        episode = db.query(CancerEpisode).filter(CancerEpisode.id == episode_id, CancerEpisode.patient_id == patient_id).first()
+        if not episode:
+            raise HTTPException(422, "episode_id does not reference a Cancer Episode for this patient")
+
     test = CCABiomarkerResult(
         patient_id=patient_id, marker_name=marker_name, result_as_reported="Pending",
         method=body.get("method"), specimen=body.get("specimen"), status="PENDING",
+        episode_id=episode_id,
     )
     db.add(test)
     db.flush()

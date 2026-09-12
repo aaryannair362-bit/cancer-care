@@ -247,7 +247,65 @@ class CCABiomarkerResult(Base):
     reported_on = Column(Date, default=datetime.utcnow)
     status = Column(String(30), default="RESULTED")  # RESULTED, PENDING, INSUFFICIENT
     confirmatory_required = Column(String(20), nullable=True)  # yes|no|pending
+    # Optional link to the CancerEpisode this biomarker belongs to (gap report item 5).
+    episode_id = Column(Integer, ForeignKey("cca_cancer_episodes.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+# ---------------------------------------------------------------------------
+# Cancer Episode + Line of Therapy (Product 1 vs Product 2 gap report item 5, CRITICAL
+# priority) -- the formal entity that was missing everywhere this codebase previously used
+# a free-text cancer_episode_ref label (see TreatmentCompletion/SurveillancePlan's own
+# docstrings). A patient's whole journey for one primary cancer -- diagnosis, staging,
+# biomarkers, every treatment plan/line of therapy, and eventual completion/surveillance --
+# now has one entity to organize around. Additive only: existing cancer_episode_ref string
+# columns are untouched, and every new episode_id/line_of_therapy_id FK below is nullable,
+# so no existing caller/test breaks. Deliberately scoped to the diagnosis -> stage ->
+# biomarker -> plan -> completion/surveillance chain the gap report calls out by name;
+# wiring MDTCase/CarePlan to an episode is left for later, not forgotten.
+# ---------------------------------------------------------------------------
+
+class CancerEpisode(Base):
+    """One episode per primary cancer a patient is being treated for. A patient can have
+    more than one episode (a new primary, or a second malignancy) -- episode_number
+    distinguishes them. Re-treatment of the SAME cancer (progression, relapse) is not a new
+    episode; it is a new LineOfTherapy under this one."""
+    __tablename__ = "cca_cancer_episodes"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    episode_number = Column(Integer, default=1)
+    primary_diagnosis_id = Column(Integer, ForeignKey("cca_cancer_diagnoses.id"), nullable=True)
+    primary_site = Column(String(200), nullable=True)  # denormalized snapshot at episode-open time, for display without a join
+    label = Column(String(200), nullable=True)  # clinician-facing short name, e.g. "Left Breast IDC 2026"
+    intent_at_diagnosis = Column(String(50), nullable=True)  # Curative, Palliative -- the clinician's own characterization
+    status = Column(String(30), default="ACTIVE")  # ACTIVE, COMPLETED, SURVEILLANCE, RECURRED, DECEASED, CLOSED
+    opened_by = Column(String(200))
+    opened_at = Column(DateTime, default=datetime.utcnow)
+    closed_reason = Column(Text, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+
+
+class LineOfTherapy(Base):
+    """Each distinct systemic-treatment strategy within a CancerEpisode gets its own
+    numbered line (1st line, 2nd line, ...) -- the standard oncology way of tracking how
+    many prior regimens a patient has had for a given cancer. line_number is assigned
+    server-side (existing count + 1), never clinician-typed, to avoid off-by-one drift.
+    regimen_summary is a clinician-typed label, never derived -- whether a dose-modified
+    continuation is "the same line" or a genuinely new one after progression is the
+    clinician's own judgment, not inferred here."""
+    __tablename__ = "cca_lines_of_therapy"
+    id = Column(Integer, primary_key=True)
+    episode_id = Column(Integer, ForeignKey("cca_cancer_episodes.id"), nullable=False)
+    line_number = Column(Integer, nullable=False)
+    setting = Column(String(50), nullable=True)  # Neoadjuvant, Adjuvant, First-line Metastatic, Second-line, Maintenance...
+    regimen_summary = Column(String(300), nullable=True)
+    reason_for_line_change = Column(Text, nullable=True)  # required when line_number > 1
+    start_date = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)
+    outcome = Column(String(50), nullable=True)  # Ongoing, Completed, Progressed, Toxicity Stop, Patient Choice
+    status = Column(String(30), default="ACTIVE")  # ACTIVE, COMPLETED, DISCONTINUED
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 
 class CCAOrder(Base):
     __tablename__ = "cca_orders"
@@ -335,6 +393,8 @@ class StagingRecord(Base):
     __tablename__ = "cca_staging_records"
     id = Column(Integer, primary_key=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    # Optional link to the CancerEpisode this staging belongs to (gap report item 5).
+    episode_id = Column(Integer, ForeignKey("cca_cancer_episodes.id"), nullable=True)
     staging_system = Column(String(100), default="AJCC Cancer Staging Manual")
     system_version = Column(String(50), default="8th Edition")
     classification_prefix = Column(String(10), default="c")  # c, p, y, r
@@ -592,6 +652,56 @@ class MDTDecision(Base):
     recorded_by = Column(String(200))
     recorded_at = Column(DateTime, default=datetime.utcnow)
 
+
+# ---------------------------------------------------------------------------
+# MDT Action Tracker (Product 1 vs Product 2 gap report, CRITICAL priority alongside Cancer
+# Episode) -- MDTDecision.outstanding_items above was an unstructured JSON blob with no
+# owner, due date, status, or escalation of its own; this is that missing tracked entity.
+# Also closes the sibling gaps the report calls out on the same screen: minutes capture +
+# chair sign-off (MDTMeetingMinutes) and agenda/case-pack, the latter two of which reuse
+# MDTCase.agenda_position and a read-time aggregation respectively rather than new storage.
+# ---------------------------------------------------------------------------
+
+class MDTActionItem(Base):
+    """One actionable item arising from a tumour board case/decision -- owner, due date,
+    status and escalation all live here now instead of inside MDTDecision.outstanding_items'
+    free-form JSON (kept, unread by new code, for backward compatibility)."""
+    __tablename__ = "cca_mdt_action_items"
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cca_mdt_cases.id"), nullable=False)
+    decision_id = Column(Integer, ForeignKey("cca_mdt_decisions.id"), nullable=True)
+    description = Column(Text, nullable=False)
+    owner = Column(String(200), nullable=True)
+    due_date = Column(Date, nullable=True)
+    priority = Column(String(30), default="Routine")  # Routine, Urgent
+    status = Column(String(30), default="OPEN")  # OPEN, IN_PROGRESS, COMPLETED, ESCALATED, CANCELLED
+    completion_note = Column(Text, nullable=True)
+    completed_by = Column(String(200), nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    escalated_to = Column(String(200), nullable=True)
+    escalated_reason = Column(Text, nullable=True)
+    escalated_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class MDTMeetingMinutes(Base):
+    """Minutes capture + chair sign-off for one MDTCase's tumour-board discussion --
+    distinct from MDTDecision.rationale (the clinical recommendation itself): this is the
+    chair's own record of the discussion, including options considered and rejected."""
+    __tablename__ = "cca_mdt_meeting_minutes"
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cca_mdt_cases.id"), nullable=False)
+    minutes_text = Column(Text, nullable=False)
+    options_considered = Column(Text, nullable=True)
+    chair_name = Column(String(200), nullable=True)
+    status = Column(String(30), default="DRAFT")  # DRAFT, SIGNED
+    signed_by = Column(String(200), nullable=True)
+    signed_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class CarePlan(Base):
     __tablename__ = "cca_care_plans"
     id = Column(Integer, primary_key=True)
@@ -705,6 +815,10 @@ class TreatmentPlan(Base):
     care_plan_id = Column(Integer, ForeignKey("cca_care_plans.id"), nullable=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     mdt_decision_id = Column(Integer, ForeignKey("cca_mdt_decisions.id"), nullable=True)
+    # Optional links to the CancerEpisode/LineOfTherapy this plan belongs to (gap report
+    # item 5) -- set at draft time or retroactively via POST /treatment-plans/{id}/link-episode.
+    episode_id = Column(Integer, ForeignKey("cca_cancer_episodes.id"), nullable=True)
+    line_of_therapy_id = Column(Integer, ForeignKey("cca_lines_of_therapy.id"), nullable=True)
     # Explicit, doctor-set choice at draft time: does this case go through MDT/Tumour Board
     # review before authorization, or does the treating clinician develop and sign it directly?
     # When True, sign_treatment_plan additionally requires mdt_decision_id to reference an
@@ -1370,13 +1484,14 @@ class TransfusionFeedback(Base):
 class TreatmentCompletion(Base):
     """The End-of-Treatment Clinical Review (SCR-CMP-002) -- the clinician's own record
     that a course of cancer treatment has ended, why, and what comes next.
-    cancer_episode_ref is a free-text/label reference: this codebase has no formal Cancer
-    Episode entity yet (gap report item 5, out of scope for this batch), so there is
-    nothing to foreign-key to."""
+    cancer_episode_ref is kept as a free-text fallback for callers that predate the formal
+    CancerEpisode entity (gap report item 5, closed in the feature-completion round); new
+    callers should prefer episode_id."""
     __tablename__ = "cca_treatment_completions"
     id = Column(Integer, primary_key=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     cancer_episode_ref = Column(String(200), nullable=True)
+    episode_id = Column(Integer, ForeignKey("cca_cancer_episodes.id"), nullable=True)
     treatment_plan_id = Column(Integer, ForeignKey("cca_treatment_plans.id"), nullable=True)
     treatment_intent = Column(String(50), nullable=True)
     treatment_start_date = Column(Date, nullable=True)
@@ -1515,12 +1630,13 @@ class TreatmentSummaryDistribution(Base):
 class SurveillancePlan(Base):
     """Surveillance / Survivorship Care Plan (SCR-SURV-003) -- the governing record for a
     patient's post-treatment follow-up programme. cancer_episode_ref mirrors
-    TreatmentCompletion's own free-text reference (no formal Cancer Episode entity yet,
-    gap report item 5, out of scope for this batch)."""
+    TreatmentCompletion's own free-text fallback; new callers should prefer episode_id
+    (gap report item 5, closed in the feature-completion round)."""
     __tablename__ = "cca_surveillance_plans"
     id = Column(Integer, primary_key=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     cancer_episode_ref = Column(String(200), nullable=True)
+    episode_id = Column(Integer, ForeignKey("cca_cancer_episodes.id"), nullable=True)
     completion_id = Column(Integer, ForeignKey("cca_treatment_completions.id"), nullable=True)
     surveillance_intent = Column(Text, nullable=True)
     follow_up_frequency = Column(String(100), nullable=True)

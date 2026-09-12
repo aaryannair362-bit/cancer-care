@@ -30,6 +30,8 @@ from .models_cca import (
     PathologySpecimenAccession,
     PathologyBlockSlide, PathologyCustodyEvent, PathologyFrozenSection,
     PathologySecondOpinion, PathologyMdtReviewNote,
+    CancerEpisode, LineOfTherapy,
+    MDTActionItem, MDTMeetingMinutes,
 )
 from .models_cca_oncology_ext import (
     TreatmentOrderDrugLine, RadiationPrescription, CCARadiationPhase, RadiationFraction,
@@ -117,6 +119,20 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             CCAEncounter, CCAQueueEvent, CCAConsent
         ]
         if org_patient_ids:
+            # MDTActionItem/MDTMeetingMinutes have no patient_id of their own -- delete them
+            # via their parent MDTCase ids before MDTCase itself is deleted below.
+            mdt_case_ids = [
+                row.id for row in db.query(MDTCase.id).filter(
+                    MDTCase.patient_id.in_(org_patient_ids)
+                ).all()
+            ]
+            if mdt_case_ids:
+                db.query(MDTActionItem).filter(
+                    MDTActionItem.case_id.in_(mdt_case_ids)
+                ).delete(synchronize_session=False)
+                db.query(MDTMeetingMinutes).filter(
+                    MDTMeetingMinutes.case_id.in_(mdt_case_ids)
+                ).delete(synchronize_session=False)
             # StagingEvidence has no patient_id of its own -- delete it via its
             # parent StagingRecord ids before StagingRecord itself is deleted below.
             staging_record_ids = [
@@ -204,6 +220,23 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
                     ).delete(synchronize_session=False)
             for model in child_models_by_patient:
                 db.query(model).filter(model.patient_id.in_(org_patient_ids)).delete(synchronize_session=False)
+            # Cancer Episode + Line of Therapy (final gap-closing round) -- LineOfTherapy has
+            # no patient_id of its own (only episode_id), and TreatmentPlan references both
+            # episode_id and line_of_therapy_id, so this must run after the loop above
+            # (TreatmentPlan is already gone by this point) and delete LineOfTherapy before
+            # its CancerEpisode parent.
+            episode_ids = [
+                row.id for row in db.query(CancerEpisode.id).filter(
+                    CancerEpisode.patient_id.in_(org_patient_ids)
+                ).all()
+            ]
+            if episode_ids:
+                db.query(LineOfTherapy).filter(
+                    LineOfTherapy.episode_id.in_(episode_ids)
+                ).delete(synchronize_session=False)
+            db.query(CancerEpisode).filter(
+                CancerEpisode.patient_id.in_(org_patient_ids)
+            ).delete(synchronize_session=False)
         db.query(CCAPatient).filter(CCAPatient.organization_id == organization_id).delete(synchronize_session=False)
         db.commit()
 

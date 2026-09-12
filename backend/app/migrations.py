@@ -205,6 +205,16 @@ ADDITIVE_COLUMNS = [
     # Feature completion round: which Treatment Unit a fraction is scheduled/delivered on
     # (reference SCR-RTT-001).
     ("cca_radiation_fractions", "treatment_unit_id", "INTEGER"),
+    # Final gap-closing round: Cancer Episode + Line of Therapy (gap report item 5,
+    # CRITICAL) -- optional links from the diagnosis -> stage -> biomarker -> plan ->
+    # completion/surveillance chain onto the new cca_cancer_episodes/cca_lines_of_therapy
+    # tables. All nullable, so existing rows/callers are unaffected.
+    ("cca_staging_records", "episode_id", "INTEGER"),
+    ("cca_biomarker_results", "episode_id", "INTEGER"),
+    ("cca_treatment_plans", "episode_id", "INTEGER"),
+    ("cca_treatment_plans", "line_of_therapy_id", "INTEGER"),
+    ("cca_treatment_completions", "episode_id", "INTEGER"),
+    ("cca_surveillance_plans", "episode_id", "INTEGER"),
 ]
 
 

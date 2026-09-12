@@ -34,7 +34,7 @@ from ..models_cca_oncology_ext import (
 )
 from ..models_cca import (
     CCAPatient, CCAConsent, CCAQueueEvent, CCAEncounter, CCAIntakeAssessment,
-    CCADocument, CCADocumentPage, ClinicalFact, CCAContradiction,
+    CCADocument, CCADocumentPage, ClinicalFact, CCAContradiction, CCACancerDiagnosis,
     CCABiomarkerResult, CCAOrder, CCAResult, StagingRecord, StagingEvidence,
     GuidelineRegistry, TreatmentPlanGuidelineLink,
     ClinicalBrief, MDTCase, MDTDecision, CarePlan,
@@ -55,6 +55,8 @@ from ..models_cca import (
     OralTherapyReview, OralTherapyHoldEvent,
     ClinicalMaster, ClinicalMasterItem,
     SystemicTherapyHoldDecision, CumulativeDoseRecord, PharmacyReturnEvent, PharmacyRecallEvent,
+    CancerEpisode, LineOfTherapy,
+    MDTActionItem, MDTMeetingMinutes,
 )
 from ..cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
@@ -2076,8 +2078,17 @@ async def confirm_stage(
 
     next_ver = (max([p.version_no for p in prior], default=0)) + 1
 
+    # Cancer Episode link (gap report item 5) -- optional; a staging record works unchanged
+    # without one.
+    episode_id = body.get("episode_id")
+    if episode_id is not None:
+        episode = db.query(CancerEpisode).filter(CancerEpisode.id == episode_id, CancerEpisode.patient_id == patient_id).first()
+        if not episode:
+            raise HTTPException(422, "episode_id does not reference a Cancer Episode for this patient")
+
     record = StagingRecord(
         patient_id=patient_id,
+        episode_id=episode_id,
         staging_system="AJCC Cancer Staging Manual",
         system_version="8th Edition",
         classification_prefix=prefix,
@@ -2410,6 +2421,228 @@ async def approve_mdt_recommendation(
 
 
 # ---------------------------------------------------------
+# MDT Action Tracker + Minutes/Chair Sign-off + Case Pack (final gap-closing round, CRITICAL
+# priority alongside Cancer Episode) -- see models_cca.py's MDTActionItem/MDTMeetingMinutes
+# docstrings. The case-pack view is pure read-time aggregation of data that already exists
+# elsewhere (diagnosis/staging/biomarkers/latest decision/open action items); nothing new is
+# stored for it.
+# ---------------------------------------------------------
+
+def _mdt_action_item_dict(a: MDTActionItem) -> dict:
+    return {
+        "id": a.id, "case_id": a.case_id, "decision_id": a.decision_id, "description": a.description,
+        "owner": a.owner, "due_date": a.due_date.isoformat() if a.due_date else None,
+        "priority": a.priority, "status": a.status, "completion_note": a.completion_note,
+        "completed_by": a.completed_by, "completed_at": a.completed_at.isoformat() if a.completed_at else None,
+        "escalated_to": a.escalated_to, "escalated_reason": a.escalated_reason,
+        "escalated_at": a.escalated_at.isoformat() if a.escalated_at else None,
+        "created_by": a.created_by,
+    }
+
+
+def _mdt_minutes_dict(m: MDTMeetingMinutes) -> dict:
+    return {
+        "id": m.id, "case_id": m.case_id, "minutes_text": m.minutes_text,
+        "options_considered": m.options_considered, "chair_name": m.chair_name, "status": m.status,
+        "signed_by": m.signed_by, "signed_at": m.signed_at.isoformat() if m.signed_at else None,
+    }
+
+
+def _get_org_mdt_case(db: Session, case_id: int, org_id: int) -> MDTCase:
+    case = db.query(MDTCase).filter(MDTCase.id == case_id).first()
+    if not case:
+        raise HTTPException(404, "MDT case not found")
+    _check_patient_in_org(db, case.patient_id, org_id)
+    return case
+
+
+@router.post("/mdt/cases/{id}/action-items", status_code=201)
+async def create_mdt_action_item(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    case = _get_org_mdt_case(db, id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    description = (body.get("description") or "").strip()
+    if not description:
+        raise HTTPException(422, "description is required")
+    decision_id = body.get("decision_id")
+    if decision_id is not None:
+        decision = db.query(MDTDecision).filter(MDTDecision.id == decision_id, MDTDecision.case_id == case.id).first()
+        if not decision:
+            raise HTTPException(422, "decision_id does not reference a decision on this case")
+    actor = _actor(current_user)
+    item = MDTActionItem(
+        case_id=case.id, decision_id=decision_id, description=description, owner=body.get("owner"),
+        due_date=datetime.fromisoformat(body["due_date"]).date() if body.get("due_date") else None,
+        priority=body.get("priority", "Routine"), created_by=actor,
+    )
+    db.add(item)
+    db.flush()
+    publish(
+        db, "MDT_ACTION_ITEM_CREATED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title="MDT action item created", category="MDT",
+        description=f"{actor} added an action item to MDT case #{case.id}: {description}",
+        mdt_case_id=case.id, mdt_action_item_id=item.id,
+    )
+    db.commit()
+    db.refresh(item)
+    return {"status": "success", "action_item": _mdt_action_item_dict(item)}
+
+
+@router.get("/mdt/cases/{id}/action-items")
+def list_mdt_action_items(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    case = _get_org_mdt_case(db, id, _org_id(current_user))
+    rows = db.query(MDTActionItem).filter(MDTActionItem.case_id == case.id).order_by(MDTActionItem.id.desc()).all()
+    return {"action_items": [_mdt_action_item_dict(a) for a in rows]}
+
+
+def _get_org_mdt_action_item(db: Session, item_id: int, org_id: int) -> MDTActionItem:
+    item = db.query(MDTActionItem).filter(MDTActionItem.id == item_id).first()
+    if not item:
+        raise HTTPException(404, "MDT action item not found")
+    case = db.query(MDTCase).filter(MDTCase.id == item.case_id).first()
+    _check_patient_in_org(db, case.patient_id, org_id)
+    return item
+
+
+@router.post("/mdt/action-items/{id}/complete")
+async def complete_mdt_action_item(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    item = _get_org_mdt_action_item(db, id, _org_id(current_user))
+    _require_clinician(current_user)
+    if item.status == "COMPLETED":
+        raise HTTPException(409, "This action item is already completed")
+    body = await request.json()
+    item.status = "COMPLETED"
+    item.completion_note = body.get("completion_note")
+    item.completed_by = _actor(current_user)
+    item.completed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(item)
+    return {"status": "success", "action_item": _mdt_action_item_dict(item)}
+
+
+@router.post("/mdt/action-items/{id}/escalate")
+async def escalate_mdt_action_item(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    item = _get_org_mdt_action_item(db, id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    escalated_to = (body.get("escalated_to") or "").strip()
+    if not escalated_to:
+        raise HTTPException(422, "escalated_to is required")
+    item.status = "ESCALATED"
+    item.escalated_to = escalated_to
+    item.escalated_reason = body.get("escalated_reason")
+    item.escalated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(item)
+    return {"status": "success", "action_item": _mdt_action_item_dict(item)}
+
+
+@router.post("/mdt/cases/{id}/minutes")
+async def upsert_mdt_minutes(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Drafts or updates this case's meeting minutes -- one row per case, editable in place
+    while DRAFT, immutable once /sign moves it to SIGNED (same draft->signed posture as
+    every other clinical document in this codebase)."""
+    case = _get_org_mdt_case(db, id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    minutes_text = (body.get("minutes_text") or "").strip()
+    if not minutes_text:
+        raise HTTPException(422, "minutes_text is required")
+    minutes = db.query(MDTMeetingMinutes).filter(MDTMeetingMinutes.case_id == case.id).order_by(MDTMeetingMinutes.id.desc()).first()
+    if minutes and minutes.status == "SIGNED":
+        raise HTTPException(409, "Minutes for this case are already signed; they cannot be edited further")
+    if not minutes:
+        minutes = MDTMeetingMinutes(case_id=case.id, minutes_text=minutes_text, created_by=_actor(current_user))
+        db.add(minutes)
+    else:
+        minutes.minutes_text = minutes_text
+    minutes.options_considered = body.get("options_considered")
+    minutes.chair_name = body.get("chair_name")
+    db.commit()
+    db.refresh(minutes)
+    return {"status": "success", "minutes": _mdt_minutes_dict(minutes)}
+
+
+@router.post("/mdt/minutes/{id}/sign")
+def sign_mdt_minutes(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    minutes = db.query(MDTMeetingMinutes).filter(MDTMeetingMinutes.id == id).first()
+    if not minutes:
+        raise HTTPException(404, "MDT meeting minutes not found")
+    case = db.query(MDTCase).filter(MDTCase.id == minutes.case_id).first()
+    _check_patient_in_org(db, case.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    if minutes.status == "SIGNED":
+        raise HTTPException(409, "These minutes are already signed")
+    actor = _actor(current_user)
+    minutes.status = "SIGNED"
+    minutes.signed_by = actor
+    minutes.signed_at = datetime.utcnow()
+    if not minutes.chair_name:
+        minutes.chair_name = actor
+    publish(
+        db, "MDT_MINUTES_SIGNED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title="MDT meeting minutes signed", category="MDT",
+        description=f"{actor} signed the meeting minutes for MDT case #{case.id} as chair.",
+        mdt_case_id=case.id,
+    )
+    db.commit()
+    db.refresh(minutes)
+    return {"status": "success", "minutes": _mdt_minutes_dict(minutes)}
+
+
+@router.post("/mdt/cases/{id}/agenda-position")
+async def set_mdt_agenda_position(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Agenda-builder -- reorders this case within its board_date's running order. Deliberately
+    a simple integer setter (no gap-filling/renumbering of siblings): the MDT Coordinator sets
+    whatever position they intend, matching how agenda_position was already stored but never
+    had a writer."""
+    case = _get_org_mdt_case(db, id, _org_id(current_user))
+    body = await request.json()
+    position = body.get("agenda_position")
+    if position is None:
+        raise HTTPException(422, "agenda_position is required")
+    case.agenda_position = int(position)
+    db.commit()
+    return {"status": "success", "case_id": case.id, "agenda_position": case.agenda_position}
+
+
+@router.get("/mdt/cases/{id}/case-pack")
+def get_mdt_case_pack(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Case-pack assembly -- everything a tumour board needs to discuss this case, gathered
+    at read time from existing tables rather than duplicated into a new one."""
+    org_id = _org_id(current_user)
+    case = _get_org_mdt_case(db, id, org_id)
+    patient = db.query(CCAPatient).filter(CCAPatient.id == case.patient_id).first()
+    staging = db.query(StagingRecord).filter(
+        StagingRecord.patient_id == case.patient_id, StagingRecord.status == "CLINICIAN_CONFIRMED"
+    ).order_by(StagingRecord.version_no.desc()).first()
+    biomarkers = db.query(CCABiomarkerResult).filter(CCABiomarkerResult.patient_id == case.patient_id).order_by(CCABiomarkerResult.reported_on.desc()).limit(10).all()
+    latest_decision = db.query(MDTDecision).filter(MDTDecision.case_id == case.id).order_by(MDTDecision.id.desc()).first()
+    action_items = db.query(MDTActionItem).filter(MDTActionItem.case_id == case.id).all()
+    minutes = db.query(MDTMeetingMinutes).filter(MDTMeetingMinutes.case_id == case.id).order_by(MDTMeetingMinutes.id.desc()).first()
+    return {
+        "case": {
+            "id": case.id, "question": case.question, "priority": case.priority,
+            "tumor_board": case.tumor_board, "status": case.status,
+            "board_date": case.board_date.isoformat() if case.board_date else None,
+            "agenda_position": case.agenda_position,
+        },
+        "patient": {"id": patient.id, "name": patient.name, "mrn": patient.mrn, "age": patient.age, "sex": patient.sex} if patient else None,
+        "staging": ({
+            "stage_value": staging.stage_value, "t_stage": staging.t_stage, "n_stage": staging.n_stage,
+            "m_stage": staging.m_stage, "prognostic_stage_group": staging.prognostic_stage_group,
+        } if staging else None),
+        "biomarkers": [{"marker_name": b.marker_name, "result_as_reported": b.result_as_reported, "status": b.status} for b in biomarkers],
+        "latest_decision": ({
+            "id": latest_decision.id, "recommendation": latest_decision.recommendation, "status": latest_decision.status,
+        } if latest_decision else None),
+        "open_action_item_count": len([a for a in action_items if a.status in ("OPEN", "IN_PROGRESS")]),
+        "action_items": [_mdt_action_item_dict(a) for a in action_items],
+        "minutes": _mdt_minutes_dict(minutes) if minutes else None,
+    }
+
+
+# ---------------------------------------------------------
 # 8b. Treatment Plan lifecycle -- draft / amend / sign / discontinue
 #
 # A TreatmentPlan is the clinician-owned cancer treatment strategy: distinct from CarePlan
@@ -2451,6 +2684,250 @@ def _apply_treatment_plan_discontinuation(db: Session, plan: TreatmentPlan, reas
     )
 
 
+# ---------------------------------------------------------
+# Cancer Episode + Line of Therapy (Product 1 vs Product 2 gap report item 5, CRITICAL
+# priority) -- see models_cca.py's CancerEpisode/LineOfTherapy docstrings for the design
+# rationale. Every read below assembles its "chain" view (diagnosis -> stage -> biomarker
+# -> plan -> completion/surveillance) at read time from the already-existing tables that
+# now carry an optional episode_id, rather than duplicating any of that data here.
+# primary_diagnosis_id is optional and rarely populated in practice -- CCACancerDiagnosis
+# is demo-seed-only in this codebase (see _get_cancer_context's own docstring above), so an
+# episode's primary_site/label are typically typed directly by the clinician instead.
+# ---------------------------------------------------------
+
+def _episode_dict(e: CancerEpisode) -> dict:
+    return {
+        "id": e.id, "patient_id": e.patient_id, "episode_number": e.episode_number,
+        "primary_diagnosis_id": e.primary_diagnosis_id, "primary_site": e.primary_site,
+        "label": e.label, "intent_at_diagnosis": e.intent_at_diagnosis, "status": e.status,
+        "opened_by": e.opened_by, "opened_at": e.opened_at.isoformat() if e.opened_at else None,
+        "closed_reason": e.closed_reason, "closed_at": e.closed_at.isoformat() if e.closed_at else None,
+    }
+
+
+def _line_of_therapy_dict(line: LineOfTherapy) -> dict:
+    return {
+        "id": line.id, "episode_id": line.episode_id, "line_number": line.line_number,
+        "setting": line.setting, "regimen_summary": line.regimen_summary,
+        "reason_for_line_change": line.reason_for_line_change,
+        "start_date": line.start_date.isoformat() if line.start_date else None,
+        "end_date": line.end_date.isoformat() if line.end_date else None,
+        "outcome": line.outcome, "status": line.status, "created_by": line.created_by,
+    }
+
+
+def _get_org_episode(db: Session, episode_id: int, org_id: int) -> CancerEpisode:
+    episode = db.query(CancerEpisode).filter(CancerEpisode.id == episode_id).first()
+    if not episode:
+        raise HTTPException(404, "Cancer episode not found")
+    _check_patient_in_org(db, episode.patient_id, org_id)
+    return episode
+
+
+@router.post("/patients/{patient_id}/cancer-episodes", status_code=201)
+async def create_cancer_episode(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    org_id = _org_id(current_user)
+    _get_org_patient(db, patient_id, org_id)
+    _require_clinician(current_user)
+    body = await request.json()
+
+    primary_diagnosis_id = body.get("primary_diagnosis_id")
+    diagnosis = None
+    if primary_diagnosis_id is not None:
+        diagnosis = db.query(CCACancerDiagnosis).filter(
+            CCACancerDiagnosis.id == primary_diagnosis_id, CCACancerDiagnosis.patient_id == patient_id
+        ).first()
+        if not diagnosis:
+            raise HTTPException(422, "primary_diagnosis_id does not reference a diagnosis for this patient")
+
+    existing_count = db.query(CancerEpisode).filter(CancerEpisode.patient_id == patient_id).count()
+    actor = _actor(current_user)
+    episode = CancerEpisode(
+        patient_id=patient_id, episode_number=existing_count + 1,
+        primary_diagnosis_id=primary_diagnosis_id,
+        primary_site=body.get("primary_site") or (diagnosis.primary_site if diagnosis else None),
+        label=body.get("label"), intent_at_diagnosis=body.get("intent_at_diagnosis"),
+        opened_by=actor,
+    )
+    db.add(episode)
+    db.flush()
+    publish(
+        db, "CANCER_EPISODE_OPENED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Cancer Episode opened: {episode.label or episode.primary_site or f'Episode {episode.episode_number}'}",
+        category="DIAGNOSIS",
+        description=f"{actor} opened cancer episode #{episode.episode_number} for this patient.",
+        episode_id=episode.id,
+    )
+    db.commit()
+    db.refresh(episode)
+    return {"status": "success", "episode": _episode_dict(episode)}
+
+
+@router.get("/patients/{patient_id}/cancer-episodes")
+def list_cancer_episodes(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(CancerEpisode).filter(CancerEpisode.patient_id == patient_id).order_by(CancerEpisode.episode_number).all()
+    return {"episodes": [_episode_dict(e) for e in rows]}
+
+
+@router.get("/cancer-episodes/{episode_id}")
+def get_cancer_episode(episode_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """The episode's full chain, assembled at read time -- diagnosis snapshot, every
+    staging record/biomarker/treatment plan linked to this episode, its lines of therapy,
+    and any completion/surveillance plan that references it."""
+    org_id = _org_id(current_user)
+    episode = _get_org_episode(db, episode_id, org_id)
+    diagnosis = db.query(CCACancerDiagnosis).filter(CCACancerDiagnosis.id == episode.primary_diagnosis_id).first() if episode.primary_diagnosis_id else None
+    staging_records = db.query(StagingRecord).filter(StagingRecord.episode_id == episode.id).order_by(StagingRecord.version_no.desc()).all()
+    biomarkers = db.query(CCABiomarkerResult).filter(CCABiomarkerResult.episode_id == episode.id).order_by(CCABiomarkerResult.reported_on.desc()).all()
+    lines = db.query(LineOfTherapy).filter(LineOfTherapy.episode_id == episode.id).order_by(LineOfTherapy.line_number).all()
+    plans = db.query(TreatmentPlan).filter(TreatmentPlan.episode_id == episode.id).order_by(TreatmentPlan.id.desc()).all()
+    completions = db.query(TreatmentCompletion).filter(TreatmentCompletion.episode_id == episode.id).all()
+    surveillance_plans = db.query(SurveillancePlan).filter(SurveillancePlan.episode_id == episode.id).all()
+    return {
+        "episode": _episode_dict(episode),
+        "diagnosis": ({
+            "id": diagnosis.id, "primary_site": diagnosis.primary_site, "histology": diagnosis.histology,
+            "grade": diagnosis.grade, "status": diagnosis.status,
+        } if diagnosis else None),
+        "staging_records": [{
+            "id": s.id, "stage_value": s.stage_value, "status": s.status,
+            "version_no": s.version_no, "prognostic_stage_group": s.prognostic_stage_group,
+        } for s in staging_records],
+        "biomarkers": [{
+            "id": b.id, "marker_name": b.marker_name, "result_as_reported": b.result_as_reported,
+            "status": b.status,
+        } for b in biomarkers],
+        "lines_of_therapy": [_line_of_therapy_dict(l) for l in lines],
+        "treatment_plans": [{
+            "id": p.id, "modality": p.modality, "protocol_name": p.protocol_name,
+            "status": p.status, "line_of_therapy_id": p.line_of_therapy_id,
+        } for p in plans],
+        "treatment_completions": [{"id": c.id, "completion_type": c.completion_type, "status": c.status} for c in completions],
+        "surveillance_plans": [{"id": sp.id, "status": sp.status, "current_phase": sp.current_phase} for sp in surveillance_plans],
+    }
+
+
+@router.post("/cancer-episodes/{episode_id}/close")
+async def close_cancer_episode(episode_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    org_id = _org_id(current_user)
+    episode = _get_org_episode(db, episode_id, org_id)
+    _require_clinician(current_user)
+    body = await request.json()
+    status_value = body.get("status", "COMPLETED")
+    if status_value not in ("COMPLETED", "SURVEILLANCE", "RECURRED", "DECEASED", "CLOSED"):
+        raise HTTPException(422, "status must be one of COMPLETED, SURVEILLANCE, RECURRED, DECEASED, CLOSED")
+    episode.status = status_value
+    episode.closed_reason = body.get("closed_reason")
+    episode.closed_at = datetime.utcnow()
+    actor = _actor(current_user)
+    publish(
+        db, "CANCER_EPISODE_CLOSED", patient_id=episode.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Cancer Episode {status_value.lower()}", category="DIAGNOSIS",
+        description=f"{actor} set cancer episode #{episode.episode_number} to {status_value}.",
+        episode_id=episode.id,
+    )
+    db.commit()
+    db.refresh(episode)
+    return {"status": "success", "episode": _episode_dict(episode)}
+
+
+@router.post("/cancer-episodes/{episode_id}/lines-of-therapy", status_code=201)
+async def create_line_of_therapy(episode_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    org_id = _org_id(current_user)
+    episode = _get_org_episode(db, episode_id, org_id)
+    _require_clinician(current_user)
+    body = await request.json()
+
+    existing = db.query(LineOfTherapy).filter(LineOfTherapy.episode_id == episode.id).order_by(LineOfTherapy.line_number.desc()).all()
+    next_line_number = (existing[0].line_number if existing else 0) + 1
+    reason = (body.get("reason_for_line_change") or "").strip()
+    if next_line_number > 1 and not reason:
+        raise HTTPException(422, "reason_for_line_change is required for a line beyond the first")
+    # Auto-close the prior line only if it's still ACTIVE and the caller didn't already
+    # record its own outcome -- never overwrite an explicit clinician-recorded outcome.
+    if existing and existing[0].status == "ACTIVE":
+        existing[0].status = "COMPLETED"
+        if not existing[0].end_date:
+            existing[0].end_date = datetime.utcnow().date()
+
+    actor = _actor(current_user)
+    line = LineOfTherapy(
+        episode_id=episode.id, line_number=next_line_number, setting=body.get("setting"),
+        regimen_summary=body.get("regimen_summary"), reason_for_line_change=body.get("reason_for_line_change"),
+        start_date=datetime.fromisoformat(body["start_date"]).date() if body.get("start_date") else datetime.utcnow().date(),
+        created_by=actor,
+    )
+    db.add(line)
+    db.flush()
+    publish(
+        db, "LINE_OF_THERAPY_STARTED", patient_id=episode.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Line {next_line_number} of therapy started", category="TREATMENT_PLAN",
+        description=f"{actor} started line {next_line_number} of therapy for cancer episode #{episode.episode_number}.",
+        episode_id=episode.id, line_of_therapy_id=line.id,
+    )
+    db.commit()
+    db.refresh(line)
+    return {"status": "success", "line_of_therapy": _line_of_therapy_dict(line)}
+
+
+@router.get("/cancer-episodes/{episode_id}/lines-of-therapy")
+def list_lines_of_therapy(episode_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    episode = _get_org_episode(db, episode_id, _org_id(current_user))
+    rows = db.query(LineOfTherapy).filter(LineOfTherapy.episode_id == episode.id).order_by(LineOfTherapy.line_number).all()
+    return {"lines_of_therapy": [_line_of_therapy_dict(l) for l in rows]}
+
+
+@router.post("/lines-of-therapy/{line_id}/complete")
+async def complete_line_of_therapy(line_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    line = db.query(LineOfTherapy).filter(LineOfTherapy.id == line_id).first()
+    if not line:
+        raise HTTPException(404, "Line of therapy not found")
+    episode = db.query(CancerEpisode).filter(CancerEpisode.id == line.episode_id).first()
+    _check_patient_in_org(db, episode.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    outcome = body.get("outcome")
+    if outcome not in ("Ongoing", "Completed", "Progressed", "Toxicity Stop", "Patient Choice"):
+        raise HTTPException(422, "outcome must be one of Ongoing, Completed, Progressed, Toxicity Stop, Patient Choice")
+    line.outcome = outcome
+    line.status = "DISCONTINUED" if outcome in ("Progressed", "Toxicity Stop", "Patient Choice") else "COMPLETED"
+    line.end_date = datetime.fromisoformat(body["end_date"]).date() if body.get("end_date") else datetime.utcnow().date()
+    db.commit()
+    db.refresh(line)
+    return {"status": "success", "line_of_therapy": _line_of_therapy_dict(line)}
+
+
+@router.post("/treatment-plans/{plan_id}/link-episode")
+async def link_treatment_plan_episode(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Retroactively links an already-drafted Treatment Plan to a Cancer Episode/Line of
+    Therapy -- for the common case where the plan was drafted before the episode/line
+    existed yet. Mirrors the existing link-mdt-decision pattern elsewhere in this file."""
+    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(404, "Treatment plan not found")
+    org_id = _org_id(current_user)
+    _check_patient_in_org(db, plan.patient_id, org_id)
+    _require_clinician(current_user)
+    body = await request.json()
+    episode_id = body.get("episode_id")
+    if episode_id is None:
+        raise HTTPException(422, "episode_id is required")
+    episode = db.query(CancerEpisode).filter(CancerEpisode.id == episode_id, CancerEpisode.patient_id == plan.patient_id).first()
+    if not episode:
+        raise HTTPException(422, "episode_id does not reference a Cancer Episode for this patient")
+    line_of_therapy_id = body.get("line_of_therapy_id")
+    if line_of_therapy_id is not None:
+        line = db.query(LineOfTherapy).filter(LineOfTherapy.id == line_of_therapy_id, LineOfTherapy.episode_id == episode_id).first()
+        if not line:
+            raise HTTPException(422, "line_of_therapy_id does not reference a Line of Therapy on the given episode_id")
+    plan.episode_id = episode_id
+    plan.line_of_therapy_id = line_of_therapy_id
+    db.commit()
+    db.refresh(plan)
+    return {"status": "success", "treatment_plan": _treatment_plan_dict(plan, db)}
+
+
 def _treatment_plan_dict(plan: TreatmentPlan, db: Session = None) -> dict:
     regimen_name = None
     if plan.regimen_id and db is not None:
@@ -2461,6 +2938,8 @@ def _treatment_plan_dict(plan: TreatmentPlan, db: Session = None) -> dict:
         "patient_id": plan.patient_id,
         "care_plan_id": plan.care_plan_id,
         "mdt_decision_id": plan.mdt_decision_id,
+        "episode_id": plan.episode_id,
+        "line_of_therapy_id": plan.line_of_therapy_id,
         "requires_mdt": bool(plan.requires_mdt),
         "intent": plan.intent,
         "modality": plan.modality,
@@ -2522,9 +3001,26 @@ async def create_treatment_plan(
         if not regimen:
             raise HTTPException(422, "regimen_id does not reference a regimen in this organization")
 
+    # Cancer Episode / Line of Therapy (gap report item 5) -- both optional at draft time;
+    # a plan keeps working with neither set (same "convenience, never a hard lock" posture
+    # as regimen_id above), or can be linked retroactively via
+    # POST /treatment-plans/{id}/link-episode.
+    episode_id = body.get("episode_id")
+    if episode_id is not None:
+        episode = db.query(CancerEpisode).filter(CancerEpisode.id == episode_id, CancerEpisode.patient_id == patient_id).first()
+        if not episode:
+            raise HTTPException(422, "episode_id does not reference a Cancer Episode for this patient")
+    line_of_therapy_id = body.get("line_of_therapy_id")
+    if line_of_therapy_id is not None:
+        line = db.query(LineOfTherapy).filter(LineOfTherapy.id == line_of_therapy_id, LineOfTherapy.episode_id == episode_id).first()
+        if not line:
+            raise HTTPException(422, "line_of_therapy_id does not reference a Line of Therapy on the given episode_id")
+
     plan = TreatmentPlan(
         patient_id=patient_id,
         mdt_decision_id=body.get("mdt_decision_id"),
+        episode_id=episode_id,
+        line_of_therapy_id=line_of_therapy_id,
         requires_mdt=bool(body.get("requires_mdt", False)),
         intent=body.get("intent", "Curative"),
         modality=body.get("modality", "Systemic Chemotherapy"),
@@ -5984,6 +6480,7 @@ def search_patient_records_and_knowledge(
 def _treatment_completion_dict(c: TreatmentCompletion) -> dict:
     return {
         "id": c.id, "patient_id": c.patient_id, "cancer_episode_ref": c.cancer_episode_ref,
+        "episode_id": c.episode_id,
         "treatment_plan_id": c.treatment_plan_id, "treatment_intent": c.treatment_intent,
         "treatment_start_date": c.treatment_start_date.isoformat() if c.treatment_start_date else None,
         "treatment_end_date": c.treatment_end_date.isoformat() if c.treatment_end_date else None,
@@ -6116,8 +6613,16 @@ async def create_treatment_completion(
         value = body.get(key)
         return datetime.fromisoformat(value).date() if value else None
 
+    # Cancer Episode link (gap report item 5) -- cancer_episode_ref stays as the free-text
+    # fallback; episode_id is the new formal link, optional for backward compatibility.
+    episode_id = body.get("episode_id")
+    if episode_id is not None:
+        episode = db.query(CancerEpisode).filter(CancerEpisode.id == episode_id, CancerEpisode.patient_id == patient_id).first()
+        if not episode:
+            raise HTTPException(422, "episode_id does not reference a Cancer Episode for this patient")
+
     completion = TreatmentCompletion(
-        patient_id=patient_id, cancer_episode_ref=body.get("cancer_episode_ref"),
+        patient_id=patient_id, cancer_episode_ref=body.get("cancer_episode_ref"), episode_id=episode_id,
         treatment_plan_id=body.get("treatment_plan_id"), treatment_intent=body.get("treatment_intent"),
         treatment_start_date=_parse_date("treatment_start_date"), treatment_end_date=_parse_date("treatment_end_date"),
         completion_type=body.get("completion_type"), reason=reason,
@@ -6452,6 +6957,7 @@ def acknowledge_summary_distribution(id: int, db: Session = Depends(get_cca_db),
 def _surveillance_plan_dict(p: SurveillancePlan) -> dict:
     return {
         "id": p.id, "patient_id": p.patient_id, "cancer_episode_ref": p.cancer_episode_ref,
+        "episode_id": p.episode_id,
         "completion_id": p.completion_id, "surveillance_intent": p.surveillance_intent,
         "follow_up_frequency": p.follow_up_frequency, "duration_of_surveillance": p.duration_of_surveillance,
         "late_effect_monitoring_plan": p.late_effect_monitoring_plan, "recurrence_red_flags": p.recurrence_red_flags,
@@ -6563,8 +7069,16 @@ async def create_surveillance_plan(
         value = body.get(key)
         return datetime.fromisoformat(value).date() if value else None
 
+    # Cancer Episode link (gap report item 5) -- cancer_episode_ref stays as the free-text
+    # fallback; episode_id is the new formal link, optional for backward compatibility.
+    episode_id = body.get("episode_id")
+    if episode_id is not None:
+        episode = db.query(CancerEpisode).filter(CancerEpisode.id == episode_id, CancerEpisode.patient_id == patient_id).first()
+        if not episode:
+            raise HTTPException(422, "episode_id does not reference a Cancer Episode for this patient")
+
     plan = SurveillancePlan(
-        patient_id=patient_id, cancer_episode_ref=body.get("cancer_episode_ref"),
+        patient_id=patient_id, cancer_episode_ref=body.get("cancer_episode_ref"), episode_id=episode_id,
         completion_id=body.get("completion_id"), surveillance_intent=body.get("surveillance_intent"),
         follow_up_frequency=body.get("follow_up_frequency"), duration_of_surveillance=body.get("duration_of_surveillance"),
         late_effect_monitoring_plan=body.get("late_effect_monitoring_plan"),
