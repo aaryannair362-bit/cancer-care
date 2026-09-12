@@ -589,12 +589,21 @@ async def capture_consent(
     if not signatory:
         raise HTTPException(422, "signatory is required")
 
+    # Treatment consent linkage (gap review item 13) -- optional; a generic
+    # registration-time consent still works unchanged with no treatment_plan_id.
+    treatment_plan_id = body.get("treatment_plan_id")
+    if treatment_plan_id is not None:
+        plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == treatment_plan_id, TreatmentPlan.patient_id == patient_id).first()
+        if not plan:
+            raise HTTPException(422, "treatment_plan_id does not reference a Treatment Plan for this patient")
+
     actor = _actor(current_user)
     consent = CCAConsent(
         patient_id=patient_id,
         consent_types=consent_types,
         signatory=signatory,
         signatory_reason=body.get("signatory_reason"),
+        treatment_plan_id=treatment_plan_id,
         captured_by=actor,
         status="ACTIVE",
     )
@@ -612,9 +621,30 @@ async def capture_consent(
         "status": "success",
         "consent": {
             "id": consent.id, "patient_id": consent.patient_id, "consent_types": consent.consent_types,
-            "signatory": consent.signatory, "status": consent.status,
+            "signatory": consent.signatory, "status": consent.status, "treatment_plan_id": consent.treatment_plan_id,
             "valid_from": consent.valid_from.isoformat() if consent.valid_from else None,
         },
+    }
+
+
+@router.get("/treatment-plans/{id}/consent-status")
+def get_treatment_plan_consent_status(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Derived at read time from CCAConsent rows linked to this plan -- no consent status is
+    duplicated onto TreatmentPlan itself (gap review item 13)."""
+    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == id).first()
+    if not plan:
+        raise HTTPException(404, "Treatment plan not found")
+    _check_patient_in_org(db, plan.patient_id, _org_id(current_user))
+    linked = db.query(CCAConsent).filter(
+        CCAConsent.treatment_plan_id == plan.id, CCAConsent.status == "ACTIVE"
+    ).order_by(CCAConsent.valid_from.desc()).first()
+    return {
+        "treatment_plan_id": plan.id,
+        "consent_obtained": linked is not None,
+        "consent": ({
+            "id": linked.id, "consent_types": linked.consent_types, "signatory": linked.signatory,
+            "valid_from": linked.valid_from.isoformat() if linked.valid_from else None,
+        } if linked else None),
     }
 
 

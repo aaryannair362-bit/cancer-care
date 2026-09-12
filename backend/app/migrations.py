@@ -223,6 +223,8 @@ ADDITIVE_COLUMNS = [
     # ORDER_SET master_type, rather than a bespoke table).
     ("cca_orders", "expected_result_by", "DATE"),
     ("cca_orders", "order_set_master_id", "INTEGER"),
+    # Final gap-closing round: Treatment consent linkage per TreatmentPlan.
+    ("cca_consents", "treatment_plan_id", "INTEGER"),
 ]
 
 

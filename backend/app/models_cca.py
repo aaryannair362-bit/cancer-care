@@ -76,6 +76,11 @@ class CCAConsent(Base):
     signatory = Column(String(200), nullable=False)
     signatory_reason = Column(String(255))
     document_id = Column(Integer, nullable=True)
+    # Optional link to a specific TreatmentPlan (gap review item 13) -- previously consent
+    # was only ever a generic patient-level record captured at registration, with no way to
+    # tell which treatment strategy a given consent actually covers. Nullable: the generic
+    # registration-time consent flow keeps working unchanged for callers that don't set it.
+    treatment_plan_id = Column(Integer, ForeignKey("cca_treatment_plans.id"), nullable=True)
     captured_by = Column(String(200))
     valid_from = Column(DateTime, default=datetime.utcnow)
     status = Column(String(30), default="ACTIVE")

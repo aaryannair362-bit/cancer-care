@@ -1349,6 +1349,40 @@
             }
         }
 
+        // Treatment consent linkage (final gap-closing round, item 13) -- previously consent
+        // was only a generic patient-level record captured at registration with no way to
+        // tell which treatment strategy it covers.
+        async function renderTreatmentConsentCard(plan) {
+            try {
+                const data = await Api.get(`${CCA_API}/treatment-plans/${plan.id}/consent-status`);
+                return `
+                    <div class="section-card">
+                        <div class="section-head">
+                            <div class="section-title">Treatment Consent</div>
+                            <span class="badge ${data.consent_obtained ? 'badge-green' : 'badge-amber'}">${data.consent_obtained ? 'Obtained' : 'Not Obtained'}</span>
+                        </div>
+                        ${data.consent_obtained
+                            ? `<div class="section-sub">Signed by ${escapeHtml(data.consent.signatory)} on ${data.consent.valid_from ? new Date(data.consent.valid_from).toLocaleDateString() : '—'}</div>`
+                            : `<div class="form-group" style="margin-bottom:10px;"><label class="form-label">Signatory</label><input type="text" id="tp-consent-signatory-${plan.id}" class="form-input" placeholder="e.g. Patient, or next-of-kin name" /></div>
+                               <button class="btn-outline" onclick="submitTreatmentPlanConsent(${plan.id})">Record Consent</button>`
+                        }
+                    </div>
+                `;
+            } catch (err) { return ''; }
+        }
+
+        async function submitTreatmentPlanConsent(planId) {
+            const signatory = document.getElementById(`tp-consent-signatory-${planId}`).value;
+            if (!signatory) { toast('Signatory is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/consents`, {
+                    consent_types: ['treatment'], signatory, treatment_plan_id: planId,
+                });
+                toast('Consent recorded', 'success');
+                loadTreatmentPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
         async function renderTreatmentOrderCard(plan) {
             let order = null;
             try {
@@ -1651,6 +1685,7 @@
 
                 const canAmend = !['COMPLETED', 'SUPERSEDED', 'CANCELLED'].includes(plan.status);
                 const canSign = ['DRAFT', 'PROPOSED'].includes(plan.status);
+                const consentSection = await renderTreatmentConsentCard(plan);
                 const orderSection = plan.status === 'ACTIVE' ? await renderTreatmentOrderCard(plan) : '';
                 const mdtAttachSection = (plan.requires_mdt && !plan.mdt_decision_id && canSign) ? await renderMdtDecisionAttachCard(plan) : '';
                 container.innerHTML = `
@@ -1681,6 +1716,7 @@
                         <div id="tp-action-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
                     </div>
                     ${mdtAttachSection}
+                    ${consentSection}
                     ${orderSection}
                     ${canAmend ? `
                     <div class="section-card">
