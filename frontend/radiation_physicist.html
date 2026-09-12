@@ -56,6 +56,12 @@
         .worklist-row { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; margin-bottom: 10px; display: grid; grid-template-columns: 1.3fr 1fr 1fr 0.8fr auto; gap: 14px; align-items: center; }
         .wl-label { font-size: 11px; color: var(--ink-500); text-transform: uppercase; margin-bottom: 2px; }
         .wl-value { font-size: 13.5px; font-weight: 700; color: var(--ink-900); }
+        .form-checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-800); margin-bottom: 10px; }
+        .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+        .form-group { display: flex; flex-direction: column; gap: 6px; }
+        .form-label { font-size: 12px; font-weight: 600; color: var(--ink-700); }
+        .form-input, .form-select, .form-textarea { width: 100%; height: 38px; padding: 0 12px; background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; color: var(--ink-900); outline: none; }
+        .form-textarea { height: auto; padding: 10px 12px; }
         .hms-toast { position: fixed; bottom: 24px; right: 24px; background: var(--ink-900); color: #fff; padding: 12px 18px; border-radius: var(--radius-md); font-size: 13px; box-shadow: var(--shadow-md); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 999; max-width: 360px; }
         .hms-toast--visible { opacity: 1; transform: translateY(0); }
         .hms-toast--success { background: var(--green-badge-text); }
@@ -76,12 +82,18 @@
         <aside class="sidebar">
             <div class="sidebar-section-title">RT PLANNING</div>
             <a class="sidebar-nav-item active" id="nav-worklist" onclick="showTab('worklist')"><div class="nav-item-left"><span>🧮</span><span>Planning Worklist</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-equipment" onclick="showTab('equipment')"><div class="nav-item-left"><span>🛠️</span><span>Equipment &amp; QA</span></div><span class="nav-chevron">›</span></a>
         </aside>
         <main class="canvas">
             <div id="view-worklist" class="view-panel active">
                 <h1 class="page-title">RT Planning Worklist</h1>
                 <p class="page-subtitle">Radiation dose phases awaiting simulation, contouring, planning, or physics QA — Oncology Review Results PDF item 20: RT planning is the Physicist's action, distinct from the Radiation Oncologist's prescribing and final treatment approval.</p>
                 <div id="worklist-content"><!-- Populated via JS: loadPhysicistWorklist() --></div>
+            </div>
+            <div id="view-equipment" class="view-panel">
+                <h1 class="page-title">Equipment &amp; QA</h1>
+                <p class="page-subtitle">Treatment unit registry, Equipment QA Register (SCR-PHY-009), Machine/Equipment Issues (SCR-RTT-008), and In-Vivo Dosimetry (SCR-PHY-010).</p>
+                <div id="equipment-content"><!-- Populated via JS: loadEquipmentTab() --></div>
             </div>
         </main>
     </div>
@@ -114,6 +126,7 @@
             document.getElementById(`view-${tab}`).classList.add('active');
             document.getElementById(`nav-${tab}`).classList.add('active');
             if (tab === 'worklist') loadPhysicistWorklist();
+            if (tab === 'equipment') loadEquipmentTab();
         }
 
         async function loadPhysicistWorklist() {
@@ -174,6 +187,192 @@
                 await Api.post(`${CCA_API}/radiation-phases/${phaseId}/transition`, { status });
                 toast('Phase advanced', 'success');
                 loadPhysicistWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        const QA_FREQUENCIES = ['Daily', 'Weekly', 'Monthly', 'Annual'];
+        const ISSUE_CATEGORIES = ['Interlock', 'Mechanical', 'Imaging', 'Dosimetry', 'Software', 'Accessory', 'Environmental'];
+
+        async function loadEquipmentTab() {
+            const container = document.getElementById('equipment-content');
+            container.innerHTML = '<p style="font-size:12.5px; color:var(--ink-500);">Loading…</p>';
+            try {
+                const [unitsData, onTreatmentPhases] = await Promise.all([
+                    Api.get(`${CCA_API}/radiation-units`),
+                    Api.get(`${CCA_API}/radiation-phases/worklist`),
+                ]);
+                const units = unitsData.units || [];
+                const unitDetails = await Promise.all(units.map(async u => {
+                    const [qa, issues] = await Promise.all([
+                        Api.get(`${CCA_API}/radiation-units/${u.id}/qa-records`),
+                        Api.get(`${CCA_API}/radiation-units/${u.id}/issues`),
+                    ]);
+                    return { unit: u, qa: qa.records || [], issues: issues.issues || [] };
+                }));
+                const onTreatment = (onTreatmentPhases.worklist || []).filter(p => ['on_treatment', 'interrupted'].includes(p.rt_sub_status));
+                const phasesWithFractions = await Promise.all(onTreatment.map(async p => {
+                    const f = await Api.get(`${CCA_API}/radiation-phases/${p.id}/fractions`);
+                    return { phase: p, fractions: (f.fractions || []).filter(fr => fr.status === 'delivered') };
+                }));
+
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-head"><div class="section-title">Register a Treatment Unit</div></div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Name *</label><input type="text" id="new-unit-name" class="form-input" placeholder="e.g. Linac 1" /></div>
+                            <div class="form-group"><label class="form-label">Type</label><input type="text" id="new-unit-type" class="form-input" placeholder="e.g. Linear Accelerator" /></div>
+                        </div>
+                        <button class="btn-navy" onclick="createTreatmentUnit()">Add Unit</button>
+                    </div>
+                    ${unitDetails.length ? unitDetails.map(d => unitCardHtml(d)).join('') : '<div class="section-card"><p style="font-size:12.5px; color:var(--ink-500);">No treatment units registered yet.</p></div>'}
+                    <div class="section-card">
+                        <div class="section-head"><div class="section-title">In-Vivo Dosimetry (SCR-PHY-010)</div><span class="section-sub">Delivered fractions on active phases</span></div>
+                        ${phasesWithFractions.some(p => p.fractions.length) ? phasesWithFractions.map(p => p.fractions.map(fr => invivoRowHtml(p.phase, fr)).join('')).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No delivered fractions currently need in-vivo dosimetry review.</p>'}
+                    </div>
+                `;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        function unitCardHtml(d) {
+            const u = d.unit;
+            return `
+                <div class="section-card">
+                    <div class="section-head">
+                        <div><div class="section-title">${escapeHtml(u.name)}</div><div class="section-sub">${escapeHtml(u.unit_type || '')}</div></div>
+                        <span class="badge ${u.status === 'Active' ? 'badge-green' : 'badge-amber'}">${escapeHtml(u.status)}</span>
+                    </div>
+                    <div class="section-sub" style="margin-bottom:6px; font-weight:700;">Equipment QA Register</div>
+                    ${d.qa.map(q => `
+                        <div class="worklist-row" style="grid-template-columns: 1fr 1fr 1fr 1fr;">
+                            <div><div class="wl-label">${escapeHtml(q.test_name)}</div><div style="font-size:12px; color:var(--ink-500);">${escapeHtml(q.frequency)}</div></div>
+                            <div><div class="wl-label">Result</div><div class="wl-value" style="font-size:13px;">${escapeHtml(q.pass_fail || q.result || '—')}</div></div>
+                            <div><div class="wl-label">Next due</div><div class="wl-value" style="font-size:13px;">${escapeHtml(q.next_due_date || '—')}</div></div>
+                            <div>${q.overdue ? '<span class="badge badge-rose">Overdue</span>' : '<span class="badge badge-green">On schedule</span>'}</div>
+                        </div>
+                    `).join('')}
+                    <div class="form-grid-2" style="margin-top:10px;">
+                        <div class="form-group"><label class="form-label">Test name</label><input type="text" id="qa-test-${u.id}" class="form-input" placeholder="e.g. Output Constancy" /></div>
+                        <div class="form-group"><label class="form-label">Frequency</label>
+                            <select id="qa-freq-${u.id}" class="form-select">${QA_FREQUENCIES.map(f => `<option>${f}</option>`).join('')}</select>
+                        </div>
+                    </div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Last performed</label><input type="date" id="qa-date-${u.id}" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Pass / Fail</label>
+                            <select id="qa-passfail-${u.id}" class="form-select"><option value="Pass">Pass</option><option value="Fail">Fail</option></select>
+                        </div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Result / action on failure</label><textarea id="qa-result-${u.id}" class="form-textarea" rows="2"></textarea></div>
+                    <button class="btn-outline" onclick="createQaRecord(${u.id})">Add QA Record</button>
+
+                    <div class="section-sub" style="margin:14px 0 6px; font-weight:700;">Equipment Issues</div>
+                    ${d.issues.length ? d.issues.map(i => issueRowHtml(i)).join('') : '<p style="font-size:12px; color:var(--ink-500);">No issues reported.</p>'}
+                </div>
+            `;
+        }
+
+        function issueRowHtml(i) {
+            return `
+                <div class="worklist-row" style="grid-template-columns: 1.2fr 1fr 1fr auto;">
+                    <div><div class="wl-label">${escapeHtml(i.category)}</div><div style="font-size:12.5px;">${escapeHtml(i.description)}</div></div>
+                    <div><div class="wl-label">Affected patients</div><div class="wl-value" style="font-size:13px;">${i.affected_patients.length}</div></div>
+                    <div><span class="badge ${i.status === 'RESOLVED' ? 'badge-green' : 'badge-rose'}">${escapeHtml(i.status)}</span></div>
+                    <div>${i.status !== 'RESOLVED' ? `<button class="btn-navy" style="font-size:11px; padding:6px 10px;" onclick="toggleResolveForm(${i.id})">Resolve</button><div id="resolve-form-${i.id}"></div>` : `<span style="font-size:11.5px; color:var(--ink-500);">${escapeHtml(i.resolution || '')}</span>`}</div>
+                </div>
+            `;
+        }
+
+        function invivoRowHtml(phase, fraction) {
+            return `
+                <div class="worklist-row" style="grid-template-columns: 1fr 1fr auto;">
+                    <div><div class="wl-label">${escapeHtml(phase.patient_name)}</div><div style="font-size:12px; color:var(--ink-500);">${escapeHtml(phase.treatment_site)} · Fraction ${fraction.fraction_number}</div></div>
+                    <div><div class="wl-label">Delivered dose</div><div class="wl-value" style="font-size:13px;">${fraction.delivered_dose_gy || '—'} Gy</div></div>
+                    <div><button class="btn-outline" style="font-size:11px; padding:6px 10px;" onclick="toggleInvivoForm(${fraction.id})">Record Dosimetry</button><div id="invivo-form-${fraction.id}"></div></div>
+                </div>
+            `;
+        }
+
+        async function createTreatmentUnit() {
+            const name = document.getElementById('new-unit-name').value;
+            if (!name) { toast('Name is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/radiation-units`, { name, unit_type: document.getElementById('new-unit-type').value || undefined });
+                toast('Treatment unit registered', 'success');
+                loadEquipmentTab();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function createQaRecord(unitId) {
+            const testName = document.getElementById(`qa-test-${unitId}`).value;
+            if (!testName) { toast('Test name is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/radiation-units/${unitId}/qa-records`, {
+                    test_name: testName, frequency: document.getElementById(`qa-freq-${unitId}`).value,
+                    last_performed_date: document.getElementById(`qa-date-${unitId}`).value || undefined,
+                    pass_fail: document.getElementById(`qa-passfail-${unitId}`).value,
+                    result: document.getElementById(`qa-result-${unitId}`).value || undefined,
+                });
+                toast('QA record added', 'success');
+                loadEquipmentTab();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function toggleResolveForm(issueId) {
+            const host = document.getElementById(`resolve-form-${issueId}`);
+            if (!host) return;
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div style="margin-top:8px; text-align:left;">
+                    <textarea id="resolve-resolution-${issueId}" class="form-textarea" rows="2" placeholder="Resolution *" style="margin-bottom:6px;"></textarea>
+                    <textarea id="resolve-checks-${issueId}" class="form-textarea" rows="2" placeholder="Return-to-service checks performed *" style="margin-bottom:6px;"></textarea>
+                    <button class="btn-navy" style="font-size:11px; padding:6px 10px;" onclick="resolveIssue(${issueId})">Authorise Return to Service</button>
+                </div>
+            `;
+        }
+
+        async function resolveIssue(issueId) {
+            try {
+                await Api.post(`${CCA_API}/radiation-issues/${issueId}/resolve`, {
+                    resolution: document.getElementById(`resolve-resolution-${issueId}`).value,
+                    return_to_service_checks: document.getElementById(`resolve-checks-${issueId}`).value,
+                });
+                toast('Issue resolved, unit returned to service', 'success');
+                loadEquipmentTab();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function toggleInvivoForm(fractionId) {
+            const host = document.getElementById(`invivo-form-${fractionId}`);
+            if (!host) return;
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div style="margin-top:8px; text-align:left; min-width:260px;">
+                    <input type="text" id="invivo-method-${fractionId}" class="form-input" placeholder="Method (e.g. OSLD, diode)" style="margin-bottom:6px;" />
+                    <input type="text" id="invivo-expected-${fractionId}" class="form-input" placeholder="Expected dose" style="margin-bottom:6px;" />
+                    <input type="text" id="invivo-measured-${fractionId}" class="form-input" placeholder="Measured dose" style="margin-bottom:6px;" />
+                    <select id="invivo-outcome-${fractionId}" class="form-select" style="margin-bottom:6px;">
+                        <option value="Within Tolerance">Within Tolerance</option>
+                        <option value="Out of Tolerance">Out of Tolerance</option>
+                    </select>
+                    <textarea id="invivo-action-${fractionId}" class="form-textarea" rows="2" placeholder="Action on out-of-tolerance (required if out of tolerance)" style="margin-bottom:6px;"></textarea>
+                    <button class="btn-navy" style="font-size:11px; padding:6px 10px;" onclick="submitInvivoDosimetry(${fractionId})">Save</button>
+                </div>
+            `;
+        }
+
+        async function submitInvivoDosimetry(fractionId) {
+            try {
+                await Api.post(`${CCA_API}/radiation-fractions/${fractionId}/invivo-dosimetry`, {
+                    required: true, method: document.getElementById(`invivo-method-${fractionId}`).value || undefined,
+                    expected_dose: document.getElementById(`invivo-expected-${fractionId}`).value || undefined,
+                    measured_dose: document.getElementById(`invivo-measured-${fractionId}`).value || undefined,
+                    outcome: document.getElementById(`invivo-outcome-${fractionId}`).value,
+                    action_on_out_of_tolerance: document.getElementById(`invivo-action-${fractionId}`).value || undefined,
+                });
+                toast('In-vivo dosimetry recorded', 'success');
+                loadEquipmentTab();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

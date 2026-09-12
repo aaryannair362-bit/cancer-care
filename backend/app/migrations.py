@@ -202,6 +202,9 @@ ADDITIVE_COLUMNS = [
     # ORL-060) for Oral/Continuous Therapy.
     ("cca_oral_therapy_prescriptions", "next_monitoring_due_date", "DATE"),
     ("cca_oral_therapy_dispensings", "monitoring_override_reason", "TEXT"),
+    # Feature completion round: which Treatment Unit a fraction is scheduled/delivered on
+    # (reference SCR-RTT-001).
+    ("cca_radiation_fractions", "treatment_unit_id", "INTEGER"),
 ]
 
 

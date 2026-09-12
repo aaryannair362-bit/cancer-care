@@ -13,7 +13,7 @@ every write below is a structured capture or a workflow-sequencing transition, n
 computed clinical judgment.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -29,6 +29,8 @@ from ..models_cca_oncology_ext import (
     CCARadiationPhase, OncologyRecordExtension, RadiationFraction, RadiationPrescription,
     RadiationInterruption, RadiationOnTreatmentVisit,
     RadiationDiscrepancyRecord, RadiationPreTreatmentVerification,
+    RadiationTreatmentUnit, RadiationEquipmentQARecord, RadiationEquipmentIssue,
+    RadiationInVivoDosimetry,
     Regimen, RegimenDrugLine, SurgicalPlan, TreatmentPlanPhase,
     SurgicalIntraOpMonitoring, SurgicalOperativeNote, SurgicalSpecimen, SurgicalBloodTransfusion,
     ClinicalProcedureNote, PalliativeTreatmentOrder,
@@ -174,6 +176,7 @@ def _rt_fraction_out(f: RadiationFraction) -> dict:
     return {
         "id": f.id, "phase_id": f.phase_id, "fraction_number": f.fraction_number,
         "scheduled_date": f.scheduled_date.isoformat() if f.scheduled_date else None,
+        "treatment_unit_id": f.treatment_unit_id,
         "status": f.status, "delivered_dose_gy": f.delivered_dose_gy,
         "interruption_reason": f.interruption_reason, "on_treatment_review_note": f.on_treatment_review_note,
         "variance_or_toxicity": f.variance_or_toxicity,
@@ -1620,3 +1623,381 @@ async def put_record_extension(request: Request, db: Session = Depends(get_cca_d
     db.commit()
     db.refresh(row)
     return {"status": "success", "extension": {"entity_table": row.entity_table, "entity_id": row.entity_id, "payload": row.payload}}
+
+
+# ---------------------------------------------------------------------------
+# Radiation feature completion round -- Treatment Unit / Equipment QA Register /
+# Machine-Equipment Issue / In-Vivo Dosimetry (reference SCR-PHY-009, SCR-PHY-010,
+# SCR-RTT-001, SCR-RTT-008). RadiationTreatmentUnit/RadiationEquipmentQARecord/
+# RadiationEquipmentIssue are organization-level equipment master data (like Regimen),
+# not patient records -- every read below is scoped by organization_id, not patient_id.
+#
+# No dose-calculation or clinical-safety-threshold logic here either: In-Vivo Dosimetry's
+# reference "deviation [DERIVED]" is exactly the kind of computed dosimetric comparison
+# already excluded from physics QA and fraction delivery above -- expected_dose/
+# measured_dose stay physicist-typed reference values, never compared by this endpoint;
+# outcome is the physicist's own attestation, mirroring RadiationFraction.dose_match_confirmed.
+# ---------------------------------------------------------------------------
+
+_QA_FREQUENCY_DAYS = {"Daily": 1, "Weekly": 7, "Monthly": 30, "Annual": 365}
+_ISSUE_CATEGORIES = ("Interlock", "Mechanical", "Imaging", "Dosimetry", "Software", "Accessory", "Environmental")
+
+
+def _require_rt_reporter_or_physicist(current_user: dict):
+    """Who may report/notify on a machine issue -- the RTT at the console (Radiologist login,
+    same reasoning as _require_rt_delivery_or_ro above), the treating Radiation Oncologist, or
+    the Radiation Physicist. Admin never substitutes for clinical/technical staff here."""
+    if is_cca_radiologist(current_user) or is_cca_radiation_physicist(current_user) or is_cca_radiation_oncologist(current_user):
+        return
+    raise HTTPException(403, "Only Radiology/RTT, Radiation Oncologist, or Radiation Physicist staff may report an equipment issue")
+
+
+def _get_org_treatment_unit(db: Session, unit_id: int, org_id: int) -> RadiationTreatmentUnit:
+    unit = db.query(RadiationTreatmentUnit).filter(
+        RadiationTreatmentUnit.id == unit_id, RadiationTreatmentUnit.organization_id == org_id
+    ).first()
+    if not unit:
+        raise HTTPException(404, "Radiation treatment unit not found")
+    return unit
+
+
+def _treatment_unit_out(u: RadiationTreatmentUnit) -> dict:
+    return {
+        "id": u.id, "name": u.name, "unit_type": u.unit_type, "status": u.status,
+        "created_by": u.created_by, "created_at": u.created_at.isoformat() if u.created_at else None,
+    }
+
+
+def _qa_next_due_date(q: RadiationEquipmentQARecord):
+    if not q.last_performed_date or q.frequency not in _QA_FREQUENCY_DAYS:
+        return None
+    return q.last_performed_date + timedelta(days=_QA_FREQUENCY_DAYS[q.frequency])
+
+
+def _qa_record_out(q: RadiationEquipmentQARecord) -> dict:
+    next_due = _qa_next_due_date(q)
+    return {
+        "id": q.id, "treatment_unit_id": q.treatment_unit_id, "test_name": q.test_name,
+        "frequency": q.frequency, "tolerance_note": q.tolerance_note,
+        "last_performed_date": q.last_performed_date.isoformat() if q.last_performed_date else None,
+        "result": q.result, "pass_fail": q.pass_fail, "action_on_failure": q.action_on_failure,
+        "downtime_recorded": q.downtime_recorded,
+        "next_due_date": next_due.isoformat() if next_due else None,
+        "overdue": bool(next_due and next_due < datetime.utcnow().date()),
+        "performed_by": q.performed_by, "performed_at": q.performed_at.isoformat() if q.performed_at else None,
+    }
+
+
+def _affected_patients_for_issue(db: Session, issue: RadiationEquipmentIssue) -> list:
+    """Patients affected [DERIVED] (reference SCR-RTT-008) -- read from the existing fraction
+    schedule for this unit on the issue's day, never a stored/duplicated list."""
+    day = issue.time_started.date() if issue.time_started else datetime.utcnow().date()
+    rows = db.query(RadiationFraction, CCARadiationPhase, CCAPatient).join(
+        CCARadiationPhase, RadiationFraction.phase_id == CCARadiationPhase.id
+    ).join(
+        RadiationPrescription, CCARadiationPhase.prescription_id == RadiationPrescription.id
+    ).join(
+        CCAPatient, RadiationPrescription.patient_id == CCAPatient.id
+    ).filter(
+        RadiationFraction.treatment_unit_id == issue.treatment_unit_id,
+        RadiationFraction.scheduled_date == day,
+        RadiationFraction.status == "scheduled",
+    ).all()
+    return [
+        {"patient_id": patient.id, "patient_name": patient.name, "fraction_id": frac.id,
+         "phase_id": phase.id, "phase_label": phase.label}
+        for frac, phase, patient in rows
+    ]
+
+
+def _equipment_issue_out(db: Session, i: RadiationEquipmentIssue) -> dict:
+    downtime_minutes = None
+    if i.resolved_at and i.time_started:
+        downtime_minutes = int((i.resolved_at - i.time_started).total_seconds() // 60)
+    return {
+        "id": i.id, "treatment_unit_id": i.treatment_unit_id, "description": i.description,
+        "category": i.category, "time_started": i.time_started.isoformat() if i.time_started else None,
+        "physics_notified_name": i.physics_notified_name,
+        "physics_notified_at": i.physics_notified_at.isoformat() if i.physics_notified_at else None,
+        "action_taken": i.action_taken, "resolution": i.resolution,
+        "resolved_at": i.resolved_at.isoformat() if i.resolved_at else None,
+        "return_to_service_by": i.return_to_service_by, "return_to_service_checks": i.return_to_service_checks,
+        "incident_reference": i.incident_reference, "status": i.status,
+        "reported_by": i.reported_by, "created_at": i.created_at.isoformat() if i.created_at else None,
+        "downtime_minutes": downtime_minutes,
+        "affected_patients": _affected_patients_for_issue(db, i),
+    }
+
+
+def _invivo_dosimetry_out(d: RadiationInVivoDosimetry) -> dict:
+    return {
+        "id": d.id, "fraction_id": d.fraction_id, "required": bool(d.required), "method": d.method,
+        "detector_calibration": d.detector_calibration, "expected_dose": d.expected_dose,
+        "measured_dose": d.measured_dose, "outcome": d.outcome,
+        "action_on_out_of_tolerance": d.action_on_out_of_tolerance,
+        "performed_by": d.performed_by, "reviewed_by": d.reviewed_by,
+        "performed_at": d.performed_at.isoformat() if d.performed_at else None,
+    }
+
+
+@router.post("/radiation-units", status_code=201)
+async def create_treatment_unit(request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Equipment master data -- the Radiation Physicist (or Admin, matching the
+    ClinicalMaster/Regimen precedent for org-level configuration) registers a unit once,
+    then it's referenced by fraction scheduling and the QA register below."""
+    if not (is_cca_radiation_physicist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Radiation Physicist or Admin may register a treatment unit")
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(422, "name is required")
+    unit = RadiationTreatmentUnit(
+        organization_id=_org_id(current_user), name=name, unit_type=body.get("unit_type"),
+        status=body.get("status", "Active"), created_by=_actor(current_user),
+    )
+    db.add(unit)
+    db.commit()
+    db.refresh(unit)
+    return {"status": "success", "unit": _treatment_unit_out(unit)}
+
+
+@router.get("/radiation-units")
+def list_treatment_units(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    rows = db.query(RadiationTreatmentUnit).filter(
+        RadiationTreatmentUnit.organization_id == _org_id(current_user)
+    ).order_by(RadiationTreatmentUnit.name).all()
+    return {"units": [_treatment_unit_out(u) for u in rows]}
+
+
+@router.get("/radiation-units/qa-register")
+def qa_register(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Equipment QA Register (reference SCR-PHY-009) -- every unit's QA history in one place,
+    with the overdue-QA banner data (RTT unit schedule alert, PHY-050) computed alongside it."""
+    org_id = _org_id(current_user)
+    units = db.query(RadiationTreatmentUnit).filter(RadiationTreatmentUnit.organization_id == org_id).all()
+    unit_ids = [u.id for u in units]
+    rows = db.query(RadiationEquipmentQARecord).filter(
+        RadiationEquipmentQARecord.treatment_unit_id.in_(unit_ids)
+    ).order_by(RadiationEquipmentQARecord.performed_at.desc()).all() if unit_ids else []
+    records = [_qa_record_out(q) for q in rows]
+    overdue_unit_ids = sorted({r["treatment_unit_id"] for r in records if r["overdue"]})
+    return {"records": records, "overdue_unit_ids": overdue_unit_ids}
+
+
+@router.get("/radiation-units/{unit_id}/schedule")
+def treatment_unit_schedule(unit_id: int, date: str = None, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Treatment Unit Schedule (reference SCR-RTT-001) -- one day's slot list for a unit,
+    joined from the existing fraction/phase/prescription/patient records, plus the screen's
+    two derivable alerts (unit QA overdue, plan not yet released for treatment)."""
+    org_id = _org_id(current_user)
+    unit = _get_org_treatment_unit(db, unit_id, org_id)
+    day = datetime.strptime(date, "%Y-%m-%d").date() if date else datetime.utcnow().date()
+    rows = db.query(RadiationFraction, CCARadiationPhase, RadiationPrescription, CCAPatient).join(
+        CCARadiationPhase, RadiationFraction.phase_id == CCARadiationPhase.id
+    ).join(
+        RadiationPrescription, CCARadiationPhase.prescription_id == RadiationPrescription.id
+    ).join(
+        CCAPatient, RadiationPrescription.patient_id == CCAPatient.id
+    ).filter(
+        RadiationFraction.treatment_unit_id == unit.id, RadiationFraction.scheduled_date == day,
+    ).order_by(RadiationFraction.fraction_number).all()
+    slots = [
+        {
+            "fraction_id": frac.id, "patient_id": patient.id, "patient_name": patient.name, "mrn": patient.mrn,
+            "treatment_site": phase.treatment_site, "laterality": phase.laterality, "phase_label": phase.label,
+            "fraction_number": frac.fraction_number, "fractions_total": phase.number_of_fractions,
+            "prescribed_dose_per_fraction_gy": phase.dose_per_fraction_gy,
+            "plan_release_status": phase.rt_sub_status, "status": frac.status,
+        }
+        for frac, phase, rx, patient in rows
+    ]
+    qa_rows = db.query(RadiationEquipmentQARecord).filter(RadiationEquipmentQARecord.treatment_unit_id == unit.id).all()
+    qa_overdue = any(_qa_record_out(q)["overdue"] for q in qa_rows)
+    plan_not_released = any(s["plan_release_status"] not in ("treatment_ready", "on_treatment", "completed") for s in slots)
+    return {
+        "unit": _treatment_unit_out(unit), "date": day.isoformat(), "slots": slots,
+        "alerts": {"unit_qa_overdue": qa_overdue, "plan_not_released": plan_not_released},
+    }
+
+
+@router.post("/radiation-units/{unit_id}/qa-records", status_code=201)
+async def create_qa_record(unit_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may record an equipment QA test")
+    unit = _get_org_treatment_unit(db, unit_id, _org_id(current_user))
+    body = await request.json()
+    test_name = (body.get("test_name") or "").strip()
+    frequency = body.get("frequency")
+    if not test_name:
+        raise HTTPException(422, "test_name is required")
+    if frequency not in _QA_FREQUENCY_DAYS:
+        raise HTTPException(422, f"frequency must be one of {list(_QA_FREQUENCY_DAYS)}")
+    last_performed = datetime.strptime(body["last_performed_date"], "%Y-%m-%d").date() if body.get("last_performed_date") else datetime.utcnow().date()
+    record = RadiationEquipmentQARecord(
+        treatment_unit_id=unit.id, test_name=test_name, frequency=frequency,
+        tolerance_note=body.get("tolerance_note"), last_performed_date=last_performed,
+        result=body.get("result"), pass_fail=body.get("pass_fail"), action_on_failure=body.get("action_on_failure"),
+        downtime_recorded=body.get("downtime_recorded"), performed_by=_actor(current_user),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "record": _qa_record_out(record)}
+
+
+@router.get("/radiation-units/{unit_id}/qa-records")
+def list_qa_records(unit_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    unit = _get_org_treatment_unit(db, unit_id, _org_id(current_user))
+    rows = db.query(RadiationEquipmentQARecord).filter(
+        RadiationEquipmentQARecord.treatment_unit_id == unit.id
+    ).order_by(RadiationEquipmentQARecord.performed_at.desc()).all()
+    return {"records": [_qa_record_out(q) for q in rows]}
+
+
+@router.post("/radiation-units/{unit_id}/issues", status_code=201)
+async def report_equipment_issue(unit_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Machine/Equipment Issue (reference SCR-RTT-008)."""
+    _require_rt_reporter_or_physicist(current_user)
+    unit = _get_org_treatment_unit(db, unit_id, _org_id(current_user))
+    body = await request.json()
+    description = (body.get("description") or "").strip()
+    category = body.get("category")
+    if not description:
+        raise HTTPException(422, "description is required")
+    if category not in _ISSUE_CATEGORIES:
+        raise HTTPException(422, f"category must be one of {_ISSUE_CATEGORIES}")
+    issue = RadiationEquipmentIssue(
+        treatment_unit_id=unit.id, description=description, category=category,
+        physics_notified_name=body.get("physics_notified_name"),
+        physics_notified_at=datetime.utcnow() if body.get("physics_notified_name") else None,
+        action_taken=body.get("action_taken"), incident_reference=body.get("incident_reference"),
+        reported_by=_actor(current_user),
+    )
+    db.add(issue)
+    db.commit()
+    db.refresh(issue)
+    return {"status": "success", "issue": _equipment_issue_out(db, issue)}
+
+
+@router.get("/radiation-units/{unit_id}/issues")
+def list_equipment_issues(unit_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    unit = _get_org_treatment_unit(db, unit_id, _org_id(current_user))
+    rows = db.query(RadiationEquipmentIssue).filter(
+        RadiationEquipmentIssue.treatment_unit_id == unit.id
+    ).order_by(RadiationEquipmentIssue.created_at.desc()).all()
+    return {"issues": [_equipment_issue_out(db, i) for i in rows]}
+
+
+def _get_org_equipment_issue(db: Session, issue_id: int, org_id: int) -> RadiationEquipmentIssue:
+    issue = db.query(RadiationEquipmentIssue).join(
+        RadiationTreatmentUnit, RadiationEquipmentIssue.treatment_unit_id == RadiationTreatmentUnit.id
+    ).filter(RadiationEquipmentIssue.id == issue_id, RadiationTreatmentUnit.organization_id == org_id).first()
+    if not issue:
+        raise HTTPException(404, "Equipment issue not found")
+    return issue
+
+
+@router.post("/radiation-issues/{issue_id}/notify-physics")
+async def notify_physics_on_issue(issue_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_rt_reporter_or_physicist(current_user)
+    issue = _get_org_equipment_issue(db, issue_id, _org_id(current_user))
+    body = await request.json()
+    name = (body.get("physics_notified_name") or "").strip()
+    if not name:
+        raise HTTPException(422, "physics_notified_name is required")
+    issue.physics_notified_name = name
+    issue.physics_notified_at = datetime.utcnow()
+    db.commit()
+    db.refresh(issue)
+    return {"status": "success", "issue": _equipment_issue_out(db, issue)}
+
+
+@router.post("/radiation-issues/{issue_id}/resolve")
+async def resolve_equipment_issue(issue_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Return-to-service authorisation is the Radiation Physicist's action (matches the
+    Physics QA approval gate above) -- resolving an issue without physics sign-off is exactly
+    the gap this screen exists to close."""
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may authorise return-to-service")
+    issue = _get_org_equipment_issue(db, issue_id, _org_id(current_user))
+    if issue.status == "RESOLVED":
+        raise HTTPException(409, "This issue is already resolved")
+    body = await request.json()
+    resolution = (body.get("resolution") or "").strip()
+    checks = (body.get("return_to_service_checks") or "").strip()
+    if not (resolution and checks):
+        raise HTTPException(422, "resolution and return_to_service_checks are both required")
+    issue.resolution = resolution
+    issue.return_to_service_checks = checks
+    issue.return_to_service_by = _actor(current_user)
+    issue.resolved_at = datetime.utcnow()
+    issue.status = "RESOLVED"
+    if body.get("action_taken"):
+        issue.action_taken = body["action_taken"]
+    db.commit()
+    db.refresh(issue)
+    return {"status": "success", "issue": _equipment_issue_out(db, issue)}
+
+
+@router.post("/radiation-fractions/{fraction_id}/schedule")
+async def schedule_radiation_fraction(fraction_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Assigns a scheduled fraction to a treatment unit/day (RTT-001's 'unit lead; scheduler'
+    role) -- previously RadiationFraction.scheduled_date had no writer at all, so the
+    Treatment Unit Schedule view above had nothing to show."""
+    _require_rt_delivery_or_ro(current_user)
+    fraction = db.query(RadiationFraction).filter(RadiationFraction.id == fraction_id).first()
+    if not fraction:
+        raise HTTPException(404, "Radiation fraction not found")
+    org_id = _org_id(current_user)
+    _get_org_radiation_phase(db, fraction.phase_id, org_id)
+    body = await request.json()
+    unit_id = body.get("treatment_unit_id")
+    if unit_id is not None:
+        _get_org_treatment_unit(db, unit_id, org_id)
+        fraction.treatment_unit_id = unit_id
+    if body.get("scheduled_date"):
+        fraction.scheduled_date = datetime.strptime(body["scheduled_date"], "%Y-%m-%d").date()
+    db.commit()
+    db.refresh(fraction)
+    return {"status": "success", "fraction": _rt_fraction_out(fraction)}
+
+
+@router.post("/radiation-fractions/{fraction_id}/invivo-dosimetry", status_code=201)
+async def record_invivo_dosimetry(fraction_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """In-Vivo Dosimetry (reference SCR-PHY-010) -- see the module docstring above for why
+    expected/measured stay physicist-typed reference values with no computed deviation."""
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may record in-vivo dosimetry")
+    fraction = db.query(RadiationFraction).filter(RadiationFraction.id == fraction_id).first()
+    if not fraction:
+        raise HTTPException(404, "Radiation fraction not found")
+    _get_org_radiation_phase(db, fraction.phase_id, _org_id(current_user))
+    body = await request.json()
+    outcome = body.get("outcome")
+    if outcome is not None and outcome not in ("Within Tolerance", "Out of Tolerance"):
+        raise HTTPException(422, "outcome must be one of ('Within Tolerance', 'Out of Tolerance')")
+    if outcome == "Out of Tolerance" and not (body.get("action_on_out_of_tolerance") or "").strip():
+        raise HTTPException(422, "action_on_out_of_tolerance is required when outcome is Out of Tolerance")
+    record = RadiationInVivoDosimetry(
+        fraction_id=fraction.id, required=bool(body.get("required", False)), method=body.get("method"),
+        detector_calibration=body.get("detector_calibration"), expected_dose=body.get("expected_dose"),
+        measured_dose=body.get("measured_dose"), outcome=outcome,
+        action_on_out_of_tolerance=body.get("action_on_out_of_tolerance"),
+        performed_by=_actor(current_user), reviewed_by=body.get("reviewed_by"),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "dosimetry": _invivo_dosimetry_out(record)}
+
+
+@router.get("/radiation-fractions/{fraction_id}/invivo-dosimetry")
+def list_invivo_dosimetry(fraction_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    fraction = db.query(RadiationFraction).filter(RadiationFraction.id == fraction_id).first()
+    if not fraction:
+        raise HTTPException(404, "Radiation fraction not found")
+    _get_org_radiation_phase(db, fraction.phase_id, _org_id(current_user))
+    rows = db.query(RadiationInVivoDosimetry).filter(
+        RadiationInVivoDosimetry.fraction_id == fraction_id
+    ).order_by(RadiationInVivoDosimetry.performed_at.desc()).all()
+    return {"dosimetry": [_invivo_dosimetry_out(d) for d in rows]}

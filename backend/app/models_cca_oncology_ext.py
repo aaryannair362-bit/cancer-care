@@ -174,6 +174,10 @@ class RadiationFraction(Base):
     # sitting only in variance_or_toxicity's free text -- safety/dataflow-critical follow-up
     # round. Nullable: variance_or_toxicity alone remains valid for a non-toxicity variance.
     toxicity_event_id = Column(Integer, ForeignKey("cca_toxicity_events.id"), nullable=True)
+    # Which physical unit this fraction is scheduled/delivered on (reference SCR-RTT-001,
+    # feature completion round) -- previously no Treatment Unit entity existed at all, so
+    # there was nowhere for this to point.
+    treatment_unit_id = Column(Integer, ForeignKey("cca_radiation_treatment_units.id"), nullable=True)
     recorded_by = Column(String(200), nullable=True)
     recorded_at = Column(DateTime, default=datetime.utcnow)
 
@@ -531,3 +535,92 @@ class OncologyRecordExtension(Base):
     payload = Column(JSON, nullable=True)
     updated_by = Column(String(200), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Feature completion round: the remaining Radiation Physics/RT Delivery (C.16/C.17) gaps --
+# a Treatment Unit as a first-class object (reference SCR-RTT-001), Machine/Equipment Issue
+# (SCR-RTT-008), Equipment QA Register (SCR-PHY-009), and In-Vivo Dosimetry (SCR-PHY-010).
+# Continues the safety/dataflow-critical and worklist/dashboard follow-up rounds' standing
+# rule: no dose/threshold computation. In-Vivo Dosimetry's "deviation [DERIVED]" in the
+# reference spec is exactly the kind of computed dosimetric comparison Batch 4/5 already
+# excluded for physics QA and fraction delivery -- expected_dose/measured_dose stay
+# physicist-typed reference values, never compared by this repo; outcome is the physicist's
+# own attestation, mirroring RadiationFraction.dose_match_confirmed's precedent.
+# ---------------------------------------------------------------------------
+
+class RadiationTreatmentUnit(Base):
+    """Treatment Unit / linac (reference SCR-RTT-001) as a first-class object -- previously
+    no such entity existed anywhere, so a fraction's "which machine" had no home and the
+    unit-level schedule/QA-register/equipment-issue screens had nothing to attach to."""
+    __tablename__ = "cca_radiation_treatment_units"
+    id = Column(Integer, primary_key=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    name = Column(String(200), nullable=False)
+    unit_type = Column(String(100), nullable=True)  # e.g. Linac, Cobalt, Brachytherapy
+    status = Column(String(30), default="Active")  # Active, Out of Service, Decommissioned
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RadiationEquipmentQARecord(Base):
+    """Equipment QA Register (reference SCR-PHY-009) -- per-unit periodic QA test log.
+    tolerance_note is reference text only, never a computed/enforced threshold. next_due_date
+    is plain date arithmetic off last_performed_date + frequency (the same class of
+    "elapsed time since an operational event" already used by the Live Infusion Board's
+    observation_overdue flag), computed at read time by routers/cca_oncology_ext.py rather
+    than stored here."""
+    __tablename__ = "cca_radiation_equipment_qa_records"
+    id = Column(Integer, primary_key=True)
+    treatment_unit_id = Column(Integer, ForeignKey("cca_radiation_treatment_units.id"), nullable=False)
+    test_name = Column(String(200), nullable=False)
+    frequency = Column(String(30), nullable=False)  # Daily, Weekly, Monthly, Annual
+    tolerance_note = Column(Text, nullable=True)
+    last_performed_date = Column(Date, nullable=True)
+    result = Column(Text, nullable=True)
+    pass_fail = Column(String(10), nullable=True)  # Pass, Fail
+    action_on_failure = Column(Text, nullable=True)
+    downtime_recorded = Column(String(100), nullable=True)
+    performed_by = Column(String(200))
+    performed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RadiationEquipmentIssue(Base):
+    """Machine / Equipment Issue (reference SCR-RTT-008)."""
+    __tablename__ = "cca_radiation_equipment_issues"
+    id = Column(Integer, primary_key=True)
+    treatment_unit_id = Column(Integer, ForeignKey("cca_radiation_treatment_units.id"), nullable=False)
+    description = Column(Text, nullable=False)
+    category = Column(String(30), nullable=False)  # Interlock, Mechanical, Imaging, Dosimetry, Software, Accessory, Environmental
+    time_started = Column(DateTime, default=datetime.utcnow)
+    physics_notified_name = Column(String(200), nullable=True)
+    physics_notified_at = Column(DateTime, nullable=True)
+    action_taken = Column(Text, nullable=True)
+    resolution = Column(Text, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    return_to_service_by = Column(String(200), nullable=True)
+    return_to_service_checks = Column(Text, nullable=True)
+    incident_reference = Column(String(100), nullable=True)
+    status = Column(String(30), default="OPEN")  # OPEN, RESOLVED
+    reported_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RadiationInVivoDosimetry(Base):
+    """In-Vivo Dosimetry (reference SCR-PHY-010) -- a required-flag, measurement, and the
+    physicist's own within/out-of-tolerance attestation. expected_dose/measured_dose are
+    both physicist-typed reference values; no deviation is ever computed from them here
+    (standing repo rule)."""
+    __tablename__ = "cca_radiation_invivo_dosimetry"
+    id = Column(Integer, primary_key=True)
+    fraction_id = Column(Integer, ForeignKey("cca_radiation_fractions.id"), nullable=False)
+    required = Column(Boolean, default=False)
+    method = Column(String(100), nullable=True)
+    detector_calibration = Column(String(200), nullable=True)
+    expected_dose = Column(String(100), nullable=True)
+    measured_dose = Column(String(100), nullable=True)
+    outcome = Column(String(30), nullable=True)  # Within Tolerance, Out of Tolerance -- physicist's own judgment
+    action_on_out_of_tolerance = Column(Text, nullable=True)
+    performed_by = Column(String(200))
+    reviewed_by = Column(String(200), nullable=True)
+    performed_at = Column(DateTime, default=datetime.utcnow)

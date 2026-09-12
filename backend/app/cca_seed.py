@@ -35,6 +35,7 @@ from .models_cca_oncology_ext import (
     TreatmentOrderDrugLine, RadiationPrescription, CCARadiationPhase, RadiationFraction,
     RadiationInterruption, RadiationOnTreatmentVisit,
     RadiationDiscrepancyRecord, RadiationPreTreatmentVerification,
+    RadiationInVivoDosimetry,
 )
 from .cca_engine import calculate_bsa
 
@@ -87,6 +88,11 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # before CCAResult/MDTCase (their optional FK targets), both deleted below.
             PathologyCustodyEvent, PathologyBlockSlide, PathologyFrozenSection,
             PathologySecondOpinion, PathologyMdtReviewNote,
+            # RadiationTreatmentUnit/RadiationEquipmentQARecord/RadiationEquipmentIssue are
+            # organization-level equipment data (like ClinicalMaster/PharmacyRecallEvent
+            # above), not patient data, so they stay out of this list too.
+            # RadiationInVivoDosimetry IS patient/fraction data -- cleaned up above via
+            # fraction_ids alongside RadiationPreTreatmentVerification.
             # Day Care / Treatment Order / Pharmacy universe (Phases 1-7 and Batches 1-2 of the
             # Product 1 vs Product 2 gap-closing initiative) -- previously entirely missing from
             # this reset, so repeated demo/reset calls accumulated stale TreatmentOrder rows that
@@ -172,6 +178,10 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
                     if fraction_ids:
                         db.query(RadiationPreTreatmentVerification).filter(
                             RadiationPreTreatmentVerification.fraction_id.in_(fraction_ids)
+                        ).delete(synchronize_session=False)
+                        # Feature completion round -- keyed by fraction_id, same reasoning.
+                        db.query(RadiationInVivoDosimetry).filter(
+                            RadiationInVivoDosimetry.fraction_id.in_(fraction_ids)
                         ).delete(synchronize_session=False)
                     db.query(RadiationFraction).filter(
                         RadiationFraction.phase_id.in_(phase_ids)

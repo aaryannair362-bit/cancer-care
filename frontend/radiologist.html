@@ -224,6 +224,8 @@
         const ccaUser = Auth.requirePage(['CCARadiologist', 'Doctor', 'Admin']);
         const CCA_API = '/cca';
         let currentPatientId = null;
+        let TREATMENT_UNITS = [];
+        const verifiedFractionIds = new Set();
 
         function showTab(tab) {
             document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
@@ -503,6 +505,9 @@
         async function loadTechWorklist() {
             const container = document.getElementById('worklist-content');
             try {
+                if (!TREATMENT_UNITS.length) {
+                    try { TREATMENT_UNITS = (await Api.get(`${CCA_API}/radiation-units`)).units || []; } catch (err) { /* units are optional context */ }
+                }
                 const data = await Api.get(`${CCA_API}/radiation-phases/worklist`);
                 const rows = (data.worklist || []).filter(p => ['treatment_ready', 'on_treatment', 'interrupted'].includes(p.rt_sub_status));
                 if (!rows.length) {
@@ -539,6 +544,34 @@
                     ${nextFraction && p.rt_sub_status !== 'interrupted' ? `
                         <div class="wl-label">Next Fraction</div>
                         <div class="wl-value" style="margin-bottom:12px;">#${nextFraction.fraction_number} of ${p.number_of_fractions}</div>
+
+                        <div class="section-card" style="background:var(--bg-card-subtle); margin-bottom:12px;">
+                            <div class="section-sub" style="margin-bottom:8px; font-weight:700; color:var(--ink-800);">Unit / Schedule (SCR-RTT-001)</div>
+                            <div class="form-grid-2">
+                                <div class="form-group"><label class="form-label">Treatment unit</label>
+                                    <select id="fx-unit-${nextFraction.id}" class="form-select">
+                                        <option value="">— Unassigned —</option>
+                                        ${TREATMENT_UNITS.map(u => `<option value="${u.id}" ${nextFraction.treatment_unit_id === u.id ? 'selected' : ''}>${escapeHtml(u.name)}</option>`).join('')}
+                                    </select>
+                                </div>
+                                <div class="form-group"><label class="form-label">Scheduled date</label><input type="date" id="fx-date-${nextFraction.id}" class="form-input" value="${nextFraction.scheduled_date || ''}" /></div>
+                            </div>
+                            <button class="btn-outline" onclick="scheduleFraction(${nextFraction.id})">Save Schedule</button>
+                            ${nextFraction.treatment_unit_id ? `<button class="btn-outline" style="margin-left:8px;" onclick="toggleIssueForm(${nextFraction.treatment_unit_id})">⚠ Report Equipment Issue</button>` : ''}
+                        </div>
+                        <div id="issue-form-${nextFraction.treatment_unit_id || 0}"></div>
+
+                        <div class="section-card" style="background:${verifiedFractionIds.has(nextFraction.id) ? 'var(--green-badge-bg)' : 'var(--amber-badge-bg)'}; margin-bottom:12px;">
+                            <div class="section-sub" style="margin-bottom:8px; font-weight:700; color:var(--ink-800);">Pre-Treatment Verification (SCR-RTT-002) ${verifiedFractionIds.has(nextFraction.id) ? '<span class="badge badge-green">Verified ✓</span>' : '<span class="badge badge-amber">Required before delivery</span>'}</div>
+                            <div class="form-checkbox-row"><input type="checkbox" id="fx-idcheck-${nextFraction.id}"/> <label for="fx-idcheck-${nextFraction.id}">Patient identity re-verified</label></div>
+                            <div class="form-checkbox-row"><input type="checkbox" id="fx-sitecheck-${nextFraction.id}"/> <label for="fx-sitecheck-${nextFraction.id}">Site / laterality confirmed</label></div>
+                            <div class="form-grid-2">
+                                <div class="form-group"><label class="form-label">Confirmed fraction number</label><input type="number" id="fx-confirmnum-${nextFraction.id}" class="form-input" value="${nextFraction.fraction_number}" /></div>
+                                <div class="form-group"><label class="form-label">Mismatch note (if number doesn't match)</label><input type="text" id="fx-mismatchnote-${nextFraction.id}" class="form-input" /></div>
+                            </div>
+                            <button class="btn-navy" onclick="verifyFraction(${nextFraction.id})">Verify</button>
+                        </div>
+
                         <div class="form-grid-2">
                             <div class="form-group"><label class="form-label">Delivered dose (Gy)</label><input type="number" step="0.01" id="fx-dose-${nextFraction.id}" class="form-input" value="${p.dose_per_fraction_gy || ''}" /></div>
                             <div class="form-group"><label class="form-label">Outcome</label>
@@ -560,6 +593,66 @@
                     ` : (p.rt_sub_status !== 'interrupted' ? '<p style="font-size:12.5px; color:var(--ink-500);">No fractions currently scheduled for this phase.</p>' : '')}
                 </div>
             `;
+        }
+
+        async function scheduleFraction(fractionId) {
+            const unitId = document.getElementById(`fx-unit-${fractionId}`).value;
+            const date = document.getElementById(`fx-date-${fractionId}`).value;
+            try {
+                await Api.post(`${CCA_API}/radiation-fractions/${fractionId}/schedule`, {
+                    treatment_unit_id: unitId ? Number(unitId) : undefined,
+                    scheduled_date: date || undefined,
+                });
+                toast('Schedule saved', 'success');
+                loadTechWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function toggleIssueForm(unitId) {
+            const host = document.getElementById(`issue-form-${unitId}`);
+            if (!host) return;
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div class="section-card" style="background:var(--rose-badge-bg); margin-bottom:12px;">
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Category</label>
+                        <select id="issue-category-${unitId}" class="form-select">
+                            <option>Interlock</option><option>Mechanical</option><option>Imaging</option>
+                            <option>Dosimetry</option><option>Software</option><option>Accessory</option><option>Environmental</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Description *</label><textarea id="issue-desc-${unitId}" class="form-textarea" rows="2"></textarea></div>
+                    <button class="btn-danger" onclick="reportEquipmentIssue(${unitId})">Report Issue</button>
+                    <button class="btn-outline" style="margin-left:8px;" onclick="toggleIssueForm(${unitId})">Cancel</button>
+                </div>
+            `;
+        }
+
+        async function reportEquipmentIssue(unitId) {
+            const description = document.getElementById(`issue-desc-${unitId}`).value;
+            if (!description) { toast('Description is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/radiation-units/${unitId}/issues`, {
+                    description, category: document.getElementById(`issue-category-${unitId}`).value,
+                });
+                toast('Equipment issue reported to Physics', 'success');
+                toggleIssueForm(unitId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function verifyFraction(fractionId) {
+            const confirmedNumber = document.getElementById(`fx-confirmnum-${fractionId}`).value;
+            try {
+                await Api.post(`${CCA_API}/radiation-fractions/${fractionId}/pretreatment-verification`, {
+                    identity_reverified: document.getElementById(`fx-idcheck-${fractionId}`).checked,
+                    site_laterality_confirmed: document.getElementById(`fx-sitecheck-${fractionId}`).checked,
+                    confirmed_fraction_number: Number(confirmedNumber),
+                    mismatch_note: document.getElementById(`fx-mismatchnote-${fractionId}`).value || undefined,
+                });
+                verifiedFractionIds.add(fractionId);
+                toast('Pre-treatment verification recorded', 'success');
+                loadTechWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
         async function recordFraction(fractionId) {
