@@ -415,6 +415,104 @@ class SurgicalBloodTransfusion(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+# ---------------------------------------------------------------------------
+# Surgical Oncology EXPAND-tier additions (gap review item 10) -- WHO Surgical Safety
+# Checklist, Wound Assessment, Drain Register, Stoma Register, and structured post-op
+# Complication tracking, none of which existed before. All keyed by both patient_id and
+# surgical_plan_id, matching this file's existing SurgicalSpecimen/SurgicalBloodTransfusion
+# convention. clavien_dindo_grade is always the surgeon's own classification, never
+# computed; drain output_log entries are the nurse's own typed readings, never aggregated
+# into a threshold/alert here.
+# ---------------------------------------------------------------------------
+
+class SurgicalSafetyChecklist(Base):
+    """WHO Surgical Safety Checklist -- Sign-In (before anaesthesia), Time-Out (before
+    incision), Sign-Out (before leaving OR). One row per SurgicalPlan; each phase is
+    confirmed independently and in order. Checklist items are the team's own attestation
+    (JSON of item->bool), never a computed pass/fail."""
+    __tablename__ = "cca_surgical_safety_checklists"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    sign_in_items = Column(JSON, nullable=True)
+    sign_in_confirmed_by = Column(String(200), nullable=True)
+    sign_in_at = Column(DateTime, nullable=True)
+    time_out_items = Column(JSON, nullable=True)
+    time_out_confirmed_by = Column(String(200), nullable=True)
+    time_out_at = Column(DateTime, nullable=True)
+    sign_out_items = Column(JSON, nullable=True)
+    sign_out_confirmed_by = Column(String(200), nullable=True)
+    sign_out_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SurgicalWoundAssessment(Base):
+    __tablename__ = "cca_surgical_wound_assessments"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    assessment_date = Column(Date, nullable=False)
+    wound_site = Column(String(200), nullable=True)
+    appearance = Column(String(100), nullable=True)  # Clean, Erythematous, Dehisced, Infected...
+    drainage = Column(String(100), nullable=True)
+    dressing_changed = Column(Boolean, default=False)
+    notes = Column(Text, nullable=True)
+    assessed_by = Column(String(200))
+    assessed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SurgicalDrainRecord(Base):
+    __tablename__ = "cca_surgical_drain_records"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    drain_site = Column(String(200), nullable=False)
+    drain_type = Column(String(100), nullable=True)
+    inserted_date = Column(Date, nullable=True)
+    output_log = Column(JSON, nullable=True)  # [{"date": "...", "volume_ml": n, "character": "..."}], nurse-typed each entry
+    status = Column(String(30), default="In Situ")  # In Situ, Removed
+    removed_date = Column(Date, nullable=True)
+    removed_by = Column(String(200), nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SurgicalStomaRecord(Base):
+    __tablename__ = "cca_surgical_stoma_records"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    stoma_type = Column(String(100), nullable=False)  # Colostomy, Ileostomy, Urostomy...
+    site = Column(String(100), nullable=True)
+    created_date = Column(Date, nullable=True)
+    status = Column(String(30), default="Active")  # Active, Reversed, Complication
+    complication_note = Column(Text, nullable=True)
+    education_provided = Column(Boolean, default=False)
+    stoma_care_by = Column(String(200), nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SurgicalComplicationRecord(Base):
+    """Structured post-op complication tracking -- distinct from
+    SurgicalOperativeNote.complications above, which is the free-text intra-operative note;
+    this is the longitudinal record of complications discovered afterward.
+    clavien_dindo_grade is always the surgeon's own classification, never computed."""
+    __tablename__ = "cca_surgical_complication_records"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    complication = Column(String(300), nullable=False)
+    clavien_dindo_grade = Column(String(10), nullable=True)  # I, II, IIIa, IIIb, IVa, IVb, V
+    onset_date = Column(Date, nullable=True)
+    management = Column(Text, nullable=True)
+    resolved = Column(Boolean, default=False)
+    resolved_date = Column(Date, nullable=True)
+    reported_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class ClinicalProcedureNote(Base):
     """Procedures & Notes (Gap Analysis PDF items 31-33: Palliative, Medical Oncology, and
     Radiation Oncology Procedures & Notes) -- a bedside/outpatient procedure performed by a

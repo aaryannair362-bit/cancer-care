@@ -33,6 +33,8 @@ from ..models_cca_oncology_ext import (
     RadiationInVivoDosimetry, RadiationOncologyConsultation,
     Regimen, RegimenDrugLine, SurgicalPlan, TreatmentPlanPhase,
     SurgicalIntraOpMonitoring, SurgicalOperativeNote, SurgicalSpecimen, SurgicalBloodTransfusion,
+    SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
+    SurgicalStomaRecord, SurgicalComplicationRecord,
     ClinicalProcedureNote, PalliativeTreatmentOrder,
 )
 from ..events import publish
@@ -1278,6 +1280,256 @@ async def record_surgical_blood_transfusion(plan_id: int, request: Request, db: 
     db.commit()
     db.refresh(record)
     return {"status": "success", "blood_transfusion": _surgical_blood_out(record)}
+
+
+# ---------------------------------------------------------------------------
+# Surgical Oncology EXPAND-tier additions (gap review item 10) -- WHO Surgical Safety
+# Checklist, Wound Assessment, Drain Register, Stoma Register, structured post-op
+# Complication tracking. See models_cca_oncology_ext.py's own section docstring.
+# ---------------------------------------------------------------------------
+
+def _safety_checklist_out(c: SurgicalSafetyChecklist) -> dict:
+    return {
+        "id": c.id, "surgical_plan_id": c.surgical_plan_id,
+        "sign_in_items": c.sign_in_items or {}, "sign_in_confirmed_by": c.sign_in_confirmed_by,
+        "sign_in_at": c.sign_in_at.isoformat() if c.sign_in_at else None,
+        "time_out_items": c.time_out_items or {}, "time_out_confirmed_by": c.time_out_confirmed_by,
+        "time_out_at": c.time_out_at.isoformat() if c.time_out_at else None,
+        "sign_out_items": c.sign_out_items or {}, "sign_out_confirmed_by": c.sign_out_confirmed_by,
+        "sign_out_at": c.sign_out_at.isoformat() if c.sign_out_at else None,
+    }
+
+
+def _get_or_create_checklist(db: Session, plan: SurgicalPlan, actor: str) -> SurgicalSafetyChecklist:
+    checklist = db.query(SurgicalSafetyChecklist).filter(SurgicalSafetyChecklist.surgical_plan_id == plan.id).first()
+    if not checklist:
+        checklist = SurgicalSafetyChecklist(patient_id=plan.patient_id, surgical_plan_id=plan.id, created_by=actor)
+        db.add(checklist)
+        db.flush()
+    return checklist
+
+
+_CHECKLIST_PHASE_ORDER = ["sign_in", "time_out", "sign_out"]
+
+
+@router.get("/surgical-plans/{plan_id}/safety-checklist")
+def get_safety_checklist(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    checklist = db.query(SurgicalSafetyChecklist).filter(SurgicalSafetyChecklist.surgical_plan_id == plan.id).first()
+    return {"safety_checklist": _safety_checklist_out(checklist) if checklist else None}
+
+
+@router.post("/surgical-plans/{plan_id}/safety-checklist/{phase}")
+async def confirm_safety_checklist_phase(plan_id: int, phase: str, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Confirms one WHO checklist phase -- Sign-In, Time-Out, Sign-Out, strictly in that
+    order (the same phase cannot be confirmed twice, and a later phase cannot be confirmed
+    before an earlier one)."""
+    _require_surgical_team(current_user)
+    if phase not in _CHECKLIST_PHASE_ORDER:
+        raise HTTPException(422, f"phase must be one of {_CHECKLIST_PHASE_ORDER}")
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    actor = _actor(current_user)
+    checklist = _get_or_create_checklist(db, plan, actor)
+    phase_index = _CHECKLIST_PHASE_ORDER.index(phase)
+    for earlier_phase in _CHECKLIST_PHASE_ORDER[:phase_index]:
+        if getattr(checklist, f"{earlier_phase}_at") is None:
+            raise HTTPException(409, f"{earlier_phase.replace('_', '-').title()} must be confirmed before {phase.replace('_', '-').title()}")
+    if getattr(checklist, f"{phase}_at") is not None:
+        raise HTTPException(409, f"{phase.replace('_', '-').title()} is already confirmed")
+    body = await request.json()
+    setattr(checklist, f"{phase}_items", body.get("items"))
+    setattr(checklist, f"{phase}_confirmed_by", actor)
+    setattr(checklist, f"{phase}_at", datetime.utcnow())
+    db.commit()
+    db.refresh(checklist)
+    return {"status": "success", "safety_checklist": _safety_checklist_out(checklist)}
+
+
+def _wound_assessment_out(w: SurgicalWoundAssessment) -> dict:
+    return {
+        "id": w.id, "surgical_plan_id": w.surgical_plan_id,
+        "assessment_date": w.assessment_date.isoformat() if w.assessment_date else None,
+        "wound_site": w.wound_site, "appearance": w.appearance, "drainage": w.drainage,
+        "dressing_changed": bool(w.dressing_changed), "notes": w.notes, "assessed_by": w.assessed_by,
+    }
+
+
+@router.post("/surgical-plans/{plan_id}/wound-assessments", status_code=201)
+async def add_wound_assessment(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    assessment = SurgicalWoundAssessment(
+        patient_id=plan.patient_id, surgical_plan_id=plan.id,
+        assessment_date=datetime.fromisoformat(body["assessment_date"]).date() if body.get("assessment_date") else datetime.utcnow().date(),
+        wound_site=body.get("wound_site"), appearance=body.get("appearance"), drainage=body.get("drainage"),
+        dressing_changed=bool(body.get("dressing_changed", False)), notes=body.get("notes"), assessed_by=_actor(current_user),
+    )
+    db.add(assessment)
+    db.commit()
+    db.refresh(assessment)
+    return {"status": "success", "wound_assessment": _wound_assessment_out(assessment)}
+
+
+@router.get("/surgical-plans/{plan_id}/wound-assessments")
+def list_wound_assessments(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    rows = db.query(SurgicalWoundAssessment).filter(SurgicalWoundAssessment.surgical_plan_id == plan.id).order_by(SurgicalWoundAssessment.assessment_date.desc()).all()
+    return {"wound_assessments": [_wound_assessment_out(w) for w in rows]}
+
+
+def _drain_record_out(d: SurgicalDrainRecord) -> dict:
+    return {
+        "id": d.id, "surgical_plan_id": d.surgical_plan_id, "drain_site": d.drain_site, "drain_type": d.drain_type,
+        "inserted_date": d.inserted_date.isoformat() if d.inserted_date else None,
+        "output_log": d.output_log or [], "status": d.status,
+        "removed_date": d.removed_date.isoformat() if d.removed_date else None, "removed_by": d.removed_by,
+    }
+
+
+@router.post("/surgical-plans/{plan_id}/drains", status_code=201)
+async def add_drain_record(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    drain_site = (body.get("drain_site") or "").strip()
+    if not drain_site:
+        raise HTTPException(422, "drain_site is required")
+    drain = SurgicalDrainRecord(
+        patient_id=plan.patient_id, surgical_plan_id=plan.id, drain_site=drain_site, drain_type=body.get("drain_type"),
+        inserted_date=datetime.fromisoformat(body["inserted_date"]).date() if body.get("inserted_date") else datetime.utcnow().date(),
+        created_by=_actor(current_user),
+    )
+    db.add(drain)
+    db.commit()
+    db.refresh(drain)
+    return {"status": "success", "drain": _drain_record_out(drain)}
+
+
+@router.get("/surgical-plans/{plan_id}/drains")
+def list_drain_records(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    rows = db.query(SurgicalDrainRecord).filter(SurgicalDrainRecord.surgical_plan_id == plan.id).order_by(SurgicalDrainRecord.id.desc()).all()
+    return {"drains": [_drain_record_out(d) for d in rows]}
+
+
+@router.post("/drains/{id}/output")
+async def add_drain_output_entry(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    drain = db.query(SurgicalDrainRecord).filter(SurgicalDrainRecord.id == id).first()
+    if not drain:
+        raise HTTPException(404, "Drain record not found")
+    _check_patient_in_org(db, drain.patient_id, _org_id(current_user))
+    body = await request.json()
+    volume_ml = body.get("volume_ml")
+    if volume_ml is None:
+        raise HTTPException(422, "volume_ml is required")
+    entry = {
+        "date": body.get("date") or datetime.utcnow().date().isoformat(), "volume_ml": volume_ml,
+        "character": body.get("character"), "recorded_by": _actor(current_user),
+    }
+    drain.output_log = (drain.output_log or []) + [entry]
+    db.commit()
+    db.refresh(drain)
+    return {"status": "success", "drain": _drain_record_out(drain)}
+
+
+@router.post("/drains/{id}/remove")
+async def remove_drain(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    drain = db.query(SurgicalDrainRecord).filter(SurgicalDrainRecord.id == id).first()
+    if not drain:
+        raise HTTPException(404, "Drain record not found")
+    _check_patient_in_org(db, drain.patient_id, _org_id(current_user))
+    if drain.status == "Removed":
+        raise HTTPException(409, "This drain is already removed")
+    body = await request.json() if request.headers.get("content-length") not in (None, "0") else {}
+    drain.status = "Removed"
+    drain.removed_date = datetime.fromisoformat(body["removed_date"]).date() if body.get("removed_date") else datetime.utcnow().date()
+    drain.removed_by = _actor(current_user)
+    db.commit()
+    db.refresh(drain)
+    return {"status": "success", "drain": _drain_record_out(drain)}
+
+
+def _stoma_record_out(s: SurgicalStomaRecord) -> dict:
+    return {
+        "id": s.id, "surgical_plan_id": s.surgical_plan_id, "stoma_type": s.stoma_type, "site": s.site,
+        "created_date": s.created_date.isoformat() if s.created_date else None, "status": s.status,
+        "complication_note": s.complication_note, "education_provided": bool(s.education_provided),
+        "stoma_care_by": s.stoma_care_by,
+    }
+
+
+@router.post("/surgical-plans/{plan_id}/stomas", status_code=201)
+async def add_stoma_record(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    stoma_type = (body.get("stoma_type") or "").strip()
+    if not stoma_type:
+        raise HTTPException(422, "stoma_type is required")
+    stoma = SurgicalStomaRecord(
+        patient_id=plan.patient_id, surgical_plan_id=plan.id, stoma_type=stoma_type, site=body.get("site"),
+        created_date=datetime.fromisoformat(body["created_date"]).date() if body.get("created_date") else datetime.utcnow().date(),
+        education_provided=bool(body.get("education_provided", False)), stoma_care_by=body.get("stoma_care_by"),
+        created_by=_actor(current_user),
+    )
+    db.add(stoma)
+    db.commit()
+    db.refresh(stoma)
+    return {"status": "success", "stoma": _stoma_record_out(stoma)}
+
+
+@router.get("/surgical-plans/{plan_id}/stomas")
+def list_stoma_records(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    rows = db.query(SurgicalStomaRecord).filter(SurgicalStomaRecord.surgical_plan_id == plan.id).order_by(SurgicalStomaRecord.id.desc()).all()
+    return {"stomas": [_stoma_record_out(s) for s in rows]}
+
+
+def _complication_record_out(c: SurgicalComplicationRecord) -> dict:
+    return {
+        "id": c.id, "surgical_plan_id": c.surgical_plan_id, "complication": c.complication,
+        "clavien_dindo_grade": c.clavien_dindo_grade, "onset_date": c.onset_date.isoformat() if c.onset_date else None,
+        "management": c.management, "resolved": bool(c.resolved),
+        "resolved_date": c.resolved_date.isoformat() if c.resolved_date else None, "reported_by": c.reported_by,
+    }
+
+
+@router.post("/surgical-plans/{plan_id}/complications", status_code=201)
+async def add_complication_record(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    complication = (body.get("complication") or "").strip()
+    if not complication:
+        raise HTTPException(422, "complication is required")
+    record = SurgicalComplicationRecord(
+        patient_id=plan.patient_id, surgical_plan_id=plan.id, complication=complication,
+        clavien_dindo_grade=body.get("clavien_dindo_grade"),
+        onset_date=datetime.fromisoformat(body["onset_date"]).date() if body.get("onset_date") else datetime.utcnow().date(),
+        management=body.get("management"), reported_by=_actor(current_user),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "complication": _complication_record_out(record)}
+
+
+@router.get("/surgical-plans/{plan_id}/complications")
+def list_complication_records(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    rows = db.query(SurgicalComplicationRecord).filter(SurgicalComplicationRecord.surgical_plan_id == plan.id).order_by(SurgicalComplicationRecord.id.desc()).all()
+    return {"complications": [_complication_record_out(c) for c in rows]}
+
+
+@router.post("/complications/{id}/resolve")
+async def resolve_complication(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    record = db.query(SurgicalComplicationRecord).filter(SurgicalComplicationRecord.id == id).first()
+    if not record:
+        raise HTTPException(404, "Complication record not found")
+    _check_patient_in_org(db, record.patient_id, _org_id(current_user))
+    record.resolved = True
+    body = await request.json() if request.headers.get("content-length") not in (None, "0") else {}
+    record.resolved_date = datetime.fromisoformat(body["resolved_date"]).date() if body.get("resolved_date") else datetime.utcnow().date()
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "complication": _complication_record_out(record)}
 
 
 # ---------------------------------------------------------------------------

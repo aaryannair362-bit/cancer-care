@@ -40,6 +40,8 @@ from .models_cca_oncology_ext import (
     RadiationInterruption, RadiationOnTreatmentVisit,
     RadiationDiscrepancyRecord, RadiationPreTreatmentVerification,
     RadiationInVivoDosimetry, RadiationOncologyConsultation,
+    SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
+    SurgicalStomaRecord, SurgicalComplicationRecord,
 )
 from .models_cca_inpatient import (
     InpatientAdmission, InpatientHistoryAndPhysical, InpatientProblemListItem,
@@ -125,6 +127,11 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # Has its own patient_id -- independent of RadiationPrescription (a consultation
             # can predate any course being prescribed).
             RadiationOncologyConsultation,
+            # All have their own patient_id (matching this codebase's existing
+            # SurgicalSpecimen/SurgicalBloodTransfusion convention), even though SurgicalPlan
+            # itself is a pre-existing omission from this reset (not introduced here).
+            SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
+            SurgicalStomaRecord, SurgicalComplicationRecord,
             CCAJourneyEvent, ResponseAssessment, TreatmentClearance,
             # Has its own patient_id -- optionally references a ToxicityEvent, deleted
             # before ToxicityEvent itself just below.

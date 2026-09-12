@@ -1715,12 +1715,174 @@
                         <div class="form-checkbox-row"><input type="checkbox" id="sp-blood-crossmatch"/> <label for="sp-blood-crossmatch">Crossmatch/compatibility confirmed</label></div>
                         <button class="btn-outline" onclick="submitSurgicalBloodTransfusion()">+ Record Unit</button>
                     </div>
+                    <div class="section-card"><div class="section-title" style="margin-bottom:10px;">WHO Surgical Safety Checklist</div><div id="sp-safety-checklist"></div></div>
+                    <div class="section-card"><div class="section-title" style="margin-bottom:10px;">Wound Assessments</div><div id="sp-wound-list"></div>
+                        <div class="form-grid-2" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Wound site</label><input type="text" id="sp-wound-site" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Appearance</label><input type="text" id="sp-wound-appearance" class="form-input" placeholder="e.g. Clean, dry, intact" /></div>
+                        </div>
+                        <button class="btn-outline" onclick="submitWoundAssessment()">+ Add Wound Assessment</button>
+                    </div>
+                    <div class="section-card"><div class="section-title" style="margin-bottom:10px;">Drain Register</div><div id="sp-drain-list"></div>
+                        <div class="form-grid-2" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Drain site *</label><input type="text" id="sp-drain-site" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Drain type</label><input type="text" id="sp-drain-type" class="form-input" placeholder="e.g. Jackson-Pratt" /></div>
+                        </div>
+                        <button class="btn-outline" onclick="submitAddDrain()">+ Add Drain</button>
+                    </div>
+                    <div class="section-card"><div class="section-title" style="margin-bottom:10px;">Stoma Register</div><div id="sp-stoma-list"></div>
+                        <div class="form-grid-2" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Stoma type *</label><input type="text" id="sp-stoma-type" class="form-input" placeholder="e.g. Colostomy" /></div>
+                            <div class="form-group"><label class="form-label">Site</label><input type="text" id="sp-stoma-site" class="form-input" /></div>
+                        </div>
+                        <button class="btn-outline" onclick="submitAddStoma()">+ Add Stoma</button>
+                    </div>
+                    <div class="section-card"><div class="section-title" style="margin-bottom:10px;">Post-op Complications</div><div id="sp-complication-list"></div>
+                        <div class="form-grid-2" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Complication *</label><input type="text" id="sp-comp-desc" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Clavien-Dindo grade</label><select id="sp-comp-grade" class="form-select"><option>I</option><option>II</option><option>IIIa</option><option>IIIb</option><option>IVa</option><option>IVb</option><option>V</option></select></div>
+                        </div>
+                        <button class="btn-outline" onclick="submitAddComplication()">+ Record Complication</button>
+                    </div>
                 `;
                 loadIntraopMonitoring();
                 loadOperativeNotes();
                 loadSpecimens();
                 loadSurgicalBloodTransfusions();
+                loadSafetyChecklist();
+                loadWoundAssessments();
+                loadDrains();
+                loadStomas();
+                loadComplications();
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        const CHECKLIST_PHASES = [['sign_in', 'Sign-In (before anaesthesia)'], ['time_out', 'Time-Out (before incision)'], ['sign_out', 'Sign-Out (before leaving OR)']];
+
+        async function loadSafetyChecklist() {
+            const el = document.getElementById('sp-safety-checklist');
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/safety-checklist`);
+                const c = data.safety_checklist;
+                el.innerHTML = CHECKLIST_PHASES.map(([key, label]) => {
+                    const confirmedAt = c && c[`${key}_at`];
+                    return `<div class="checklist-row" style="display:flex; justify-content:space-between; align-items:center;">
+                        <span>${escapeHtml(label)}</span>
+                        ${confirmedAt ? `<span class="badge badge-green">Confirmed by ${escapeHtml(c[`${key}_confirmed_by`] || '')}</span>` : `<button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="submitChecklistPhase('${key}')">Confirm</button>`}
+                    </div>`;
+                }).join('');
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitChecklistPhase(phase) {
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/safety-checklist/${phase}`, { items: {} });
+                toast('Checklist phase confirmed', 'success');
+                loadSafetyChecklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadWoundAssessments() {
+            const el = document.getElementById('sp-wound-list');
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/wound-assessments`);
+                el.innerHTML = data.wound_assessments.map(w => `<div class="checklist-row">${escapeHtml(w.wound_site || '')} — ${escapeHtml(w.appearance || '')} (${w.assessment_date})</div>`).join('') || '<div class="checklist-row">No wound assessments yet.</div>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitWoundAssessment() {
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/wound-assessments`, {
+                    wound_site: document.getElementById('sp-wound-site').value, appearance: document.getElementById('sp-wound-appearance').value,
+                });
+                toast('Wound assessment added', 'success');
+                loadWoundAssessments();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadDrains() {
+            const el = document.getElementById('sp-drain-list');
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/drains`);
+                el.innerHTML = data.drains.map(d => `<div class="checklist-row" style="display:flex; justify-content:space-between;"><span>${escapeHtml(d.drain_site)} (${escapeHtml(d.drain_type || '')}) — <span class="badge ${d.status === 'Removed' ? 'badge-blue' : 'badge-green'}">${escapeHtml(d.status)}</span> — ${d.output_log.length} output entr${d.output_log.length === 1 ? 'y' : 'ies'}</span>${d.status !== 'Removed' ? `<span><button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="promptDrainOutput(${d.id})">+ Output</button> <button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="submitRemoveDrain(${d.id})">Remove</button></span>` : ''}</div>`).join('') || '<div class="checklist-row">No drains recorded.</div>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitAddDrain() {
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/drains`, {
+                    drain_site: document.getElementById('sp-drain-site').value, drain_type: document.getElementById('sp-drain-type').value || undefined,
+                });
+                toast('Drain added', 'success');
+                loadDrains();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function promptDrainOutput(drainId) {
+            const volume = prompt('Output volume (mL):');
+            if (!volume) return;
+            const character = prompt('Character (optional):') || undefined;
+            submitDrainOutput(drainId, Number(volume), character);
+        }
+
+        async function submitDrainOutput(drainId, volumeMl, character) {
+            try {
+                await Api.post(`${CCA_API}/drains/${drainId}/output`, { volume_ml: volumeMl, character });
+                toast('Output recorded', 'success');
+                loadDrains();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitRemoveDrain(drainId) {
+            try {
+                await Api.post(`${CCA_API}/drains/${drainId}/remove`, {});
+                toast('Drain removed', 'success');
+                loadDrains();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadStomas() {
+            const el = document.getElementById('sp-stoma-list');
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/stomas`);
+                el.innerHTML = data.stomas.map(s => `<div class="checklist-row">${escapeHtml(s.stoma_type)} — ${escapeHtml(s.site || '')} — <span class="badge ${s.status === 'Active' ? 'badge-green' : 'badge-amber'}">${escapeHtml(s.status)}</span>${s.education_provided ? ' · Education provided' : ''}</div>`).join('') || '<div class="checklist-row">No stomas recorded.</div>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitAddStoma() {
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/stomas`, {
+                    stoma_type: document.getElementById('sp-stoma-type').value, site: document.getElementById('sp-stoma-site').value || undefined,
+                });
+                toast('Stoma recorded', 'success');
+                loadStomas();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function loadComplications() {
+            const el = document.getElementById('sp-complication-list');
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/complications`);
+                el.innerHTML = data.complications.map(c => `<div class="checklist-row" style="display:flex; justify-content:space-between;"><span>${escapeHtml(c.complication)} — Grade ${escapeHtml(c.clavien_dindo_grade || '—')} — <span class="badge ${c.resolved ? 'badge-green' : 'badge-rose'}">${c.resolved ? 'Resolved' : 'Open'}</span></span>${!c.resolved ? `<button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="submitResolveComplication(${c.id})">Resolve</button>` : ''}</div>`).join('') || '<div class="checklist-row">No complications recorded.</div>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitAddComplication() {
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${currentSurgicalPlanId}/complications`, {
+                    complication: document.getElementById('sp-comp-desc').value, clavien_dindo_grade: document.getElementById('sp-comp-grade').value,
+                });
+                toast('Complication recorded', 'success');
+                loadComplications();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitResolveComplication(id) {
+            try {
+                await Api.post(`${CCA_API}/complications/${id}/resolve`, {});
+                toast('Complication resolved', 'success');
+                loadComplications();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
         async function submitNewSurgicalPlan() {
