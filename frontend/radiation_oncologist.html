@@ -1689,12 +1689,19 @@
                                 <div><div class="wl-label">Fractions</div><div class="wl-value" style="font-size:13px;">${p.number_of_fractions} × ${p.dose_per_fraction_gy} Gy</div></div>
                                 <div><span class="badge ${RT_PHASE_STATUS_BADGE[p.rt_sub_status] || 'badge-amber'}">${escapeHtml(p.rt_sub_status.replace(/_/g, ' '))}</span></div>
                                 <div style="display:flex; flex-direction:column; gap:4px;">
-                                    ${p.rt_sub_status === 'physics_qa' ? `<button class="btn-navy" style="font-size:11px; padding:6px 10px;" onclick="transitionRadiationPhase(${p.id}, 'physician_approved')">Approve</button>` : ''}
+                                    ${p.rt_sub_status === 'physics_qa' ? (
+                                        p.physics_qa_decision === 'Approved'
+                                            ? `<button class="btn-navy" style="font-size:11px; padding:6px 10px;" onclick="approveRadiationPhase(${p.id})">Approve</button>`
+                                            : `<span class="badge ${p.physics_qa_decision ? 'badge-rose' : 'badge-amber'}" style="font-size:10px;">${escapeHtml(p.physics_qa_decision || 'Physics QA Pending')}</span>`
+                                    ) : ''}
                                     ${p.rt_sub_status === 'physician_approved' ? `<button class="btn-navy" style="font-size:11px; padding:6px 10px;" onclick="transitionRadiationPhase(${p.id}, 'treatment_ready')">Mark Treatment Ready</button>` : ''}
                                     ${['on_treatment','interrupted'].includes(p.rt_sub_status) ? `<button class="btn-outline" style="font-size:11px; padding:6px 10px;" onclick="completeRadiationPhase(${p.id})">Complete Phase</button>` : ''}
                                     <button class="btn-outline" style="font-size:11px; padding:6px 10px;" onclick="viewRadiationPhaseFractions(${p.id})">Fractions</button>
+                                    ${['on_treatment','interrupted','completed'].includes(p.rt_sub_status) ? `<button class="btn-outline" style="font-size:11px; padding:6px 10px;" onclick="viewRadiationPhaseOtv(${p.id})">On-Treatment Visits</button>` : ''}
                                 </div>
                             </div>
+                            ${p.rt_sub_status === 'physics_qa' && p.physics_qa_note ? `<div style="font-size:11.5px; color:var(--ink-500); margin:-4px 0 10px; padding:0 4px;">Physics QA note: ${escapeHtml(p.physics_qa_note)}</div>` : ''}
+                            <div id="rt-otv-${p.id}" style="display:none; margin:-4px 0 10px; padding:10px 14px; background:var(--bg-card-subtle); border-radius:var(--radius-md);"></div>
                             <div id="rt-fractions-${p.id}" style="display:none; margin:-4px 0 10px; padding:10px 14px; background:var(--bg-card-subtle); border-radius:var(--radius-md);"></div>
                         `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No phases prescribed yet.</p>'}
                     </div>
@@ -1755,6 +1762,15 @@
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
+        async function approveRadiationPhase(phaseId) {
+            const note = prompt('Final approval note (optional):') || undefined;
+            try {
+                await Api.post(`${CCA_API}/radiation-phases/${phaseId}/transition`, { status: 'physician_approved', note });
+                toast('Phase approved for treatment', 'success');
+                loadRadiationPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
         async function completeRadiationPhase(phaseId) {
             try {
                 await Api.post(`${CCA_API}/radiation-phases/${phaseId}/complete`, {});
@@ -1775,6 +1791,44 @@
                 el.innerHTML = `<div style="font-size:12px; font-weight:700; margin-bottom:6px;">${delivered} of ${fractions.length} fractions delivered</div>` +
                     fractions.map(f => `<div style="font-size:12px; color:var(--ink-700); padding:3px 0;">#${f.fraction_number} — ${escapeHtml(f.status)}${f.delivered_dose_gy ? ' · ' + f.delivered_dose_gy + ' Gy' : ''}${f.variance_or_toxicity ? ' · ⚠ ' + escapeHtml(f.variance_or_toxicity) : ''}</div>`).join('');
             } catch (err) { el.innerHTML = `<p style="color:var(--rose-badge-text); font-size:12px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function viewRadiationPhaseOtv(phaseId) {
+            const el = document.getElementById(`rt-otv-${phaseId}`);
+            if (el.style.display !== 'none') { el.style.display = 'none'; return; }
+            el.style.display = 'block';
+            el.innerHTML = 'Loading…';
+            try {
+                const data = await Api.get(`${CCA_API}/radiation-phases/${phaseId}/otv`);
+                const visits = data.otv || [];
+                el.innerHTML = `
+                    <div style="font-size:12px; font-weight:700; margin-bottom:6px;">On-Treatment Visits (${visits.length})</div>
+                    ${visits.map(v => `<div style="font-size:12px; color:var(--ink-700); padding:4px 0; border-bottom:1px solid var(--line-subtle);">After fraction #${v.after_fraction_number || '—'} — ${escapeHtml(v.assessment)}${v.weight_kg ? ' · ' + v.weight_kg + ' kg' : ''}${v.performance_status ? ' · ' + escapeHtml(v.performance_status) : ''} <span style="color:var(--ink-400);">— ${escapeHtml(v.signed_by || '')}</span></div>`).join('') || '<p style="font-size:12px; color:var(--ink-500);">None recorded yet.</p>'}
+                    <div class="form-group" style="margin-top:10px;"><label class="form-label">Assessment *</label><textarea id="otv-assessment-${phaseId}" class="form-textarea" rows="2"></textarea></div>
+                    <div class="form-group" style="margin-top:8px;"><label class="form-label">Toxicity summary *</label><textarea id="otv-toxicity-${phaseId}" class="form-textarea" rows="2"></textarea></div>
+                    <div class="form-group" style="margin-top:8px;"><label class="form-label">Plan *</label><textarea id="otv-plan-${phaseId}" class="form-textarea" rows="2"></textarea></div>
+                    <div class="form-grid-2" style="margin-top:8px;">
+                        <div class="form-group"><label class="form-label">Weight (kg)</label><input type="number" step="0.1" id="otv-weight-${phaseId}" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Performance status</label><input type="text" id="otv-perf-${phaseId}" class="form-input" placeholder="e.g. ECOG 1" /></div>
+                    </div>
+                    <button class="btn-navy" style="margin-top:8px;" onclick="submitRadiationOtv(${phaseId})">Record Visit</button>
+                `;
+            } catch (err) { el.innerHTML = `<p style="color:var(--rose-badge-text); font-size:12px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function submitRadiationOtv(phaseId) {
+            try {
+                await Api.post(`${CCA_API}/radiation-phases/${phaseId}/otv`, {
+                    assessment: document.getElementById(`otv-assessment-${phaseId}`).value,
+                    toxicity_summary: document.getElementById(`otv-toxicity-${phaseId}`).value,
+                    plan: document.getElementById(`otv-plan-${phaseId}`).value,
+                    weight_kg: document.getElementById(`otv-weight-${phaseId}`).value ? Number(document.getElementById(`otv-weight-${phaseId}`).value) : undefined,
+                    performance_status: document.getElementById(`otv-perf-${phaseId}`).value || undefined,
+                });
+                toast('On-treatment visit recorded', 'success');
+                document.getElementById(`rt-otv-${phaseId}`).style.display = 'none';
+                viewRadiationPhaseOtv(phaseId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
         // ---------------------------------------------------------------

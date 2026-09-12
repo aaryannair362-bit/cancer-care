@@ -61,10 +61,12 @@
         .wl-label { font-size: 11px; color: var(--ink-500); text-transform: uppercase; margin-bottom: 2px; }
         .wl-value { font-size: 13.5px; font-weight: 700; color: var(--ink-900); }
         .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+        .form-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 16px; }
         .form-group { display: flex; flex-direction: column; gap: 6px; }
         .form-label { font-size: 12px; font-weight: 600; color: var(--ink-700); }
         .form-input, .form-select, .form-textarea { width: 100%; height: 38px; padding: 0 12px; background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; color: var(--ink-900); outline: none; }
         .form-textarea { height: auto; padding: 10px 12px; }
+        .form-checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-800); margin-bottom: 10px; }
         .patient-banner { background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 16px 20px; display: grid; grid-template-columns: 1.2fr 1.3fr 1.3fr 1fr; gap: 16px; margin-bottom: 20px; }
         .banner-label { font-size: 11px; color: var(--ink-400); font-weight: 600; text-transform: uppercase; margin-bottom: 4px; }
         .banner-value { font-size: 13.5px; font-weight: 600; color: var(--ink-900); }
@@ -333,34 +335,120 @@
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
         }
 
+        // Structured report fields the pathologist personally types (matches backend's
+        // _PATHOLOGY_REQUIRED_FOR_FINALIZE + the rest of Product 1's real field set) --
+        // stage_group is free text the pathologist enters, never derived from path_t/n/m.
+        const PATHOLOGY_FIELDS = [
+            'site', 'specimen', 'accession', 'histology', 'grade', 'tumour_size_mm', 'tumour_extent',
+            'margin_status', 'closest_margin_mm', 'nodes_examined', 'nodes_positive',
+            'path_t', 'path_n', 'path_m', 'stage_group',
+        ];
+
         async function openPathologyOrder(orderId) {
             const detail = document.getElementById('pathology-order-detail');
             try {
                 const data = await Api.get(`${CCA_API}/pathology/orders/${orderId}`);
                 const o = data.order;
-                const draft = data.results.find(r => r.report_status === 'Draft');
+                const current = data.results.find(r => !r.superseded_by_id);
+                const sr = (current && current.structured_report) || {};
+                const isFinalized = current && current.report_status === 'Finalized';
+                const val = k => escapeHtml(sr[k] != null ? String(sr[k]) : '');
+
                 detail.innerHTML = `
-                    <div class="section-title">${escapeHtml(o.item_name)}</div>
+                    <div class="section-title">${escapeHtml(o.item_name)} ${current ? `<span class="badge ${isFinalized ? 'badge-green' : 'badge-amber'}" style="margin-left:8px;">${escapeHtml(current.report_status)}</span>` : ''}</div>
                     <div class="section-sub" style="margin-bottom:14px;">Indication: ${escapeHtml(o.clinical_indication || 'Not recorded')}</div>
-                    <div class="form-group" style="margin-bottom:14px;"><label class="form-label">Findings / Diagnosis</label><textarea id="path-findings" class="form-textarea" rows="4">${escapeHtml(draft ? draft.findings_text || '' : '')}</textarea></div>
-                    <button class="btn-outline" onclick="submitPathologyReport(${orderId})">💾 Save Draft</button>
-                    ${draft ? `<button class="btn-navy" onclick="submitPathologyFinalize(${draft.id})">✍️ Finalize Report</button>` : ''}
+                    ${current && current.amendment_reason ? `<div style="background:var(--amber-badge-bg); color:var(--amber-badge-text); padding:8px 12px; border-radius:var(--radius-sm); font-size:12.5px; margin-bottom:14px;">Amendment of report #${current.supersedes_id} — ${escapeHtml(current.amendment_reason)}</div>` : ''}
+                    <fieldset id="path-fieldset-${orderId}" ${isFinalized ? 'disabled' : ''} style="border:none; padding:0;">
+                        <div class="form-grid-3">
+                            <div class="form-group"><label class="form-label">Site *</label><input type="text" id="path-site" class="form-input" value="${val('site')}" /></div>
+                            <div class="form-group"><label class="form-label">Specimen *</label><input type="text" id="path-specimen" class="form-input" value="${val('specimen')}" placeholder="e.g. Core needle biopsy" /></div>
+                            <div class="form-group"><label class="form-label">Accession</label><input type="text" id="path-accession" class="form-input" value="${val('accession')}" /></div>
+                        </div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Histology *</label><input type="text" id="path-histology" class="form-input" value="${val('histology')}" /></div>
+                            <div class="form-group"><label class="form-label">Grade</label><input type="text" id="path-grade" class="form-input" value="${val('grade')}" /></div>
+                        </div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Tumour size (mm)</label><input type="number" step="0.1" id="path-tumour_size_mm" class="form-input" value="${val('tumour_size_mm')}" /></div>
+                            <div class="form-group"><label class="form-label">Tumour extent</label><input type="text" id="path-tumour_extent" class="form-input" value="${val('tumour_extent')}" /></div>
+                        </div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Margin status</label><input type="text" id="path-margin_status" class="form-input" value="${val('margin_status')}" /></div>
+                            <div class="form-group"><label class="form-label">Closest margin (mm)</label><input type="number" step="0.1" id="path-closest_margin_mm" class="form-input" value="${val('closest_margin_mm')}" /></div>
+                        </div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Nodes examined</label><input type="number" id="path-nodes_examined" class="form-input" value="${val('nodes_examined')}" /></div>
+                            <div class="form-group"><label class="form-label">Nodes positive</label><input type="number" id="path-nodes_positive" class="form-input" value="${val('nodes_positive')}" /></div>
+                        </div>
+                        <div class="form-checkbox-row"><input type="checkbox" id="path-lvi" ${sr.lymphovascular_invasion ? 'checked' : ''}/> <label for="path-lvi">Lymphovascular invasion present</label></div>
+                        <div class="form-checkbox-row"><input type="checkbox" id="path-pni" ${sr.perineural_invasion ? 'checked' : ''}/> <label for="path-pni">Perineural invasion present</label></div>
+                        <div class="form-grid-3">
+                            <div class="form-group"><label class="form-label">Path T</label><input type="text" id="path-path_t" class="form-input" value="${val('path_t')}" /></div>
+                            <div class="form-group"><label class="form-label">Path N</label><input type="text" id="path-path_n" class="form-input" value="${val('path_n')}" /></div>
+                            <div class="form-group"><label class="form-label">Path M</label><input type="text" id="path-path_m" class="form-input" value="${val('path_m')}" /></div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:14px;"><label class="form-label">Stage group</label><input type="text" id="path-stage_group" class="form-input" value="${val('stage_group')}" /></div>
+                        <div class="form-group" style="margin-bottom:14px;"><label class="form-label">Final Diagnosis / Comment</label><textarea id="path-findings" class="form-textarea" rows="4">${escapeHtml(current ? current.findings_text || '' : '')}</textarea></div>
+                    </fieldset>
+                    ${!isFinalized ? `
+                        <button class="btn-outline" onclick="submitPathologyReport(${orderId})">💾 Save Draft</button>
+                        ${current ? `<button class="btn-navy" onclick="submitPathologyFinalize(${current.id}, ${orderId})">✍️ Finalize Report</button>` : ''}
+                    ` : `
+                        <button class="btn-outline" onclick="toggleAmendForm(${orderId})">📝 Amend Report</button>
+                        <div id="amend-form-${orderId}"></div>
+                    `}
                 `;
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
+        function toggleAmendForm(orderId) {
+            const host = document.getElementById(`amend-form-${orderId}`);
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div class="form-group" style="margin-top:12px;"><label class="form-label">Amendment reason *</label><textarea id="amend-reason-${orderId}" class="form-textarea" rows="2"></textarea></div>
+                <button class="btn-navy" onclick="submitPathologyAmendment(${orderId})">Start Amendment</button>
+            `;
+        }
+
+        async function submitPathologyAmendment(orderId) {
+            const reason = document.getElementById(`amend-reason-${orderId}`).value;
+            if (!reason) { toast('Amendment reason is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/pathology/orders/${orderId}/report`, {
+                    amendment_reason: reason,
+                    findings_text: document.getElementById('path-findings').value,
+                    structured_report: _collectPathologyFields(),
+                });
+                toast('Amendment started -- edit and re-finalize below', 'success');
+                openPathologyOrder(orderId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function _collectPathologyFields() {
+            const sr = {};
+            PATHOLOGY_FIELDS.forEach(k => { const v = document.getElementById(`path-${k}`).value; if (v !== '') sr[k] = v; });
+            sr.lymphovascular_invasion = document.getElementById('path-lvi').checked;
+            sr.perineural_invasion = document.getElementById('path-pni').checked;
+            return sr;
+        }
+
         async function submitPathologyReport(orderId) {
             try {
-                await Api.post(`${CCA_API}/pathology/orders/${orderId}/report`, { findings_text: document.getElementById('path-findings').value });
+                await Api.post(`${CCA_API}/pathology/orders/${orderId}/report`, {
+                    findings_text: document.getElementById('path-findings').value,
+                    structured_report: _collectPathologyFields(),
+                });
                 toast('Report draft saved', 'success');
                 openPathologyOrder(orderId);
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
-        async function submitPathologyFinalize(resultId) {
+        async function submitPathologyFinalize(resultId, orderId) {
             try {
                 await Api.post(`${CCA_API}/pathology/results/${resultId}/finalize`);
                 toast('Report finalized', 'success');
-                loadPathologyWorklist();
+                await loadPathologyWorklist();
+                openPathologyOrder(orderId);
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

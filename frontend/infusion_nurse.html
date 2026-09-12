@@ -322,6 +322,7 @@
             ['monitoring', 'Monitoring'],
             ['blood', 'Blood Transfusion'],
             ['completion', 'Completion'],
+            ['fullmar', 'Full MAR'],
         ];
 
         async function loadTreatmentDayAssessment() {
@@ -365,7 +366,7 @@
         // (matches the backend contract -- see cca.py's _get_order_for_workspace). Overview and
         // Pre-Treatment (CTCAE toxicity, lab placeholder) are order-independent -- a nurse can
         // record a toxicity assessment before any order exists for this cycle.
-        const SUBTABS_REQUIRING_ORDER = new Set(['orders', 'administration', 'monitoring', 'blood', 'completion']);
+        const SUBTABS_REQUIRING_ORDER = new Set(['orders', 'administration', 'monitoring', 'blood', 'completion', 'fullmar']);
 
         function renderSubtab(key) {
             const el = document.getElementById('subtab-content');
@@ -380,6 +381,7 @@
             if (key === 'monitoring') return renderMonitoringTab(el);
             if (key === 'blood') return renderBloodTab(el);
             if (key === 'completion') return renderCompletionTab(el);
+            if (key === 'fullmar') return renderFullMarTab(el);
         }
 
         // ---- Persistent actions: Hold/Escalate, Reaction/Emergency, Extravasation ----
@@ -609,8 +611,11 @@
                 const c = data.safety_check || {};
                 card.innerHTML = `
                     <div class="section-title">Pre-Treatment Safety Checklist</div>
-                    <p class="section-sub" style="margin:4px 0 14px;">Two-identifier verification, order/cycle confirmation, allergy/symptom review and lab-review acknowledgement before proceeding.</p>
-                    <div class="form-checkbox-row"><input type="checkbox" id="sc-identity" ${c.identity_verified ? 'checked' : ''}/> <label for="sc-identity">Identity verified (two identifiers)</label></div>
+                    <p class="section-sub" style="margin:4px 0 14px;">At least 2 of 3 identifiers must match before identity can be marked verified, plus order/cycle confirmation, allergy/symptom review and lab-review acknowledgement.</p>
+                    <div class="form-checkbox-row"><input type="checkbox" id="sc-name-matched" ${c.name_matched ? 'checked' : ''}/> <label for="sc-name-matched">Name matches</label></div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="sc-mrn-matched" ${c.mrn_matched ? 'checked' : ''}/> <label for="sc-mrn-matched">MRN matches</label></div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="sc-dob-matched" ${c.dob_matched ? 'checked' : ''}/> <label for="sc-dob-matched">Date of birth matches</label></div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="sc-identity" ${c.identity_verified ? 'checked' : ''}/> <label for="sc-identity">Identity verified (requires at least 2 of 3 identifiers above)</label></div>
                     <div class="form-group"><label class="form-label">Identity method</label><input type="text" id="sc-identity-method" class="form-input" value="${escapeHtml(c.identity_method || '')}" placeholder="e.g. Name + MRN confirmed verbally and against wristband" /></div>
                     <div class="form-checkbox-row"><input type="checkbox" id="sc-order" ${c.order_cycle_confirmed ? 'checked' : ''}/> <label for="sc-order">Signed order and correct cycle/day confirmed</label></div>
                     <div class="form-checkbox-row"><input type="checkbox" id="sc-allergy" ${c.allergy_review_done ? 'checked' : ''}/> <label for="sc-allergy">Allergy / previous reaction reviewed with patient</label></div>
@@ -628,6 +633,9 @@
             try {
                 await Api.post(`${CCA_API}/treatment/safety-check`, {
                     patient_id: currentPatientId, order_id: currentOrderId,
+                    name_matched: document.getElementById('sc-name-matched').checked,
+                    mrn_matched: document.getElementById('sc-mrn-matched').checked,
+                    dob_matched: document.getElementById('sc-dob-matched').checked,
                     identity_verified: document.getElementById('sc-identity').checked,
                     identity_method: document.getElementById('sc-identity-method').value || null,
                     order_cycle_confirmed: document.getElementById('sc-order').checked,
@@ -794,12 +802,24 @@
             } catch (err) { card.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
         }
 
+        const IV_CHECKLIST_ITEMS = [
+            ['drug', 'Drug matches order'], ['dose', 'Dose matches order'], ['volume_diluent', 'Volume / diluent correct'],
+            ['route', 'Route correct'], ['rate', 'Rate / duration correct'], ['expiry', 'Expiry checked'],
+            ['physical_integrity', 'Physical integrity (no particulates/damage)'], ['sequence', 'Sequence position correct'],
+            ['pump_settings', 'Pump settings correct'],
+        ];
+        const COMPLETION_STATUSES = ['Administered', 'Partially Administered', 'Held', 'Stopped'];
+        const MAR_VARIANCE_TYPES = ['None', 'Dose variance', 'Rate variance', 'Route variance', 'Timing variance', 'Sequence variance', 'Other'];
+        const MAR_VARIANCE_REASONS = ['Clinician instruction', 'Infusion reaction', 'Access issue', 'Patient condition', 'Operational delay', 'Product issue', 'Other'];
+
         function medicationCardHtml(m) {
             const actions = [];
             if (m.status === 'Pending' || m.status === 'Stopped') actions.push(['START', 'Start']);
             if (m.status === 'InProgress') { actions.push(['PAUSE', 'Pause']); actions.push(['COMPLETE', 'Complete']); actions.push(['STOP', 'Stop']); }
             if (m.status === 'Paused') { actions.push(['RESUME', 'Resume']); actions.push(['COMPLETE', 'Complete']); actions.push(['STOP', 'Stop']); }
             if (m.status === 'Pending') actions.push(['OMIT', 'Omit']);
+            const iv = m.independent_verification;
+            const needsIV = m.category === 'Antineoplastic';
             return `
                 <div class="med-card">
                     <div class="med-card-head">
@@ -808,16 +828,24 @@
                         <span class="badge ${MED_STATUS_BADGE[m.status] || 'badge-amber'}">${escapeHtml(m.status)}</span>
                     </div>
                     <div class="med-card-meta">
-                        Verified: ${m.product_label_verified ? '✔ Product/label' : '— Product/label'} · ${m.expiry_integrity_checked ? '✔ Expiry/integrity' : '— Expiry/integrity'}${m.second_verifier_name ? ' · 2nd verifier: ' + escapeHtml(m.second_verifier_name) : ''}
+                        Verified: ${m.product_label_verified ? '✔ Product/label' : '— Product/label'} · ${m.expiry_integrity_checked ? '✔ Expiry/integrity' : '— Expiry/integrity'} · ${m.label_match_confirmed ? '✔ Bedside label match' : '— Bedside label match'}${m.second_verifier_name ? ' · 2nd verifier: ' + escapeHtml(m.second_verifier_name) : ''}
                     </div>
+                    ${needsIV ? `<div class="med-card-meta">${iv ? `✔ Independent verification by ${escapeHtml(iv.verified_by)} at ${new Date(iv.verified_at).toLocaleString()}` : '— Independent verification required before Start (must be a different person)'}</div>` : ''}
                     <div class="med-card-meta" style="font-weight:600;">
                         ${m.start_time ? `Started: ${new Date(m.start_time).toLocaleString()}` : 'Not started yet'}${m.end_time ? ` · Completed: ${new Date(m.end_time).toLocaleString()}` : ''}
                     </div>
+                    ${m.completion_status ? `<div class="med-card-meta">Completion: ${escapeHtml(m.completion_status)}${m.reaction_occurred ? ' · Reaction occurred' : ''}${m.variance_type && m.variance_type !== 'None' ? ' · Variance: ' + escapeHtml(m.variance_type) : ''}${m.variance_reason ? ' (' + escapeHtml(m.variance_reason) + ')' : ''}</div>` : ''}
                     ${m.omission_reason ? `<div class="med-card-meta" style="color:var(--rose-badge-text);">Reason: ${escapeHtml(m.omission_reason)}</div>` : ''}
                     <div class="med-card-actions">
                         ${!m.product_label_verified || !m.expiry_integrity_checked ? `<button class="btn-outline btn-sm" onclick="quickVerify(${m.id})">Verify Product/Expiry</button>` : ''}
-                        ${actions.map(([evt, label]) => `<button class="${evt === 'STOP' || evt === 'OMIT' ? 'btn-danger' : 'btn-navy'} btn-sm" onclick="submitMedicationEvent(${m.id}, '${evt}')">${label}</button>`).join('')}
+                        ${!m.label_match_confirmed ? `<button class="btn-outline btn-sm" onclick="confirmLabelMatch(${m.id})">Confirm Bedside Label Match</button>` : ''}
+                        ${needsIV && !iv ? `<button class="btn-outline btn-sm" onclick="toggleIVPanel(${m.id})">Independent Verification</button>` : ''}
+                        ${actions.map(([evt, label]) => {
+                            if (evt === 'COMPLETE' || evt === 'STOP') return `<button class="${evt === 'STOP' ? 'btn-danger' : 'btn-navy'} btn-sm" onclick="toggleCompletionPanel(${m.id}, '${evt}')">${label}</button>`;
+                            return `<button class="${evt === 'OMIT' ? 'btn-danger' : 'btn-navy'} btn-sm" onclick="submitMedicationEvent(${m.id}, '${evt}')">${label}</button>`;
+                        }).join('')}
                     </div>
+                    <div id="med-panel-${m.id}"></div>
                 </div>
             `;
         }
@@ -830,10 +858,91 @@
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
+        async function confirmLabelMatch(adminId) {
+            try {
+                await Api.post(`${CCA_API}/treatment/medications/${adminId}/verify`, { label_match_confirmed: true });
+                toast('Bedside label match confirmed', 'success');
+                loadMedications();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function toggleIVPanel(adminId) {
+            const host = document.getElementById(`med-panel-${adminId}`);
+            if (!host) return;
+            if (host.dataset.open === 'iv') { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = 'iv';
+            host.innerHTML = `
+                <div class="inline-panel" style="margin-top:10px;">
+                    <div class="inline-panel-title">Independent Verification (chairside double-check)</div>
+                    <p class="section-sub" style="margin-bottom:10px;">Must be performed by someone other than whoever starts this medication. All items must be confirmed.</p>
+                    ${IV_CHECKLIST_ITEMS.map(([key, label]) => `<div class="form-checkbox-row"><input type="checkbox" id="iv-${adminId}-${key}"/> <label for="iv-${adminId}-${key}">${escapeHtml(label)}</label></div>`).join('')}
+                    <button class="btn-navy" onclick="submitIndependentVerification(${adminId})">Save Independent Verification</button>
+                    <button class="btn-outline" style="margin-left:8px;" onclick="toggleIVPanel(${adminId})">Cancel</button>
+                </div>
+            `;
+        }
+
+        async function submitIndependentVerification(adminId) {
+            const checklist = {};
+            let allChecked = true;
+            IV_CHECKLIST_ITEMS.forEach(([key]) => {
+                const checked = document.getElementById(`iv-${adminId}-${key}`).checked;
+                checklist[key] = checked;
+                if (!checked) allChecked = false;
+            });
+            if (!allChecked) { toast('All checklist items must be confirmed', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/treatment/medications/${adminId}/independent-verification`, { checklist });
+                toast('Independent verification recorded', 'success');
+                loadMedications();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function toggleCompletionPanel(adminId, eventType) {
+            const host = document.getElementById(`med-panel-${adminId}`);
+            if (!host) return;
+            if (host.dataset.open === eventType) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = eventType;
+            host.innerHTML = `
+                <div class="inline-panel${eventType === 'STOP' ? ' reaction' : ''}" style="margin-top:10px;">
+                    <div class="inline-panel-title">${eventType === 'STOP' ? 'Stop' : 'Complete'} Medication</div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Completion status *</label><select id="comp-status-${adminId}" class="form-select"><option value="">— select —</option>${COMPLETION_STATUSES.map(s => `<option ${eventType === 'STOP' && s === 'Stopped' ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
+                        <div class="form-group"><label class="form-label">Variance type</label><select id="comp-variance-type-${adminId}" class="form-select">${MAR_VARIANCE_TYPES.map(v => `<option>${v}</option>`).join('')}</select></div>
+                    </div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="comp-reaction-${adminId}"/> <label for="comp-reaction-${adminId}">A reaction occurred</label></div>
+                    <div class="form-group"><label class="form-label">Variance reason (required unless a clean Administered outcome)</label><select id="comp-variance-reason-${adminId}" class="form-select"><option value="">— none —</option>${MAR_VARIANCE_REASONS.map(r => `<option>${r}</option>`).join('')}</select></div>
+                    <div class="form-group"><label class="form-label">Note ${eventType === 'STOP' ? '(also used as the documented stop reason)' : ''}</label><textarea id="comp-note-${adminId}" class="form-textarea"></textarea></div>
+                    <button class="${eventType === 'STOP' ? 'btn-danger' : 'btn-navy'}" onclick="submitMedicationCompletion(${adminId}, '${eventType}')">${eventType === 'STOP' ? 'Confirm Stop' : 'Confirm Complete'}</button>
+                    <button class="btn-outline" style="margin-left:8px;" onclick="toggleCompletionPanel(${adminId}, '${eventType}')">Cancel</button>
+                </div>
+            `;
+        }
+
+        async function submitMedicationCompletion(adminId, eventType) {
+            const status = document.getElementById(`comp-status-${adminId}`).value;
+            if (!status) { toast('Completion status is required', 'error'); return; }
+            const note = document.getElementById(`comp-note-${adminId}`).value || null;
+            if (eventType === 'STOP' && !note) { toast('A documented reason is required to stop', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/treatment/medications/${adminId}/event`, {
+                    event_type: eventType,
+                    completion_status: status,
+                    reaction_occurred: document.getElementById(`comp-reaction-${adminId}`).checked,
+                    variance_type: document.getElementById(`comp-variance-type-${adminId}`).value,
+                    variance_reason: document.getElementById(`comp-variance-reason-${adminId}`).value || null,
+                    variance_note: note,
+                    notes: note,
+                });
+                toast(`Recorded: ${eventType}`, 'success');
+                loadMedications();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
         async function submitMedicationEvent(adminId, eventType) {
             let notes = null;
-            if (eventType === 'STOP' || eventType === 'OMIT') {
-                notes = prompt(`Reason for ${eventType === 'STOP' ? 'stopping' : 'omitting'} this medication:`);
+            if (eventType === 'OMIT') {
+                notes = prompt('Reason for omitting this medication:');
                 if (!notes) { toast('A documented reason is required', 'error'); return; }
             }
             try {
@@ -1102,10 +1211,12 @@
                         <p class="section-sub">Completed by ${escapeHtml(c.completed_by)} at ${escapeHtml(new Date(c.completed_at).toLocaleString())}</p>
                         <div class="form-grid-2" style="margin-top:12px;">
                             <div><div class="wl-label">Disposition</div><div class="wl-value" style="font-size:13px;">${escapeHtml(c.disposition || '—')}</div></div>
+                            <div><div class="wl-label">Treatment Tolerance</div><div class="wl-value" style="font-size:13px;">${escapeHtml(c.tolerance || '—')}</div></div>
                             <div><div class="wl-label">Access Status</div><div class="wl-value" style="font-size:13px;">${escapeHtml(c.access_status || '—')}</div></div>
                             <div><div class="wl-label">Next Treatment Date</div><div class="wl-value" style="font-size:13px;">${escapeHtml(c.next_treatment_date || '—')}</div></div>
                             <div><div class="wl-label">Next Labs Required</div><div class="wl-value" style="font-size:13px;">${escapeHtml(c.next_labs_required || '—')}</div></div>
                         </div>
+                        <div style="margin-top:16px;"><button class="btn-outline" onclick="switchSubtab('fullmar')">View Full MAR Report</button></div>
                     `;
                 } else {
                     card.innerHTML = `
@@ -1117,6 +1228,9 @@
                         </div>
                         <div class="form-grid-2">
                             <div class="form-group"><label class="form-label">Disposition</label><select id="comp-disposition" class="form-select"><option value="">— not specified —</option><option>Completed</option><option>Partially Completed</option><option>Not Completed</option><option>Discontinued</option></select></div>
+                            <div class="form-group"><label class="form-label">Treatment tolerance</label><select id="comp-tolerance" class="form-select"><option value="">— not specified —</option><option>Good</option><option>Mild symptoms</option><option>Significant reaction</option></select></div>
+                        </div>
+                        <div class="form-grid-2">
                             <div class="form-group"><label class="form-label">Access status</label><select id="comp-access" class="form-select"><option>Flushed</option><option>Removed</option><option>Locked</option><option>Left in situ</option></select></div>
                         </div>
                         <div class="form-group"><label class="form-label">Patient education / red flags given</label><textarea id="comp-education" class="form-textarea" placeholder="e.g. Report fever, breathing difficulty, rash, or worsening symptoms"></textarea></div>
@@ -1138,6 +1252,7 @@
                     final_vitals: { free_text: document.getElementById('comp-vitals').value || null },
                     final_symptoms: document.getElementById('comp-symptoms').value || null,
                     disposition: document.getElementById('comp-disposition').value || null,
+                    tolerance: document.getElementById('comp-tolerance').value || null,
                     access_status: document.getElementById('comp-access').value,
                     patient_education_notes: document.getElementById('comp-education').value || null,
                     red_flags_given: document.getElementById('comp-red-flags').checked,
@@ -1147,6 +1262,54 @@
                 toast('Treatment day completed and locked', 'success');
                 renderCompletionTab(document.getElementById('subtab-content'));
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---- Full MAR tab: read-only aggregation of everything captured for this order ----
+
+        async function renderFullMarTab(el) {
+            el.innerHTML = `<div class="section-card" id="fullmar-card"><p class="empty-hint">Loading Full MAR report…</p></div>`;
+            const card = document.getElementById('fullmar-card');
+            try {
+                const data = await Api.get(`${CCA_API}/treatment/${currentOrderId}/full-mar?patient_id=${currentPatientId}`);
+                const sc = data.safety_check, va = data.vascular_access, comp = data.completion;
+                card.innerHTML = `
+                    <div class="section-title">Full MAR Report — Treatment Order #${data.treatment_order_id}</div>
+                    <p class="section-sub" style="margin:4px 0 16px;">Read-only view stitching together every artifact already captured for this treatment day. Nothing here is computed — each item links back to where it was recorded.</p>
+
+                    <div class="section-head"><div class="section-title" style="font-size:14px;">Pre-Treatment Safety Check</div></div>
+                    ${sc ? `<div class="med-card-meta">Identity verified: ${sc.identity_verified ? '✔' : '✘'} (Name ${sc.name_matched ? '✔' : '✘'} · MRN ${sc.mrn_matched ? '✔' : '✘'} · DOB ${sc.dob_matched ? '✔' : '✘'}) · Order/cycle confirmed: ${sc.order_cycle_confirmed ? '✔' : '✘'} · Allergy review: ${sc.allergy_review_done ? '✔' : '✘'} · Labs reviewed: ${sc.labs_reviewed ? '✔' : '✘'} — by ${escapeHtml(sc.checked_by)} at ${new Date(sc.checked_at).toLocaleString()}</div>` : '<p class="empty-hint">Not recorded.</p>'}
+
+                    <div class="section-head" style="margin-top:16px;"><div class="section-title" style="font-size:14px;">Vascular Access</div></div>
+                    ${va ? `<div class="med-card-meta">${escapeHtml(va.device_type)}${va.site ? ' · ' + escapeHtml(va.site) : ''} — ${va.access_ready ? 'Ready' : 'Not confirmed ready'} — assessed by ${escapeHtml(va.assessed_by || '—')}</div>` : '<p class="empty-hint">Not recorded.</p>'}
+
+                    <div class="section-head" style="margin-top:16px;"><div class="section-title" style="font-size:14px;">Medications (${data.medications.length})</div></div>
+                    ${data.medications.map(m => `
+                        <div class="med-card">
+                            <div class="med-card-head">
+                                <div class="med-card-title">${escapeHtml(m.medication_name)} <span class="badge badge-blue" style="margin-left:6px;">${escapeHtml(m.category)}</span></div>
+                                <span class="badge ${MED_STATUS_BADGE[m.status] || 'badge-amber'}">${escapeHtml(m.status)}</span>
+                            </div>
+                            <div class="med-card-meta">${escapeHtml(m.dose || '—')} · ${escapeHtml(m.route || '—')} · seq ${escapeHtml(String(m.sequence_no))}</div>
+                            <div class="med-card-meta">Label/expiry verified: ${m.product_label_verified && m.expiry_integrity_checked ? '✔' : '✘'} · Bedside label match: ${m.label_match_confirmed ? '✔' : '✘'}${m.independent_verification ? ` · Independent verification: ✔ by ${escapeHtml(m.independent_verification.verified_by)}` : (m.category === 'Antineoplastic' ? ' · Independent verification: ✘' : '')}</div>
+                            ${m.completion_status ? `<div class="med-card-meta">Completion: ${escapeHtml(m.completion_status)}${m.reaction_occurred ? ' · Reaction occurred' : ''}${m.variance_type && m.variance_type !== 'None' ? ' · Variance: ' + escapeHtml(m.variance_type) + (m.variance_reason ? ' (' + escapeHtml(m.variance_reason) + ')' : '') : ''}</div>` : ''}
+                            ${m.events.length ? `<div class="timeline-item" style="flex-direction:column; border:none; gap:4px; padding-top:6px;">${m.events.map(e => `<div style="font-size:11.5px; color:var(--ink-500);">${new Date(e.performed_at).toLocaleString()} — ${escapeHtml(e.event_type)} by ${escapeHtml(e.performed_by)}${e.notes ? ': ' + escapeHtml(e.notes) : ''}</div>`).join('')}</div>` : ''}
+                        </div>
+                    `).join('') || '<p class="empty-hint">No medications recorded.</p>'}
+
+                    <div class="section-head" style="margin-top:16px;"><div class="section-title" style="font-size:14px;">Pharmacy Releases (${data.pharmacy_releases.length})</div></div>
+                    ${data.pharmacy_releases.map(r => `<div class="med-card-meta">Released by ${escapeHtml(r.released_by)} · 2nd check ${escapeHtml(r.second_check_by || '—')} · dispensed to ${escapeHtml(r.dispensed_to || '—')}</div>`).join('') || '<p class="empty-hint">None (no structured drug lines on this order).</p>'}
+
+                    <div class="section-head" style="margin-top:16px;"><div class="section-title" style="font-size:14px;">Monitoring Observations (${data.monitoring_observations.length})</div></div>
+                    ${data.monitoring_observations.map(o => `<div class="timeline-item"><div class="timeline-time">${escapeHtml(new Date(o.observation_time).toLocaleString())}</div><div><span class="badge badge-blue" style="margin-right:6px;">${escapeHtml(o.phase)}</span>${escapeHtml(o.symptoms || '')} <span style="color:var(--ink-400);">— ${escapeHtml(o.recorded_by || '')}</span></div></div>`).join('') || '<p class="empty-hint">None recorded.</p>'}
+
+                    ${data.holds.length ? `<div class="section-head" style="margin-top:16px;"><div class="section-title" style="font-size:14px;">Holds (${data.holds.length})</div></div>${data.holds.map(h => `<div class="med-card-meta">${escapeHtml(h.hold_type || 'Hold')}: ${escapeHtml(h.reason)}</div>`).join('')}` : ''}
+                    ${data.reactions.length ? `<div class="section-head" style="margin-top:16px;"><div class="section-title" style="font-size:14px;">Reactions (${data.reactions.length})</div></div>${data.reactions.map(r => `<div class="med-card-meta">${escapeHtml(r.symptoms || 'Reaction')}</div>`).join('')}` : ''}
+                    ${data.extravasations.length ? `<div class="section-head" style="margin-top:16px;"><div class="section-title" style="font-size:14px;">Extravasations (${data.extravasations.length})</div></div>${data.extravasations.map(e => `<div class="med-card-meta">${escapeHtml(e.agent)}${e.site ? ' — ' + escapeHtml(e.site) : ''}</div>`).join('')}` : ''}
+
+                    <div class="section-head" style="margin-top:16px;"><div class="section-title" style="font-size:14px;">Completion</div></div>
+                    ${comp ? `<div class="med-card-meta">${escapeHtml(comp.disposition || '—')} · Tolerance: ${escapeHtml(comp.tolerance || '—')} · Completed by ${escapeHtml(comp.completed_by)} at ${new Date(comp.completed_at).toLocaleString()}</div>` : '<p class="empty-hint">Not yet completed.</p>'}
+                `;
+            } catch (err) { card.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
         }
 
         document.addEventListener('DOMContentLoaded', () => { loadPatientList(); });

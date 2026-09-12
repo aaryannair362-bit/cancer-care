@@ -12,7 +12,17 @@ from .models_cca import (
     CCABiomarkerResult, CCAOrder, CCAResult, StagingRecord, StagingEvidence,
     GuidelineContext, ClinicalBrief, MDTCase, MDTDecision, CarePlan,
     CarePlanTask, TreatmentPlan, TreatmentSession, ToxicityEvent,
-    TreatmentClearance, ResponseAssessment, CCAJourneyEvent
+    TreatmentClearance, ResponseAssessment, CCAJourneyEvent,
+    TreatmentOrder, TreatmentEvent, PharmacyReadiness, PreTreatmentSafetyCheck,
+    VascularAccessAssessment, InfusionMedicationAdministration, InfusionAdministrationEvent,
+    InfusionMonitoringObservation, TreatmentHoldEvent, InfusionReactionEvent, ExtravasationEvent,
+    TreatmentDayCompletion, BloodProductAdministration, TransfusionFeedback,
+    PharmacyVerification, PharmacyPreparation, PharmacyRelease,
+    InfusionIndependentVerification,
+)
+from .models_cca_oncology_ext import (
+    TreatmentOrderDrugLine, RadiationPrescription, CCARadiationPhase, RadiationFraction,
+    RadiationInterruption, RadiationOnTreatmentVisit,
 )
 from .cca_engine import calculate_bsa
 
@@ -41,6 +51,22 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             ).all()
         ]
         child_models_by_patient = [
+            # Day Care / Treatment Order / Pharmacy universe (Phases 1-7 and Batches 1-2 of the
+            # Product 1 vs Product 2 gap-closing initiative) -- previously entirely missing from
+            # this reset, so repeated demo/reset calls accumulated stale TreatmentOrder rows that
+            # collided with freshly re-seeded TreatmentSessions. All of these have a direct
+            # patient_id and are deleted before TreatmentOrder itself (their FK parent).
+            PharmacyRelease, PharmacyPreparation, PharmacyVerification, PharmacyReadiness,
+            # Batch 3's per-medication independent chairside double-check -- has its own
+            # patient_id, but must go before its FK parent InfusionMedicationAdministration.
+            InfusionIndependentVerification,
+            InfusionMedicationAdministration, InfusionMonitoringObservation, TreatmentHoldEvent,
+            InfusionReactionEvent, ExtravasationEvent, TreatmentDayCompletion,
+            BloodProductAdministration, TransfusionFeedback, PreTreatmentSafetyCheck,
+            VascularAccessAssessment, TreatmentEvent, TreatmentOrder,
+            # Has its own patient_id -- CCARadiationPhase/RadiationFraction (its FK children,
+            # no patient_id of their own) are already deleted above by this point.
+            RadiationPrescription,
             CCAJourneyEvent, ResponseAssessment, TreatmentClearance, ToxicityEvent,
             TreatmentSession, TreatmentPlan, CarePlanTask, CarePlan, MDTDecision,
             MDTCase, ClinicalBrief, GuidelineContext, StagingRecord,
@@ -60,6 +86,59 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
                 db.query(StagingEvidence).filter(
                     StagingEvidence.staging_record_id.in_(staging_record_ids)
                 ).delete(synchronize_session=False)
+            # TreatmentOrderDrugLine and InfusionAdministrationEvent have no patient_id of
+            # their own either -- delete them via their parent order/administration ids before
+            # TreatmentOrder / InfusionMedicationAdministration are deleted below.
+            order_ids = [
+                row.id for row in db.query(TreatmentOrder.id).filter(
+                    TreatmentOrder.patient_id.in_(org_patient_ids)
+                ).all()
+            ]
+            if order_ids:
+                db.query(TreatmentOrderDrugLine).filter(
+                    TreatmentOrderDrugLine.treatment_order_id.in_(order_ids)
+                ).delete(synchronize_session=False)
+            admin_ids = [
+                row.id for row in db.query(InfusionMedicationAdministration.id).filter(
+                    InfusionMedicationAdministration.patient_id.in_(org_patient_ids)
+                ).all()
+            ]
+            if admin_ids:
+                db.query(InfusionAdministrationEvent).filter(
+                    InfusionAdministrationEvent.administration_id.in_(admin_ids)
+                ).delete(synchronize_session=False)
+            # Radiation course/phase/fraction universe (never cleaned by this reset before --
+            # a pre-existing gap, not specific to Batch 4, but fixed now since Batch 4 adds
+            # Physics QA decision fields directly onto CCARadiationPhase). CCARadiationPhase
+            # and RadiationFraction have no patient_id of their own -- delete them via their
+            # parent prescription/phase ids before RadiationPrescription itself is deleted
+            # below (it does have patient_id, so it's in child_models_by_patient).
+            rx_ids = [
+                row.id for row in db.query(RadiationPrescription.id).filter(
+                    RadiationPrescription.patient_id.in_(org_patient_ids)
+                ).all()
+            ]
+            if rx_ids:
+                phase_ids = [
+                    row.id for row in db.query(CCARadiationPhase.id).filter(
+                        CCARadiationPhase.prescription_id.in_(rx_ids)
+                    ).all()
+                ]
+                if phase_ids:
+                    db.query(RadiationFraction).filter(
+                        RadiationFraction.phase_id.in_(phase_ids)
+                    ).delete(synchronize_session=False)
+                    # Batch 5 (RT Delivery) -- both keyed by phase_id, no patient_id of
+                    # their own, same reasoning as RadiationFraction above.
+                    db.query(RadiationInterruption).filter(
+                        RadiationInterruption.phase_id.in_(phase_ids)
+                    ).delete(synchronize_session=False)
+                    db.query(RadiationOnTreatmentVisit).filter(
+                        RadiationOnTreatmentVisit.phase_id.in_(phase_ids)
+                    ).delete(synchronize_session=False)
+                    db.query(CCARadiationPhase).filter(
+                        CCARadiationPhase.id.in_(phase_ids)
+                    ).delete(synchronize_session=False)
             for model in child_models_by_patient:
                 db.query(model).filter(model.patient_id.in_(org_patient_ids)).delete(synchronize_session=False)
         db.query(CCAPatient).filter(CCAPatient.organization_id == organization_id).delete(synchronize_session=False)

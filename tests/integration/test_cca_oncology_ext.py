@@ -117,10 +117,22 @@ def _create_phase(client, headers, prescription_id, number_of_fractions=25, **ov
     return client.post(f"/api/cca/radiation-prescriptions/{prescription_id}/phases", headers=headers, json=body).json()["phase"]
 
 
+_FULL_PHYSICS_QA_CHECKLIST = {
+    "prescription_plan_concordance": True, "dose_volume_constraint_review": True,
+    "target_oar_coverage_review": True, "machine_deliverability_review": True,
+}
+
+
 def _advance_phase_through_physics_and_approval(client, onc_headers, physicist_headers, phase_id):
     for status_step in ["simulation_pending", "simulation_complete", "contouring", "planning", "physics_qa"]:
         r = client.post(f"/api/cca/radiation-phases/{phase_id}/transition", headers=physicist_headers, json={"status": status_step})
         assert r.status_code == 200, r.text
+    # Batch 4: physician_approved is now gated on a real Physics QA decision (see
+    # test_radiation_physics_qa.py) -- previously physics_qa was a bare signature.
+    qa = client.post(f"/api/cca/radiation-phases/{phase_id}/physics-qa", headers=physicist_headers, json={
+        "decision": "Approved", "checklist": _FULL_PHYSICS_QA_CHECKLIST, "note": "Plan reviewed and deliverable.",
+    })
+    assert qa.status_code == 200, qa.text
     for status_step in ["physician_approved", "treatment_ready"]:
         r = client.post(f"/api/cca/radiation-phases/{phase_id}/transition", headers=onc_headers, json={"status": status_step})
         assert r.status_code == 200, r.text
@@ -176,6 +188,11 @@ def test_planning_steps_require_physicist_and_final_approval_requires_radiation_
 
     rejected_approval = client.post(f"/api/cca/radiation-phases/{phase['id']}/transition", headers=physicist_headers, json={"status": "physician_approved"})
     assert rejected_approval.status_code == 403
+
+    qa = client.post(f"/api/cca/radiation-phases/{phase['id']}/physics-qa", headers=physicist_headers, json={
+        "decision": "Approved", "checklist": _FULL_PHYSICS_QA_CHECKLIST, "note": "Plan reviewed and deliverable.",
+    })
+    assert qa.status_code == 200, qa.text
 
     approved = client.post(f"/api/cca/radiation-phases/{phase['id']}/transition", headers=onc_headers, json={"status": "physician_approved"})
     assert approved.status_code == 200
@@ -261,13 +278,27 @@ def test_phase_can_be_interrupted_and_resumed(client, auth_headers, db_session, 
     fractions = client.get(f"/api/cca/radiation-phases/{phase['id']}/fractions", headers=onc_headers).json()["fractions"]
     client.post(f"/api/cca/radiation-fractions/{fractions[0]['id']}/event", headers=auth_headers(radiologist), json={"status": "delivered"})
 
-    interrupted = client.post(f"/api/cca/radiation-phases/{phase['id']}/transition", headers=onc_headers, json={"status": "interrupted"})
+    missing_reason = client.post(f"/api/cca/radiation-phases/{phase['id']}/transition", headers=onc_headers, json={"status": "interrupted"})
+    assert missing_reason.status_code == 422
+
+    interrupted = client.post(f"/api/cca/radiation-phases/{phase['id']}/transition", headers=onc_headers, json={
+        "status": "interrupted", "reason": "Machine down for calibration.", "category": "Machine Issue",
+        "compensation_plan": "Add one fraction at the end of the course.",
+    })
     assert interrupted.status_code == 200
     assert interrupted.json()["phase"]["rt_sub_status"] == "interrupted"
+
+    interruptions = client.get(f"/api/cca/radiation-phases/{phase['id']}/interruptions", headers=onc_headers).json()["interruptions"]
+    assert len(interruptions) == 1
+    assert interruptions[0]["category"] == "Machine Issue"
+    assert interruptions[0]["end_at"] is None
 
     resumed = client.post(f"/api/cca/radiation-phases/{phase['id']}/transition", headers=onc_headers, json={"status": "on_treatment"})
     assert resumed.status_code == 200
     assert resumed.json()["phase"]["rt_sub_status"] == "on_treatment"
+
+    resumed_interruptions = client.get(f"/api/cca/radiation-phases/{phase['id']}/interruptions", headers=onc_headers).json()["interruptions"]
+    assert resumed_interruptions[0]["end_at"] is not None
 
 
 def test_surgical_plan_transition_and_only_surgical_oncologist(client, auth_headers, db_session, oncologist, surg_onc, rad_onc):

@@ -577,6 +577,7 @@
         let currentCarePlanData = null;
         let currentTreatmentPlanId = null;
         let currentTreatmentPlanData = null;
+        let cachedRegimens = [];
         const OWN_MODALITY_KEYWORDS = []; // Medical Oncologist: default/systemic modality (no keyword match needed)
         const DEFAULT_MODALITY = 'Systemic Chemotherapy';
         let selectedIntent = 'Curative';
@@ -1302,11 +1303,28 @@
                     <div class="section-sub" style="margin-bottom:10px; color:var(--ink-700); font-weight:600;">
                         ✓ ${plan.completed_sessions} of ${plan.planned_sessions || '—'} planned sessions completed so far — the last cycle's clearance decision was recorded successfully.
                     </div>` : '';
+                // Prior orders on this plan (any status) -- lets the clinician optionally link
+                // this new order as a revision of one of them (Product 1 gap report item 9:
+                // dose modification / order revision linkage).
+                let priorOrdersData = { treatment_orders: [] };
+                try { priorOrdersData = await Api.get(`${CCA_API}/patients/${currentPatientId}/treatment-orders`); } catch (err) { /* optional */ }
+                const priorOrders = (priorOrdersData.treatment_orders || []).filter(o => o.treatment_plan_id === plan.id);
+                const revisionSection = priorOrders.length ? `
+                    <details style="margin-bottom:12px;">
+                        <summary style="cursor:pointer; font-size:12.5px; font-weight:600; color:var(--ink-700);">This is a revision of a prior order (optional)</summary>
+                        <div class="form-grid-2" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Revises order</label><select id="to-supersedes" class="form-select"><option value="">— not a revision —</option>${priorOrders.map(o => `<option value="${o.id}">Order #${o.id} (${escapeHtml(o.status)})</option>`).join('')}</select></div>
+                            <div class="form-group"><label class="form-label">Dose modification</label><input type="text" id="to-dose-mod" class="form-input" placeholder="e.g. 75%" /></div>
+                        </div>
+                        <div class="form-group"><label class="form-label">Revision reason</label><input type="text" id="to-revision-reason" class="form-input" placeholder="e.g. Grade 2 neuropathy, dose reduced." /></div>
+                    </details>
+                ` : '';
                 return `
                     <div class="section-card">
                         <div class="section-title">Treatment Order</div>
                         ${progressNote}
-                        <div class="section-sub" style="margin-bottom:12px;">Writes an executable order against session #${nextCycle} of this signed Treatment Plan. Must be signed before Day-Care can record a clearance decision.</div>
+                        <div class="section-sub" style="margin-bottom:12px;">Writes an executable order against session #${nextCycle} of this signed Treatment Plan. If the plan has a regimen selected, its drug lines are pre-populated for you to review/edit below before signing.</div>
+                        ${revisionSection}
                         <button class="btn-navy" onclick="submitCreateTreatmentOrder(${plan.id})">Create Treatment Order — Cycle ${nextCycle}</button>
                         <div id="to-create-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
                     </div>
@@ -1314,13 +1332,39 @@
             }
 
             if (order.status === 'DRAFT') {
+                const supportiveCareBlock = order.supportive_care ? `
+                    <div class="section-card">
+                        <div class="section-title" style="font-size:14px;">Supportive Care (from Regimen)</div>
+                        <div class="section-sub" style="margin-top:6px;">${order.supportive_care.premedications ? '<strong>Premedications:</strong> ' + escapeHtml(order.supportive_care.premedications) + '<br/>' : ''}${order.supportive_care.hydration ? '<strong>Hydration:</strong> ' + escapeHtml(order.supportive_care.hydration) + '<br/>' : ''}${order.supportive_care.supportive_therapy ? '<strong>Supportive Therapy:</strong> ' + escapeHtml(order.supportive_care.supportive_therapy) : ''}</div>
+                    </div>` : '';
+                const drugLinesRows = (order.drug_lines || []).map(l => `
+                    <div class="participant-row" id="to-line-${l.id}" style="flex-direction:column; align-items:stretch; gap:6px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <div><strong>${escapeHtml(l.generic_name)}</strong> <span style="color:var(--ink-500); font-size:12px;">${escapeHtml(l.category || '')} · ${escapeHtml(l.route || '—')}${l.standard_protocol_dose ? ' · ref: ' + escapeHtml(l.standard_protocol_dose) : ''}</span></div>
+                            <button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="deleteOrderDrugLine(${order.id}, ${l.id})">Remove</button>
+                        </div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Planned dose (this order)</label><input type="text" id="to-planned-dose-${l.id}" class="form-input" value="${escapeHtml(l.planned_dose || '')}" placeholder="e.g. 120mg" /></div>
+                            <div><button class="btn-outline" style="font-size:11px; padding:8px 10px; margin-top:20px;" onclick="saveOrderDrugLineDose(${order.id}, ${l.id})">Save Dose</button></div>
+                        </div>
+                    </div>
+                `).join('');
                 return `
                     <div class="section-card">
                         <div class="section-title">Treatment Order <span class="badge badge-amber">DRAFT</span></div>
-                        <div class="section-sub" style="margin-bottom:12px;">Session #${order.treatment_session_id}. Not yet executable — sign to authorize.</div>
+                        <div class="section-sub" style="margin-bottom:12px;">Session #${order.treatment_session_id}. Not yet executable — review the dosing panel below, then sign to authorize.</div>
+                        ${order.revision_reason || order.dose_modification_percent ? `<div class="disclaimer-banner" style="margin-bottom:12px;">Revision of order #${order.supersedes_id}${order.dose_modification_percent ? ' — dose modification: ' + escapeHtml(order.dose_modification_percent) : ''}${order.revision_reason ? ' — ' + escapeHtml(order.revision_reason) : ''}</div>` : ''}
+                        ${drugLinesRows || '<p class="section-sub">No drug lines yet — this plan has no regimen selected, or add lines manually below.</p>'}
+                        <div class="form-grid-2" style="margin-top:12px;">
+                            <div class="form-group"><label class="form-label">Add drug (generic name)</label><input type="text" id="to-new-drug-name" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Category</label><select id="to-new-drug-category" class="form-select"><option>Antineoplastic</option><option>Premedication</option><option>Other</option></select></div>
+                        </div>
+                        <button class="btn-outline" onclick="addOrderDrugLine(${order.id})">+ Add Drug Line</button>
+                        <hr style="margin:14px 0; border:none; border-top:1px solid var(--line);" />
                         <button class="btn-navy" onclick="submitSignTreatmentOrder(${order.id})">✍️ Sign Treatment Order</button>
                         <div id="to-sign-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
                     </div>
+                    ${supportiveCareBlock}
                 `;
             }
 
@@ -1332,11 +1376,19 @@
                 return `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`;
             }
             const medsSection = await renderMedicationAdministrationStatusCard(order);
+            const signedDrugLinesSection = (order.drug_lines && order.drug_lines.length) ? `
+                <div class="section-card">
+                    <div class="section-title" style="font-size:14px;">Dosing Panel (locked, as signed)</div>
+                    ${order.drug_lines.map(l => `<div class="participant-row">${escapeHtml(l.generic_name)} <span style="color:var(--ink-500); font-size:12px;">${escapeHtml(l.category || '')} · ${escapeHtml(l.route || '—')} · planned: ${escapeHtml(l.planned_dose || '—')}${l.standard_protocol_dose ? ' (ref: ' + escapeHtml(l.standard_protocol_dose) + ')' : ''}</span></div>`).join('')}
+                </div>` : '';
+            const pharmacyQuerySection = await renderPharmacyQueryCard(order);
             return `
                 <div class="section-card">
                     <div class="section-title">Treatment Order <span class="badge badge-blue">SIGNED</span></div>
                     <div class="section-sub">${escapeHtml(assessment.protocol)} · ${escapeHtml(assessment.cycle_info)}</div>
                 </div>
+                ${pharmacyQuerySection}
+                ${signedDrugLinesSection}
                 ${medsSection}
                 <div class="section-card">
                     <div class="section-title">Toxicity History (CTCAE v5.0)</div>
@@ -1357,7 +1409,14 @@
 
         async function submitCreateTreatmentOrder(treatmentPlanId) {
             try {
-                await Api.post(`${CCA_API}/treatment-orders`, { patient_id: currentPatientId, treatment_plan_id: treatmentPlanId });
+                const supersedesEl = document.getElementById('to-supersedes');
+                const payload = { patient_id: currentPatientId, treatment_plan_id: treatmentPlanId };
+                if (supersedesEl && supersedesEl.value) {
+                    payload.supersedes_id = Number(supersedesEl.value);
+                    payload.dose_modification_percent = document.getElementById('to-dose-mod').value || null;
+                    payload.revision_reason = document.getElementById('to-revision-reason').value || null;
+                }
+                await Api.post(`${CCA_API}/treatment-orders`, payload);
                 toast('Treatment Order drafted', 'success');
                 loadTreatmentPlanView();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
@@ -1371,6 +1430,36 @@
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
+        async function saveOrderDrugLineDose(orderId, lineId) {
+            try {
+                await Api.patch(`${CCA_API}/treatment-orders/${orderId}/drug-lines/${lineId}`, {
+                    planned_dose: document.getElementById(`to-planned-dose-${lineId}`).value || null,
+                });
+                toast('Dose saved', 'success');
+                loadTreatmentPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function addOrderDrugLine(orderId) {
+            const name = document.getElementById('to-new-drug-name').value.trim();
+            if (!name) { toast('Drug name is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/treatment-orders/${orderId}/drug-lines`, {
+                    generic_name: name, category: document.getElementById('to-new-drug-category').value,
+                });
+                toast('Drug line added', 'success');
+                loadTreatmentPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function deleteOrderDrugLine(orderId, lineId) {
+            try {
+                await Api.delete(`${CCA_API}/treatment-orders/${orderId}/drug-lines/${lineId}`);
+                toast('Drug line removed', 'success');
+                loadTreatmentPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
         async function submitClearanceOnc(orderId) {
             const reason = document.getElementById('clearance-reason-onc').value;
             if (!reason) { toast('Reason is required', 'error'); return; }
@@ -1380,6 +1469,38 @@
                     decision: document.getElementById('clearance-decision-onc').value, reason,
                 });
                 toast('Treatment clearance recorded', 'success');
+                loadTreatmentPlanView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // Pharmacy Query/Reject response (Product 1 vs Product 2 gap report, Batch 2) -- the
+        // treating oncologist's response to a pharmacist's Query or Reject decision.
+        async function renderPharmacyQueryCard(order) {
+            try {
+                const data = await Api.get(`${CCA_API}/treatment/${order.id}/pharmacy-verification?patient_id=${currentPatientId}`);
+                const latest = (data.results || [])[0];
+                if (!latest || latest.decision === 'Verified' || latest.resolved) return '';
+                return `
+                    <div class="section-card">
+                        <div class="section-title" style="font-size:14px;">⚠ Pharmacy ${escapeHtml(latest.decision)} — Response Needed</div>
+                        <div class="section-sub" style="margin-bottom:10px;">${escapeHtml(latest.reason_code || '')}: ${escapeHtml(latest.message || '')}</div>
+                        <div class="form-group"><label class="form-label">Response / action taken</label><input type="text" id="pq-response-action-${latest.id}" class="form-input" placeholder="e.g. Confirmed dose is correct as ordered" /></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Note (optional)</label><textarea id="pq-response-note-${latest.id}" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-navy" onclick="submitPharmacyQueryResponse(${latest.id})">Respond to Pharmacy</button>
+                    </div>
+                `;
+            } catch (err) { return ''; }
+        }
+
+        async function submitPharmacyQueryResponse(verificationId) {
+            const responseAction = document.getElementById(`pq-response-action-${verificationId}`).value;
+            if (!responseAction) { toast('Response / action taken is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/treatment/pharmacy-verification/${verificationId}/respond`, {
+                    response_action: responseAction,
+                    response_note: document.getElementById(`pq-response-note-${verificationId}`).value || null,
+                });
+                toast('Response sent to pharmacy', 'success');
                 loadTreatmentPlanView();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
@@ -1425,6 +1546,12 @@
                 `;
 
                 if (!plan) {
+                    let regimenOptions = '<option value="">— none / free text protocol only —</option>';
+                    try {
+                        const regimensData = await Api.get(`${CCA_API}/regimens`);
+                        cachedRegimens = regimensData.regimens || [];
+                        regimenOptions += cachedRegimens.map(r => `<option value="${r.id}">${escapeHtml(r.name)}${r.cancer_indication ? ' — ' + escapeHtml(r.cancer_indication) : ''}</option>`).join('');
+                    } catch (err) { /* regimen library optional -- plan still works with free text protocol_name */ }
                     container.innerHTML = `
                         ${cancerContextSection}
                         <div class="section-card">
@@ -1434,6 +1561,7 @@
                                 <div class="form-group"><label class="form-label">Modality</label><input type="text" id="tp-modality" class="form-input" value="${escapeHtml(DEFAULT_MODALITY)}" /></div>
                                 <div class="form-group"><label class="form-label">Intent</label><input type="text" id="tp-intent" class="form-input" value="Curative" /></div>
                             </div>
+                            <div class="form-group" style="margin-bottom:16px;"><label class="form-label">Regimen (optional — prefills Protocol/Regimen below, drives the Treatment Order's dosing panel)</label><select id="tp-regimen" class="form-select" onchange="const r = cachedRegimens.find(r => String(r.id) === this.value); document.getElementById('tp-protocol').value = r ? r.name : document.getElementById('tp-protocol').value;">${regimenOptions}</select></div>
                             <div class="form-grid-2">
                                 <div class="form-group"><label class="form-label">Protocol / Regimen</label><input type="text" id="tp-protocol" class="form-input" placeholder="e.g. AC-T (Doxorubicin/Cyclophosphamide -> Paclitaxel)" /></div>
                                 <div class="form-group"><label class="form-label">Planned sessions/cycles</label><input type="number" id="tp-sessions" class="form-input" value="8" /></div>
@@ -1522,11 +1650,13 @@
                     // then tagged requires_mdt so it cannot be signed until MDT approves.
                     await Api.post(`${CCA_API}/mdt/cases`, { patient_id: currentPatientId, question: mdtQuestion });
                 }
+                const regimenVal = document.getElementById('tp-regimen').value;
                 await Api.post(`${CCA_API}/treatment-plans`, {
                     patient_id: currentPatientId,
                     modality: document.getElementById('tp-modality').value,
                     intent: document.getElementById('tp-intent').value,
                     protocol_name: document.getElementById('tp-protocol').value,
+                    regimen_id: regimenVal ? Number(regimenVal) : null,
                     planned_sessions: Number(document.getElementById('tp-sessions').value) || 8,
                     requires_mdt: passToMdt,
                 });

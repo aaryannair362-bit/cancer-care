@@ -27,6 +27,7 @@ from ..models_cca import CCAPatient, DomainEvent, MDTCase
 from ..models_cca import ResponseAssessment, ToxicityEvent, TreatmentPlan
 from ..models_cca_oncology_ext import (
     CCARadiationPhase, OncologyRecordExtension, RadiationFraction, RadiationPrescription,
+    RadiationInterruption, RadiationOnTreatmentVisit,
     Regimen, RegimenDrugLine, SurgicalPlan, TreatmentPlanPhase,
     SurgicalIntraOpMonitoring, SurgicalOperativeNote, SurgicalSpecimen, SurgicalBloodTransfusion,
     ClinicalProcedureNote, PalliativeTreatmentOrder,
@@ -56,6 +57,31 @@ _RT_PHASE_STEP_ROLE = {
     "simulation_pending": "physicist", "simulation_complete": "physicist", "contouring": "physicist",
     "planning": "physicist", "physics_qa": "physicist", "physician_approved": "radiation_oncologist",
 }
+# Physics QA checklist (Product 1 vs Product 2 gap report, Batch 4) -- Product 1's real
+# physics_qa is one holistic decision + a mandatory note; we decompose it into a small
+# attestation checklist (never a computed pass/fail), mirroring PharmacyVerification's own
+# pattern from Batch 2. The physicist confirms they personally reviewed each item.
+_PHYSICS_QA_CHECKLIST_KEYS = [
+    "prescription_plan_concordance", "dose_volume_constraint_review",
+    "target_oar_coverage_review", "machine_deliverability_review",
+]
+_PHYSICS_QA_DECISIONS = ("Approved", "Rejected / Replan Required")
+# RT Delivery (Product 1 vs Product 2 gap report, Batch 5) -- Product 1's own interruption
+# category is a free, unvalidated string; we validate against the gap report's own named
+# categories to keep the field meaningful without inventing an unbacked taxonomy.
+_INTERRUPTION_CATEGORIES = ("Clinical/Operational", "Toxicity/Condition", "Machine Issue", "Other")
+_FRACTION_STATUSES = ("delivered", "missed", "rescheduled", "cancelled")
+
+
+def _require_rt_delivery_or_ro(current_user: dict):
+    """Interruption may be recorded/resumed by either the treating Radiation Oncologist or
+    the Radiation Technologist at the machine (Product 1: rt_record_interruption is gated to
+    either role). Radiation Technologist and Radiologist are the same login in this
+    hospital's role structure (no separate CCARadiationTechnologist role exists), matching
+    record_radiation_fraction_event's own gate below."""
+    if is_cca_radiologist(current_user) or is_admin(current_user):
+        return
+    _require_modality_signer(current_user, "radiation")
 SURGICAL_STATUS_ORDER = [
     "recommended", "surgeon_reviewed", "planned", "pre_op_ready", "scheduled", "performed",
     "post_op", "histopathology_available",
@@ -130,8 +156,12 @@ def _rt_phase_out(p: CCARadiationPhase) -> dict:
         "rt_sub_status": p.rt_sub_status,
         "physicist_signer_email": p.physicist_signer_email, "physicist_signer_role": p.physicist_signer_role,
         "physicist_signed_at": p.physicist_signed_at.isoformat() if p.physicist_signed_at else None,
+        "physics_qa_checklist": p.physics_qa_checklist, "physics_qa_decision": p.physics_qa_decision,
+        "physics_qa_note": p.physics_qa_note, "physics_qa_decided_by": p.physics_qa_decided_by,
+        "physics_qa_decided_at": p.physics_qa_decided_at.isoformat() if p.physics_qa_decided_at else None,
         "physician_signer_email": p.physician_signer_email, "physician_signer_role": p.physician_signer_role,
         "physician_signed_at": p.physician_signed_at.isoformat() if p.physician_signed_at else None,
+        "physician_approval_note": p.physician_approval_note,
         "created_by": p.created_by,
     }
 
@@ -143,7 +173,29 @@ def _rt_fraction_out(f: RadiationFraction) -> dict:
         "status": f.status, "delivered_dose_gy": f.delivered_dose_gy,
         "interruption_reason": f.interruption_reason, "on_treatment_review_note": f.on_treatment_review_note,
         "variance_or_toxicity": f.variance_or_toxicity,
+        "image_guidance_performed": f.image_guidance_performed, "setup_variation": f.setup_variation,
+        "verified_by": f.verified_by, "dose_match_confirmed": f.dose_match_confirmed,
+        "dose_mismatch_note": f.dose_mismatch_note,
         "recorded_by": f.recorded_by, "recorded_at": f.recorded_at.isoformat() if f.recorded_at else None,
+    }
+
+
+def _rt_interruption_out(i: RadiationInterruption) -> dict:
+    return {
+        "id": i.id, "phase_id": i.phase_id, "reason": i.reason, "category": i.category,
+        "start_at": i.start_at.isoformat() if i.start_at else None,
+        "end_at": i.end_at.isoformat() if i.end_at else None,
+        "compensation_plan": i.compensation_plan,
+        "recorded_by": i.recorded_by, "recorded_at": i.recorded_at.isoformat() if i.recorded_at else None,
+    }
+
+
+def _rt_otv_out(o: RadiationOnTreatmentVisit) -> dict:
+    return {
+        "id": o.id, "phase_id": o.phase_id, "after_fraction_number": o.after_fraction_number,
+        "assessment": o.assessment, "toxicity_summary": o.toxicity_summary, "plan": o.plan,
+        "weight_kg": o.weight_kg, "performance_status": o.performance_status,
+        "signed_by": o.signed_by, "signed_at": o.signed_at.isoformat() if o.signed_at else None,
     }
 
 
@@ -337,6 +389,65 @@ def get_radiation_phase(phase_id: int, db: Session = Depends(get_cca_db), curren
     return {"phase": _rt_phase_out(phase), "prescription": _rt_prescription_out(rx)}
 
 
+@router.get("/radiation-phases/{phase_id}/physics-qa")
+def get_physics_qa(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    phase, _rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    return {
+        "physics_qa": {
+            "checklist": phase.physics_qa_checklist, "decision": phase.physics_qa_decision,
+            "note": phase.physics_qa_note, "decided_by": phase.physics_qa_decided_by,
+            "decided_at": phase.physics_qa_decided_at.isoformat() if phase.physics_qa_decided_at else None,
+        }
+    }
+
+
+@router.post("/radiation-phases/{phase_id}/physics-qa")
+async def record_physics_qa(phase_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """The Radiation Physicist's actual Physics QA decision (Product 1 vs Product 2 gap
+    report, Batch 4) -- previously the physics_qa step was a bare signature stamped by
+    transition_radiation_phase with no decision, checklist, or note captured at all.
+
+    Recording a decision here does NOT itself move rt_sub_status -- matches Product 1's real
+    behavior (rejecting doesn't auto-revert the phase; staff must address the issue and a
+    physicist re-submits). The actual forward transition to physician_approved is gated
+    separately below on decision == 'Approved', which is the real safety-relevant gap this
+    closes: today any Radiation Oncologist can approve a phase for treatment with physics QA
+    never having been performed at all."""
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may record a Physics QA decision")
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    if phase.rt_sub_status != "physics_qa":
+        raise HTTPException(409, f"Physics QA is not open for this phase (currently {phase.rt_sub_status})")
+
+    body = await request.json()
+    decision = body.get("decision")
+    if decision not in _PHYSICS_QA_DECISIONS:
+        raise HTTPException(422, f"decision must be one of {_PHYSICS_QA_DECISIONS}")
+    note = (body.get("note") or "").strip()
+    if not note:
+        raise HTTPException(422, "A note is required to record a Physics QA decision")
+    checklist = body.get("checklist") or {}
+    if decision == "Approved":
+        missing = [k for k in _PHYSICS_QA_CHECKLIST_KEYS if not checklist.get(k)]
+        if missing:
+            raise HTTPException(422, f"All checklist items must be confirmed to approve -- missing: {', '.join(missing)}")
+
+    phase.physics_qa_checklist = checklist
+    phase.physics_qa_decision = decision
+    phase.physics_qa_note = note
+    phase.physics_qa_decided_by = _actor(current_user)
+    phase.physics_qa_decided_at = datetime.utcnow()
+    publish(
+        db, "RADIATION_PHYSICS_QA_RECORDED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Physics QA recorded", category="TREATMENT",
+        description=f"{_actor(current_user)} recorded Physics QA for phase {phase.phase_number} ({phase.label}): {decision}.",
+        prescription_id=rx.id, phase_id=phase.id, decision=decision,
+    )
+    db.commit()
+    db.refresh(phase)
+    return {"status": "success", "phase": _rt_phase_out(phase)}
+
+
 @router.post("/radiation-phases/{phase_id}/transition")
 async def transition_radiation_phase(phase_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     """Structural sequencing only -- validates the target status is the very next step in
@@ -353,17 +464,41 @@ async def transition_radiation_phase(phase_id: int, request: Request, db: Sessio
         raise HTTPException(422, f"status must be one of {[*RT_SUB_STATUS_ORDER, 'interrupted']}")
 
     if target == "interrupted":
-        _require_modality_signer(current_user, "radiation")
+        _require_rt_delivery_or_ro(current_user)
         if phase.rt_sub_status != "on_treatment":
             raise HTTPException(409, f"Cannot interrupt from {phase.rt_sub_status}")
+        # Real, append-only interruption record (Batch 5) -- previously `interrupted` was a
+        # bare status flip with zero captured detail (no reason, no category, no plan to
+        # make up the missed treatment time).
+        reason = (body.get("reason") or "").strip()
+        if not reason:
+            raise HTTPException(422, "reason is required to interrupt treatment")
+        category = body.get("category") or "Clinical/Operational"
+        if category not in _INTERRUPTION_CATEGORIES:
+            raise HTTPException(422, f"category must be one of {_INTERRUPTION_CATEGORIES}")
         phase.rt_sub_status = "interrupted"
+        db.add(RadiationInterruption(
+            phase_id=phase.id, reason=reason, category=category,
+            compensation_plan=body.get("compensation_plan"), recorded_by=_actor(current_user),
+        ))
+        publish(
+            db, "RADIATION_PHASE_INTERRUPTED", patient_id=rx.patient_id, actor=_actor(current_user),
+            role=current_user.get("role"), title="Radiation treatment interrupted", category="TREATMENT",
+            description=f"{_actor(current_user)} interrupted phase {phase.phase_number} ({phase.label}): {reason}.",
+            prescription_id=rx.id, phase_id=phase.id,
+        )
         db.commit()
         db.refresh(phase)
         return {"status": "success", "phase": _rt_phase_out(phase)}
     if phase.rt_sub_status == "interrupted":
-        _require_modality_signer(current_user, "radiation")
+        _require_rt_delivery_or_ro(current_user)
         if target != "on_treatment":
             raise HTTPException(409, "An interrupted phase may only resume to on_treatment")
+        open_interruption = db.query(RadiationInterruption).filter(
+            RadiationInterruption.phase_id == phase.id, RadiationInterruption.end_at.is_(None)
+        ).order_by(RadiationInterruption.id.desc()).first()
+        if open_interruption:
+            open_interruption.end_at = datetime.utcnow()
         phase.rt_sub_status = "on_treatment"
         db.commit()
         db.refresh(phase)
@@ -374,6 +509,11 @@ async def transition_radiation_phase(phase_id: int, request: Request, db: Sessio
     target_index = RT_SUB_STATUS_ORDER.index(target)
     if target_index != current_index + 1:
         raise HTTPException(409, f"Cannot move from {phase.rt_sub_status} directly to {target}")
+    # Real safety-relevant gap closed here (Batch 4): previously any Radiation Oncologist
+    # could approve a phase for treatment even if Physics QA was never performed, or was
+    # rejected -- see record_physics_qa above.
+    if target == "physician_approved" and phase.physics_qa_decision != "Approved":
+        raise HTTPException(409, "Cannot advance to physician approval until Physics QA has been Approved")
     phase.rt_sub_status = target
     if target == "physics_qa":
         phase.physicist_signer_email = current_user.get("email")
@@ -383,6 +523,8 @@ async def transition_radiation_phase(phase_id: int, request: Request, db: Sessio
         phase.physician_signer_email = current_user.get("email")
         phase.physician_signer_role = current_user.get("role")
         phase.physician_signed_at = datetime.utcnow()
+        if body.get("note"):
+            phase.physician_approval_note = body["note"]
     if target == "treatment_ready":
         # Always exactly `number_of_fractions` rows -- a schedule count that could drift
         # from the prescribed count is precisely the "screens show contradictory values"
@@ -408,6 +550,60 @@ def list_radiation_fractions(phase_id: int, db: Session = Depends(get_cca_db), c
     return {"fractions": [_rt_fraction_out(f) for f in rows]}
 
 
+@router.get("/radiation-phases/{phase_id}/interruptions")
+def list_radiation_interruptions(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    phase, _rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    rows = db.query(RadiationInterruption).filter(RadiationInterruption.phase_id == phase.id).order_by(RadiationInterruption.start_at.desc()).all()
+    return {"interruptions": [_rt_interruption_out(i) for i in rows]}
+
+
+@router.get("/radiation-phases/{phase_id}/otv")
+def list_radiation_otv(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    phase, _rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    rows = db.query(RadiationOnTreatmentVisit).filter(RadiationOnTreatmentVisit.phase_id == phase.id).order_by(RadiationOnTreatmentVisit.signed_at.desc()).all()
+    return {"otv": [_rt_otv_out(o) for o in rows]}
+
+
+@router.post("/radiation-phases/{phase_id}/otv", status_code=201)
+async def record_radiation_otv(phase_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """The Radiation Oncologist's periodic On-Treatment Visit (Product 1 vs Product 2 gap
+    report, Batch 5) -- a real, separate, multiple-per-course signed clinical review,
+    distinct from any single fraction's own notes. Gated on at least one delivered fraction
+    existing, matching Product 1's real precondition."""
+    _require_modality_signer(current_user, "radiation")
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    delivered = db.query(RadiationFraction).filter(
+        RadiationFraction.phase_id == phase.id, RadiationFraction.status == "delivered"
+    ).order_by(RadiationFraction.fraction_number.desc()).first()
+    if not delivered:
+        raise HTTPException(409, "At least one delivered fraction is required before an on-treatment visit can be recorded")
+
+    body = await request.json()
+    assessment = (body.get("assessment") or "").strip()
+    toxicity_summary = (body.get("toxicity_summary") or "").strip()
+    plan = (body.get("plan") or "").strip()
+    if not (assessment and toxicity_summary and plan):
+        raise HTTPException(422, "assessment, toxicity_summary and plan are all required")
+
+    otv = RadiationOnTreatmentVisit(
+        phase_id=phase.id, after_fraction_number=body.get("after_fraction_number", delivered.fraction_number),
+        assessment=assessment, toxicity_summary=toxicity_summary, plan=plan,
+        weight_kg=body.get("weight_kg"), performance_status=body.get("performance_status"),
+        signed_by=_actor(current_user),
+    )
+    db.add(otv)
+    db.flush()
+    publish(
+        db, "RADIATION_OTV_RECORDED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="On-treatment visit recorded", category="TREATMENT",
+        description=f"{_actor(current_user)} recorded an on-treatment visit for phase {phase.phase_number} ({phase.label}).",
+        prescription_id=rx.id, phase_id=phase.id,
+    )
+    db.commit()
+    db.refresh(otv)
+    return {"status": "success", "otv": _rt_otv_out(otv)}
+
+
 @router.post("/radiation-fractions/{fraction_id}/event")
 async def record_radiation_fraction_event(fraction_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     """Recording an actual delivered/missed/rescheduled fraction is the Radiation
@@ -423,17 +619,34 @@ async def record_radiation_fraction_event(fraction_id: int, request: Request, db
     phase, rx = _get_org_radiation_phase(db, fraction.phase_id, _org_id(current_user))
     body = await request.json()
     status_value = body.get("status")
-    if status_value not in ("delivered", "missed", "rescheduled"):
-        raise HTTPException(422, "status must be one of delivered, missed, rescheduled")
-    fraction.status = status_value
+    if status_value not in _FRACTION_STATUSES:
+        raise HTTPException(422, f"status must be one of {_FRACTION_STATUSES}")
+    # Duplicate-delivery guard (Batch 5) -- previously an already-delivered fraction could be
+    # silently re-posted and overwritten.
+    if fraction.status == "delivered" and status_value == "delivered":
+        raise HTTPException(409, f"Fraction {fraction.fraction_number} is already recorded as delivered")
     if status_value == "delivered":
+        # Product 1's rt_fraction_safety() computes and blocks on a delivered-vs-prescribed
+        # dose tolerance -- standing repo rule forbids that. dose_match_confirmed is the
+        # non-computed substitute: the RTT's own attestation, never a system comparison.
+        dose_match = body.get("dose_match_confirmed")
+        if dose_match is False and not body.get("dose_mismatch_note"):
+            raise HTTPException(422, "dose_mismatch_note is required when dose_match_confirmed is false")
+        fraction.dose_match_confirmed = dose_match
+        fraction.dose_mismatch_note = body.get("dose_mismatch_note")
         fraction.delivered_dose_gy = body.get("delivered_dose_gy", phase.dose_per_fraction_gy)
+        fraction.image_guidance_performed = body.get("image_guidance_performed")
+    fraction.status = status_value
     if body.get("interruption_reason"):
         fraction.interruption_reason = body["interruption_reason"]
     if body.get("on_treatment_review_note"):
         fraction.on_treatment_review_note = body["on_treatment_review_note"]
     if body.get("variance_or_toxicity"):
         fraction.variance_or_toxicity = body["variance_or_toxicity"]
+    if body.get("setup_variation"):
+        fraction.setup_variation = body["setup_variation"]
+    if body.get("verified_by"):
+        fraction.verified_by = body["verified_by"]
     fraction.recorded_by = _actor(current_user)
     fraction.recorded_at = datetime.utcnow()
     if phase.rt_sub_status == "treatment_ready":

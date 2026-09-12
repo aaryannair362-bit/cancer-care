@@ -28,6 +28,11 @@ def nurse(make_user, oncologist):
 
 
 @pytest.fixture
+def nurse_b(make_user, oncologist):
+    return make_user(email="nurseb@infusion-workspace-test.com", role="CCAInfusionNurse", organization_id=oncologist.organization_id)
+
+
+@pytest.fixture
 def front_desk(make_user, oncologist):
     return make_user(email="frontdesk@infusion-workspace-test.com", role="CCAFrontDesk", organization_id=oncologist.organization_id)
 
@@ -40,6 +45,11 @@ def onc_headers(auth_headers, oncologist):
 @pytest.fixture
 def nurse_headers(auth_headers, nurse):
     return auth_headers(nurse)
+
+
+@pytest.fixture
+def nurse_b_headers(auth_headers, nurse_b):
+    return auth_headers(nurse_b)
 
 
 @pytest.fixture
@@ -109,6 +119,7 @@ def test_safety_check_upsert_updates_in_place(client, nurse_headers, onc_headers
 
     first = client.post("/api/cca/treatment/safety-check", headers=nurse_headers, json={
         "patient_id": patient.id, "order_id": order_id,
+        "name_matched": True, "mrn_matched": True,
         "identity_verified": True, "identity_method": "Name + MRN",
         "order_cycle_confirmed": True, "allergy_review_done": True,
         "allergy_review_notes": "No known drug allergies reported by patient today.",
@@ -176,7 +187,7 @@ def test_pharmacy_readiness_progresses_and_captures_receipt(client, nurse_header
     assert data["received_at"] is not None
 
 
-def test_medication_administration_lifecycle_and_illegal_transitions(client, nurse_headers, onc_headers, db_session, patient):
+def test_medication_administration_lifecycle_and_illegal_transitions(client, nurse_headers, nurse_b_headers, onc_headers, db_session, patient):
     order_id = _create_signed_order(client, onc_headers, patient.id)
 
     added = client.post("/api/cca/treatment/medications", headers=nurse_headers, json={
@@ -197,6 +208,16 @@ def test_medication_administration_lifecycle_and_illegal_transitions(client, nur
     illegal = client.post(f"/api/cca/treatment/medications/{admin_id}/event", headers=nurse_headers, json={"event_type": "COMPLETE"})
     assert illegal.status_code == 409
 
+    # Antineoplastic START requires an independent chairside double-check performed by
+    # someone other than whoever starts it (Batch 3).
+    blocked_start = client.post(f"/api/cca/treatment/medications/{admin_id}/event", headers=nurse_headers, json={"event_type": "START"})
+    assert blocked_start.status_code == 422
+
+    iv = client.post(f"/api/cca/treatment/medications/{admin_id}/independent-verification", headers=nurse_b_headers, json={
+        "checklist": {k: True for k in ["drug", "dose", "volume_diluent", "route", "rate", "expiry", "physical_integrity", "sequence", "pump_settings"]},
+    })
+    assert iv.status_code == 201, iv.text
+
     start = client.post(f"/api/cca/treatment/medications/{admin_id}/event", headers=nurse_headers, json={"event_type": "START"})
     assert start.status_code == 200, start.text
     assert start.json()["medication"]["status"] == "InProgress"
@@ -212,6 +233,7 @@ def test_medication_administration_lifecycle_and_illegal_transitions(client, nur
 
     complete = client.post(f"/api/cca/treatment/medications/{admin_id}/event", headers=nurse_headers, json={
         "event_type": "COMPLETE", "actual_rate": "as ordered", "actual_volume": "250mL",
+        "completion_status": "Administered", "reaction_occurred": False,
     })
     assert complete.status_code == 200, complete.text
     assert complete.json()["medication"]["status"] == "Completed"
@@ -350,6 +372,8 @@ def test_completion_gated_on_every_medication_having_a_final_status(client, nurs
 
     added = client.post("/api/cca/treatment/medications", headers=nurse_headers, json={
         "patient_id": patient.id, "order_id": order_id, "medication_name": "Doxorubicin", "sequence_no": 1,
+        "category": "Premedication",  # sidesteps the separate Antineoplastic independent-verification
+                                       # gate (Batch 3) -- this test is only about completion gating
     })
     admin_id = added.json()["medication"]["id"]
 
@@ -360,7 +384,9 @@ def test_completion_gated_on_every_medication_having_a_final_status(client, nurs
     assert "Doxorubicin" in still_pending.json()["detail"]
 
     client.post(f"/api/cca/treatment/medications/{admin_id}/event", headers=nurse_headers, json={"event_type": "START"})
-    client.post(f"/api/cca/treatment/medications/{admin_id}/event", headers=nurse_headers, json={"event_type": "COMPLETE"})
+    client.post(f"/api/cca/treatment/medications/{admin_id}/event", headers=nurse_headers, json={
+        "event_type": "COMPLETE", "completion_status": "Administered", "reaction_occurred": False,
+    })
 
     done = client.post("/api/cca/treatment/completion", headers=nurse_headers, json={
         "patient_id": patient.id, "order_id": order_id, "disposition": "Completed",

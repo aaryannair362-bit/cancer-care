@@ -55,7 +55,7 @@ TREATMENT_PLAN_TIER_FIELDS: Dict[str, Optional[Set[str]]] = {
     # Nurse Navigator, Radiologist, Pathologist, MDT Coordinator, External MDT Specialist:
     # enough clinical context to do their own job around the treatment, not the full
     # authoring/administrative trail (no signer identity, no supersedes chain).
-    "CLINICAL_CONTEXT": {"id", "patient_id", "modality", "intent", "protocol_name", "status", "version_no", "start_date", "signed_at", "guideline_review_required", "requires_mdt", "mdt_decision_id"},
+    "CLINICAL_CONTEXT": {"id", "patient_id", "modality", "intent", "protocol_name", "regimen_id", "regimen_name", "status", "version_no", "start_date", "signed_at", "guideline_review_required", "requires_mdt", "mdt_decision_id"},
     # Financial Counsellor: the exact field list the architecture doc's financial-integration
     # section names -- modality, regimen/procedure identifier, anticipated cycles, planned
     # start window, status. Nothing evidentiary or authorizing.
@@ -119,7 +119,15 @@ def treatment_plan_tier(current_user: dict) -> str:
 def treatment_order_tier(current_user: dict) -> str:
     if is_admin(current_user) or is_doctor(current_user) or is_cca_oncologist(current_user):
         return "FULL"
-    if current_user.get("role") == "CCAInfusionNurse":
+    if current_user.get("role") in ("CCAInfusionNurse", "CCAPharmacist"):
+        # CCAPharmacist added for the Oncology Pharmacy workflow (Product 1 vs Product 2 gap
+        # report, Batch 2) -- verification/preparation/release all need the order's real
+        # drug-line detail (generic_name, planned_dose, supportive_care, ...), the same
+        # "needs real detail to do their job safely" reasoning already applied to
+        # CCAInfusionNurse above. Without this, MINIMAL's {"id", "status"} whitelist silently
+        # stripped drug_lines/supportive_care from every response the Pharmacist's own
+        # worklist reads, even though the pharmacy-verification/-preparation/-release write
+        # endpoints themselves were never gated by this projection.
         return "FULL"
     return "MINIMAL"
 

@@ -71,6 +71,9 @@ def _result_out(r: CCAResult) -> dict:
         "acknowledged_at": r.acknowledged_at.isoformat() if r.acknowledged_at else None,
         "critical_acknowledged_by": r.critical_acknowledged_by,
         "resulted_at": r.resulted_at.isoformat() if r.resulted_at else None,
+        "supersedes_id": r.supersedes_id, "superseded_by_id": r.superseded_by_id,
+        "amendment_reason": r.amendment_reason, "amended_by": r.amended_by,
+        "amended_at": r.amended_at.isoformat() if r.amended_at else None,
     }
 
 
@@ -259,11 +262,40 @@ def get_pathology_order(order_id: int, db: Session = Depends(get_cca_db), curren
     return {"order": _order_out(order), "results": [_result_out(r) for r in results]}
 
 
+# Structured report fields the pathologist personally types (Product 1 vs Product 2 gap
+# report, Batch 6) -- gross/microscopic description, histologic type/grade, tumour extent,
+# margins, lymph nodes, pathological TNM/stage grouping. stage_group is pathologist-typed
+# free text in every real Product 1 sample, never derived from path_t/path_n/path_m by
+# code -- this repo's standing rule against computed clinical judgments forbids deriving it
+# here either.
+_PATHOLOGY_REQUIRED_FOR_FINALIZE = ("site", "specimen", "histology")
+
+
+def _check_node_coherence(structured_report: dict):
+    """Plain arithmetic sanity check on two counts the pathologist already typed -- nodes
+    positive cannot exceed nodes examined. Not a clinical judgment or computed threshold,
+    the same class of check as validating a percentage is between 0 and 100."""
+    if not structured_report:
+        return
+    examined, positive = structured_report.get("nodes_examined"), structured_report.get("nodes_positive")
+    if examined is not None and positive is not None:
+        try:
+            if float(positive) > float(examined):
+                raise HTTPException(422, "nodes_positive cannot exceed nodes_examined")
+        except (TypeError, ValueError):
+            pass
+
+
 @router.post("/pathology/orders/{order_id}/report")
 async def draft_pathology_report(order_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     """Pathologist drafts a structured report: gross/microscopic description, histologic
     type/grade, tumour extent, margins, lymph nodes, pathological staging evidence -- all held
-    in structured_report since these vary by tumour type/specimen (spec: 'context dependent')."""
+    in structured_report since these vary by tumour type/specimen (spec: 'context dependent').
+
+    Once the current report is Finalized, this becomes immutable (Batch 6) -- a further call
+    must carry `amendment_reason` and creates a NEW, separately-finalizable result linked back
+    to the original via supersedes_id/superseded_by_id, rather than mutating finalized content
+    in place."""
     if not (is_cca_pathologist(current_user) or is_admin(current_user)):
         raise HTTPException(403, "Only the Pathologist or Admin may draft a pathology report")
     org_id = _org_id(current_user)
@@ -271,15 +303,35 @@ async def draft_pathology_report(order_id: int, request: Request, db: Session = 
     if order.order_type != "PATHOLOGY":
         raise HTTPException(404, "Not a pathology order")
     body = await request.json()
+    structured_report = body.get("structured_report")
+    _check_node_coherence(structured_report)
 
-    result = db.query(CCAResult).filter(CCAResult.order_id == order.id, CCAResult.report_status == "Draft").first()
-    if not result:
+    # "Current" = not yet superseded by a later amendment, whether Draft or Finalized.
+    result = db.query(CCAResult).filter(
+        CCAResult.order_id == order.id, CCAResult.superseded_by_id.is_(None)
+    ).order_by(CCAResult.id.desc()).first()
+
+    if result and result.report_status == "Finalized":
+        amendment_reason = (body.get("amendment_reason") or "").strip()
+        if not amendment_reason:
+            raise HTTPException(409, "A finalized pathology report is immutable. Provide amendment_reason to create a linked amendment.")
+        amendment = CCAResult(
+            order_id=order.id, patient_id=order.patient_id, result_type="PATHOLOGY", title=order.item_name,
+            supersedes_id=result.id, amendment_reason=amendment_reason, amended_by=_actor(current_user),
+            amended_at=datetime.utcnow(),
+        )
+        db.add(amendment)
+        db.flush()
+        result.superseded_by_id = amendment.id
+        result.report_status = "Superseded"
+        result = amendment
+    elif not result:
         result = CCAResult(order_id=order.id, patient_id=order.patient_id, result_type="PATHOLOGY", title=order.item_name)
         db.add(result)
 
     result.findings_text = body.get("findings_text")  # final diagnosis / comment-interpretation
     result.impression = body.get("impression")
-    result.structured_report = body.get("structured_report")  # gross/microscopic/histology/grade/margins/nodes/staging evidence
+    result.structured_report = structured_report  # gross/microscopic/histology/grade/margins/nodes/staging evidence
     result.is_critical = bool(body.get("is_critical", False))
     result.status = "PENDING_REVIEW" if result.is_critical else "NEW"
     result.report_status = "Draft"
@@ -296,6 +348,12 @@ def finalize_pathology_report(result_id: int, db: Session = Depends(get_cca_db),
     result = _get_org_result(db, result_id, org_id)
     if result.result_type != "PATHOLOGY":
         raise HTTPException(404, "Not a pathology result")
+    if result.report_status == "Finalized":
+        raise HTTPException(409, "This report is already finalized")
+    structured = result.structured_report or {}
+    missing = [f for f in _PATHOLOGY_REQUIRED_FOR_FINALIZE if not structured.get(f)]
+    if missing:
+        raise HTTPException(409, f"Cannot finalize: missing required fields -- {', '.join(missing)}")
     actor = _actor(current_user)
     result.report_status = "Finalized"
     result.finalized_by = actor

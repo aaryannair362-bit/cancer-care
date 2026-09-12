@@ -28,7 +28,10 @@ from ..ocr_service import extract_document
 from ..scribe import scribe
 from .. import drug_matcher
 from ..document_pages import process_document_pages
-from ..models_cca_oncology_ext import CCARadiationPhase, RadiationFraction, RadiationPrescription
+from ..models_cca_oncology_ext import (
+    CCARadiationPhase, RadiationFraction, RadiationPrescription,
+    Regimen, RegimenDrugLine, TreatmentOrderDrugLine,
+)
 from ..models_cca import (
     CCAPatient, CCAConsent, CCAQueueEvent, CCAEncounter, CCAIntakeAssessment,
     CCADocument, CCADocumentPage, ClinicalFact, CCAContradiction,
@@ -42,6 +45,7 @@ from ..models_cca import (
     InfusionMedicationAdministration, InfusionAdministrationEvent, InfusionMonitoringObservation,
     TreatmentHoldEvent, InfusionReactionEvent, ExtravasationEvent, TreatmentDayCompletion,
     BloodProductAdministration, TransfusionFeedback,
+    PharmacyVerification, PharmacyPreparation, PharmacyRelease, InfusionIndependentVerification,
 )
 from ..cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
@@ -796,7 +800,7 @@ def get_case_summary(
             },
             "financial_projection": {
                 "orders": [{"id": o.id, "order_type": o.order_type, "item_name": o.item_name, "status": o.status} for o in orders],
-                "active_plans": [project_treatment_plan(_treatment_plan_dict(p), current_user) for p in db.query(TreatmentPlan).filter(TreatmentPlan.patient_id == patient_id).all()]
+                "active_plans": [project_treatment_plan(_treatment_plan_dict(p, db), current_user) for p in db.query(TreatmentPlan).filter(TreatmentPlan.patient_id == patient_id).all()]
             },
             "disclaimer": "Financial projection view: includes billing, modality counts, and operational status only."
         }
@@ -2348,7 +2352,7 @@ def _apply_treatment_plan_discontinuation(db: Session, plan: TreatmentPlan, reas
     db.add(TreatmentPlanVersion(
         treatment_plan_id=plan.id,
         version_no=plan.version_no,
-        snapshot=_treatment_plan_dict(plan),
+        snapshot=_treatment_plan_dict(plan, db),
         change_reason=reason,
         status_at_version="CANCELLED",
         created_by=actor,
@@ -2361,7 +2365,11 @@ def _apply_treatment_plan_discontinuation(db: Session, plan: TreatmentPlan, reas
     )
 
 
-def _treatment_plan_dict(plan: TreatmentPlan) -> dict:
+def _treatment_plan_dict(plan: TreatmentPlan, db: Session = None) -> dict:
+    regimen_name = None
+    if plan.regimen_id and db is not None:
+        regimen = db.query(Regimen).filter(Regimen.id == plan.regimen_id).first()
+        regimen_name = regimen.name if regimen else None
     return {
         "id": plan.id,
         "patient_id": plan.patient_id,
@@ -2371,6 +2379,8 @@ def _treatment_plan_dict(plan: TreatmentPlan) -> dict:
         "intent": plan.intent,
         "modality": plan.modality,
         "protocol_name": plan.protocol_name,
+        "regimen_id": plan.regimen_id,
+        "regimen_name": regimen_name,
         "planned_sessions": plan.planned_sessions,
         "completed_sessions": plan.completed_sessions,
         "start_date": plan.start_date.isoformat() if plan.start_date else None,
@@ -2416,13 +2426,24 @@ async def create_treatment_plan(
             # plans in ambiguous concurrent state.
             raise HTTPException(422, f"supersedes_id must reference an ACTIVE Treatment Plan (#{prior.id} is {prior.status})")
 
+    # Regimen selection (Product 1 gap report item 9) -- a convenience prefill for
+    # protocol_name, never a hard lock: an explicit protocol_name in the same request still
+    # wins, so a plan keeps working with free text alone.
+    regimen_id = body.get("regimen_id")
+    regimen = None
+    if regimen_id is not None:
+        regimen = db.query(Regimen).filter(Regimen.id == regimen_id, Regimen.organization_id == org_id).first()
+        if not regimen:
+            raise HTTPException(422, "regimen_id does not reference a regimen in this organization")
+
     plan = TreatmentPlan(
         patient_id=patient_id,
         mdt_decision_id=body.get("mdt_decision_id"),
         requires_mdt=bool(body.get("requires_mdt", False)),
         intent=body.get("intent", "Curative"),
         modality=body.get("modality", "Systemic Chemotherapy"),
-        protocol_name=body.get("protocol_name"),
+        protocol_name=body.get("protocol_name") or (regimen.name if regimen else None),
+        regimen_id=regimen_id,
         planned_sessions=_coerce_int(body, "planned_sessions", 8),
         completed_sessions=0,
         version_no=1,
@@ -2449,7 +2470,7 @@ async def create_treatment_plan(
     )
     db.commit()
     db.refresh(plan)
-    return {"status": "success", "treatment_plan": _treatment_plan_dict(plan)}
+    return {"status": "success", "treatment_plan": _treatment_plan_dict(plan, db)}
 
 
 @router.get("/treatment-plans/{id}")
@@ -2469,7 +2490,7 @@ def get_treatment_plan(
     # never sees one before it's signed.
     if not can_view_draft_plans_and_orders(current_user) and plan.status in ("DRAFT", "PROPOSED"):
         raise HTTPException(404, "Treatment plan not found")
-    return {"treatment_plan": project_treatment_plan(_treatment_plan_dict(plan), current_user)}
+    return {"treatment_plan": project_treatment_plan(_treatment_plan_dict(plan, db), current_user)}
 
 
 @router.get("/patients/{patient_id}/treatment-plans")
@@ -2488,7 +2509,7 @@ def list_treatment_plans(
         query = query.filter(~TreatmentPlan.status.in_(["DRAFT", "PROPOSED"]))
     plans = query.order_by(TreatmentPlan.id.desc()).all()
     return {
-        "treatment_plans": [project_treatment_plan(_treatment_plan_dict(p), current_user) for p in plans],
+        "treatment_plans": [project_treatment_plan(_treatment_plan_dict(p, db), current_user) for p in plans],
         "cancer_context": _get_cancer_context(db, patient_id),
     }
 
@@ -2613,7 +2634,7 @@ async def link_mdt_decision(
         treatment_plan_id=plan.id, mdt_decision_id=decision.id,
     )
     db.commit()
-    return {"status": "success", "treatment_plan": _treatment_plan_dict(plan)}
+    return {"status": "success", "treatment_plan": _treatment_plan_dict(plan, db)}
 
 
 @router.post("/treatment-plans/{id}/sign")
@@ -2682,7 +2703,7 @@ async def sign_treatment_plan(
     db.add(TreatmentPlanVersion(
         treatment_plan_id=plan.id,
         version_no=plan.version_no,
-        snapshot=_treatment_plan_dict(plan),
+        snapshot=_treatment_plan_dict(plan, db),
         change_reason=body.get("reason", f"Signed by {plan.signer_role}"),
         status_at_version="ACTIVE",
         created_by=actor,
@@ -2716,7 +2737,7 @@ async def sign_treatment_plan(
               f"{plan.modality} v{plan.version_no}, signer role {plan.signer_role}")
     db.commit()
     db.refresh(plan)
-    return {"status": "success", "treatment_plan": _treatment_plan_dict(plan)}
+    return {"status": "success", "treatment_plan": _treatment_plan_dict(plan, db)}
 
 
 @router.post("/treatment-plans/{id}/discontinue")
@@ -2861,7 +2882,7 @@ async def acknowledge_guideline_review(
     )
     db.commit()
     db.refresh(plan)
-    return {"status": "success", "treatment_plan": _treatment_plan_dict(plan)}
+    return {"status": "success", "treatment_plan": _treatment_plan_dict(plan, db)}
 
 
 # ---------------------------------------------------------
@@ -3445,7 +3466,30 @@ async def propose_task_from_search(
 # docstrings.
 # ---------------------------------------------------------
 
-def _treatment_order_dict(order: TreatmentOrder) -> dict:
+def _drug_line_out(line: TreatmentOrderDrugLine) -> dict:
+    return {
+        "id": line.id, "treatment_order_id": line.treatment_order_id, "sequence_number": line.sequence_number,
+        "generic_name": line.generic_name, "category": line.category, "dose_basis": line.dose_basis,
+        "standard_protocol_dose": line.standard_protocol_dose, "planned_dose": line.planned_dose,
+        "route": line.route, "notes": line.notes,
+    }
+
+
+def _treatment_order_dict(order: TreatmentOrder, db: Session = None) -> dict:
+    supportive_care = None
+    drug_lines = []
+    if db is not None:
+        plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == order.treatment_plan_id).first()
+        if plan and plan.regimen_id:
+            regimen = db.query(Regimen).filter(Regimen.id == plan.regimen_id).first()
+            if regimen:
+                supportive_care = {
+                    "premedications": regimen.premedications, "hydration": regimen.hydration,
+                    "supportive_therapy": regimen.supportive_therapy,
+                }
+        drug_lines = [_drug_line_out(l) for l in db.query(TreatmentOrderDrugLine).filter(
+            TreatmentOrderDrugLine.treatment_order_id == order.id
+        ).order_by(TreatmentOrderDrugLine.sequence_number.asc(), TreatmentOrderDrugLine.id.asc()).all()]
     return {
         "id": order.id,
         "treatment_plan_id": order.treatment_plan_id,
@@ -3454,10 +3498,15 @@ def _treatment_order_dict(order: TreatmentOrder) -> dict:
         "instructions": order.instructions,
         "version_no": order.version_no,
         "status": order.status,
+        "supersedes_id": order.supersedes_id,
+        "revision_reason": order.revision_reason,
+        "dose_modification_percent": order.dose_modification_percent,
         "signer_email": order.signer_email,
         "signer_role": order.signer_role,
         "signed_at": order.signed_at.isoformat() if order.signed_at else None,
         "created_by": order.created_by,
+        "drug_lines": drug_lines,
+        "supportive_care": supportive_care,
     }
 
 
@@ -3503,6 +3552,15 @@ async def create_treatment_order(
     if existing_open_order:
         raise HTTPException(409, f"Session #{session.session_no} already has an open order (#{existing_open_order.id}, {existing_open_order.status}).")
 
+    # Order revision / dose-modification linkage (Product 1 gap report item 9) -- optional,
+    # same validation shape as create_treatment_plan's own supersedes_id above: must reference
+    # a real prior order for this same patient.
+    order_supersedes_id = body.get("supersedes_id")
+    if order_supersedes_id is not None:
+        prior_order = db.query(TreatmentOrder).filter(TreatmentOrder.id == order_supersedes_id).first()
+        if not prior_order or prior_order.patient_id != patient_id:
+            raise HTTPException(422, "supersedes_id must reference an existing Treatment Order for the same patient")
+
     order = TreatmentOrder(
         treatment_plan_id=plan.id,
         treatment_session_id=session.id,
@@ -3510,10 +3568,30 @@ async def create_treatment_order(
         instructions=body.get("instructions", {}),
         version_no=1,
         status="DRAFT",
+        supersedes_id=order_supersedes_id,
+        revision_reason=body.get("revision_reason"),
+        dose_modification_percent=body.get("dose_modification_percent"),
         created_by=actor,
     )
     db.add(order)
     db.flush()
+
+    # Regimen-driven structured dosing panel (Product 1 gap report item 9: "Regimen selection...
+    # five-value dosing panel... supportive care") -- auto-seed drug lines from the plan's
+    # regimen so the clinician edits a real starting point instead of an empty instructions
+    # blob. standard_protocol_dose is copied reference text only; planned_dose starts blank for
+    # the clinician to type in themselves (never pre-filled with a computed value).
+    if plan.regimen_id:
+        regimen_lines = db.query(RegimenDrugLine).filter(
+            RegimenDrugLine.regimen_id == plan.regimen_id
+        ).order_by(RegimenDrugLine.sequence_number.asc(), RegimenDrugLine.id.asc()).all()
+        for rl in regimen_lines:
+            db.add(TreatmentOrderDrugLine(
+                treatment_order_id=order.id, sequence_number=rl.sequence_number, generic_name=rl.generic_name,
+                dose_basis=rl.dose_basis, standard_protocol_dose=rl.standard_protocol_dose, route=rl.route,
+                created_by=actor,
+            ))
+
     publish(
         db, "TREATMENT_ORDER_DRAFTED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
         title=f"Treatment Order drafted: session #{session.session_no}", category="TREATMENT_ORDER",
@@ -3522,7 +3600,89 @@ async def create_treatment_order(
     )
     db.commit()
     db.refresh(order)
-    return {"status": "success", "treatment_order": _treatment_order_dict(order)}
+    return {"status": "success", "treatment_order": _treatment_order_dict(order, db)}
+
+
+def _get_org_treatment_order(db: Session, order_id: int, org_id: int) -> TreatmentOrder:
+    order = db.query(TreatmentOrder).filter(TreatmentOrder.id == order_id).first()
+    if not order:
+        raise HTTPException(404, "Treatment order not found")
+    _check_patient_in_org(db, order.patient_id, org_id)
+    return order
+
+
+@router.get("/treatment-orders/{id}/drug-lines")
+def list_treatment_order_drug_lines(id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    order = _get_org_treatment_order(db, id, _org_id(current_user))
+    if not can_view_draft_plans_and_orders(current_user) and order.status == "DRAFT":
+        raise HTTPException(404, "Treatment order not found")
+    rows = db.query(TreatmentOrderDrugLine).filter(TreatmentOrderDrugLine.treatment_order_id == order.id).order_by(
+        TreatmentOrderDrugLine.sequence_number.asc(), TreatmentOrderDrugLine.id.asc()
+    ).all()
+    return {"results": [_drug_line_out(l) for l in rows]}
+
+
+@router.post("/treatment-orders/{id}/drug-lines", status_code=201)
+async def add_treatment_order_drug_line(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Structured dosing-panel line, editable only while the order is still DRAFT -- once
+    signed, the order's clinical content is fixed the same way every other signed CCA document
+    in this codebase is (RadiationPrescription, SurgicalPlan, ...)."""
+    _require_clinician(current_user)
+    order = _get_org_treatment_order(db, id, _org_id(current_user))
+    if order.status != "DRAFT":
+        raise HTTPException(409, f"Cannot edit drug lines on an order that is {order.status}")
+    body = await request.json()
+    generic_name = (body.get("generic_name") or "").strip()
+    if not generic_name:
+        raise HTTPException(422, "generic_name is required")
+    existing_count = db.query(TreatmentOrderDrugLine).filter(TreatmentOrderDrugLine.treatment_order_id == order.id).count()
+
+    line = TreatmentOrderDrugLine(
+        treatment_order_id=order.id, sequence_number=body.get("sequence_number", existing_count + 1),
+        generic_name=generic_name, category=body.get("category", "Antineoplastic"), dose_basis=body.get("dose_basis"),
+        standard_protocol_dose=body.get("standard_protocol_dose"), planned_dose=body.get("planned_dose"),
+        route=body.get("route"), notes=body.get("notes"), created_by=_actor(current_user),
+    )
+    db.add(line)
+    db.commit()
+    db.refresh(line)
+    return {"status": "success", "drug_line": _drug_line_out(line)}
+
+
+@router.patch("/treatment-orders/{id}/drug-lines/{line_id}")
+async def update_treatment_order_drug_line(id: int, line_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_clinician(current_user)
+    order = _get_org_treatment_order(db, id, _org_id(current_user))
+    if order.status != "DRAFT":
+        raise HTTPException(409, f"Cannot edit drug lines on an order that is {order.status}")
+    line = db.query(TreatmentOrderDrugLine).filter(
+        TreatmentOrderDrugLine.id == line_id, TreatmentOrderDrugLine.treatment_order_id == order.id
+    ).first()
+    if not line:
+        raise HTTPException(404, "Drug line not found on this order")
+    body = await request.json()
+    for field in ("generic_name", "category", "dose_basis", "standard_protocol_dose", "planned_dose", "route", "notes", "sequence_number"):
+        if field in body:
+            setattr(line, field, body[field])
+    db.commit()
+    db.refresh(line)
+    return {"status": "success", "drug_line": _drug_line_out(line)}
+
+
+@router.delete("/treatment-orders/{id}/drug-lines/{line_id}")
+def delete_treatment_order_drug_line(id: int, line_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_clinician(current_user)
+    order = _get_org_treatment_order(db, id, _org_id(current_user))
+    if order.status != "DRAFT":
+        raise HTTPException(409, f"Cannot edit drug lines on an order that is {order.status}")
+    line = db.query(TreatmentOrderDrugLine).filter(
+        TreatmentOrderDrugLine.id == line_id, TreatmentOrderDrugLine.treatment_order_id == order.id
+    ).first()
+    if not line:
+        raise HTTPException(404, "Drug line not found on this order")
+    db.delete(line)
+    db.commit()
+    return {"status": "success"}
 
 
 @router.get("/treatment-orders/{id}")
@@ -3536,7 +3696,7 @@ def get_treatment_order(
     _check_patient_in_org(db, order.patient_id, _org_id(current_user))
     if not can_view_draft_plans_and_orders(current_user) and order.status == "DRAFT":
         raise HTTPException(404, "Treatment order not found")
-    return {"treatment_order": project_treatment_order(_treatment_order_dict(order), current_user)}
+    return {"treatment_order": project_treatment_order(_treatment_order_dict(order, db), current_user)}
 
 
 @router.get("/patients/{patient_id}/treatment-orders")
@@ -3549,7 +3709,7 @@ def list_treatment_orders(
     if not can_view_draft_plans_and_orders(current_user):
         query = query.filter(TreatmentOrder.status != "DRAFT")
     orders = query.order_by(TreatmentOrder.id.desc()).all()
-    return {"treatment_orders": [project_treatment_order(_treatment_order_dict(o), current_user) for o in orders]}
+    return {"treatment_orders": [project_treatment_order(_treatment_order_dict(o, db), current_user) for o in orders]}
 
 
 @router.post("/treatment-orders/{id}/sign")
@@ -3585,7 +3745,7 @@ async def sign_treatment_order(
     )
     db.commit()
     db.refresh(order)
-    return {"status": "success", "treatment_order": _treatment_order_dict(order)}
+    return {"status": "success", "treatment_order": _treatment_order_dict(order, db)}
 
 
 @router.post("/treatment-orders/{id}/cancel")
@@ -3643,7 +3803,7 @@ def get_treatment_day_assessment(
         "patient": {"name": patient.name, "mrn": patient.mrn, "bsa": intake.bsa if intake else None},
         "protocol": plan.protocol_name if plan else "[NOT_RECORDED] No active treatment plan on record.",
         "cycle_info": f"Cycle {plan.completed_sessions + 1}" if plan else "[NOT_RECORDED]",
-        "order": project_treatment_order(_treatment_order_dict(order), current_user) if order else None,
+        "order": project_treatment_order(_treatment_order_dict(order, db), current_user) if order else None,
         # Reworded from "...cannot be recorded until a signed one exists" -- verified live that
         # this reads as a permission error to a non-technical tester between cycles (the card
         # goes from showing an order to showing nothing but this line), when it's actually a
@@ -3972,6 +4132,7 @@ def _safety_check_out(c: PreTreatmentSafetyCheck) -> dict:
     return {
         "id": c.id, "patient_id": c.patient_id, "treatment_order_id": c.treatment_order_id,
         "identity_verified": c.identity_verified, "identity_method": c.identity_method,
+        "name_matched": c.name_matched, "mrn_matched": c.mrn_matched, "dob_matched": c.dob_matched,
         "order_cycle_confirmed": c.order_cycle_confirmed,
         "allergy_review_done": c.allergy_review_done, "allergy_review_notes": c.allergy_review_notes,
         "symptom_review_notes": c.symptom_review_notes,
@@ -4009,7 +4170,14 @@ async def upsert_safety_check(
     if not check:
         check = PreTreatmentSafetyCheck(patient_id=patient_id, treatment_order_id=order_id)
         db.add(check)
-    check.identity_verified = bool(body.get("identity_verified", check.identity_verified))
+    check.name_matched = bool(body.get("name_matched", check.name_matched))
+    check.mrn_matched = bool(body.get("mrn_matched", check.mrn_matched))
+    check.dob_matched = bool(body.get("dob_matched", check.dob_matched))
+    identity_verified = bool(body.get("identity_verified", check.identity_verified))
+    matched_count = sum([check.name_matched, check.mrn_matched, check.dob_matched])
+    if identity_verified and matched_count < 2:
+        raise HTTPException(422, "At least 2 of 3 identifiers (name, MRN, date of birth) must match before identity can be verified")
+    check.identity_verified = identity_verified
     check.identity_method = body.get("identity_method", check.identity_method)
     check.order_cycle_confirmed = bool(body.get("order_cycle_confirmed", check.order_cycle_confirmed))
     check.allergy_review_done = bool(body.get("allergy_review_done", check.allergy_review_done))
@@ -4079,7 +4247,7 @@ async def record_vascular_access(
     return {"status": "success", "vascular_access": _vascular_access_out(record)}
 
 
-_VALID_PHARMACY_STATUSES = ["Verified", "Preparing", "Ready", "Dispensed", "Received"]
+_VALID_PHARMACY_STATUSES = ["Verified", "Preparing", "Ready", "Dispensed", "Received", "Queried", "Rejected"]
 
 
 def _pharmacy_readiness_out(p: PharmacyReadiness) -> dict:
@@ -4153,6 +4321,332 @@ async def upsert_pharmacy_readiness(
     return {"status": "success", "pharmacy_readiness": _pharmacy_readiness_out(row)}
 
 
+def _upsert_pharmacy_readiness_status(db: Session, patient_id: int, order_id: int, status_value: str, actor: str) -> PharmacyReadiness:
+    """Side-effect helper: keeps PharmacyReadiness (Day Care's own coarse status flag) in
+    sync with the richer PharmacyVerification/Preparation/Release workflow below, so every
+    existing reader of PharmacyReadiness keeps working unchanged (Product 1 vs Product 2 gap
+    report, Batch 2)."""
+    row = db.query(PharmacyReadiness).filter(PharmacyReadiness.treatment_order_id == order_id).first()
+    if row is None:
+        row = PharmacyReadiness(patient_id=patient_id, treatment_order_id=order_id, status=status_value)
+        db.add(row)
+    else:
+        row.status = status_value
+    row.status_updated_by = actor
+    row.status_updated_at = datetime.utcnow()
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Oncology Pharmacy (Product 1 vs Product 2 gap report, Batch 2): verification/query/reject,
+# preparation/compounding, and independent double-check/release -- the real safety workflow
+# PharmacyReadiness above never carried. Every dosing-adjacent field is a pharmacist
+# attestation or clinician-typed value, never a computed dose/threshold (standing repo rule).
+# ---------------------------------------------------------------------------
+
+_PHARMACY_CHECKLIST_KEYS = [
+    "patient_identity", "allergy", "regimen_version", "cycle_day", "dose_basis", "calculated_dose",
+    "ordered_dose", "dose_variance", "renal_adjustment", "hepatic_adjustment", "cumulative_dose",
+    "interaction", "duplication", "route", "diluent", "final_concentration", "stock", "expiry",
+]
+_PHARMACY_DECISIONS = ("Verified", "Query", "Reject")
+_PHARMACY_REASON_CODES = ("Dose clarification", "Allergy", "Interaction", "Formulation", "Stock", "Expiry", "Other")
+_PHARMACY_WASTAGE_REASONS = (
+    "Partial vial", "Dose rounding", "Preparation error", "Spill / breakage",
+    "Cancelled treatment", "Expired / BUD exceeded", "Return not reusable", "Other",
+)
+
+
+def _pharmacy_verification_out(v: PharmacyVerification) -> dict:
+    return {
+        "id": v.id, "patient_id": v.patient_id, "treatment_order_id": v.treatment_order_id,
+        "checklist": v.checklist, "decision": v.decision, "reason_code": v.reason_code, "message": v.message,
+        "resolved": v.resolved, "resolved_by": v.resolved_by,
+        "resolved_at": v.resolved_at.isoformat() if v.resolved_at else None,
+        "response_action": v.response_action, "response_note": v.response_note,
+        "verified_by": v.verified_by, "verified_at": v.verified_at.isoformat(),
+    }
+
+
+@router.get("/treatment/{order_id}/pharmacy-verification")
+def list_pharmacy_verifications(
+    order_id: int, patient_id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    _require_clinical_or_nursing_role(current_user)
+    _get_order_for_workspace(db, order_id, patient_id, _org_id(current_user))
+    rows = db.query(PharmacyVerification).filter(
+        PharmacyVerification.treatment_order_id == order_id
+    ).order_by(PharmacyVerification.id.desc()).all()
+    return {"results": [_pharmacy_verification_out(v) for v in rows]}
+
+
+@router.post("/treatment/pharmacy-verification", status_code=201)
+async def record_pharmacy_verification(
+    request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """The pharmacist's independent verification of a signed Treatment Order. Every checklist
+    item is the pharmacist personally confirming they checked it -- never a computed
+    comparison or threshold (standing repo rule; see PharmacyVerification's docstring for why
+    this deliberately differs from Product 1's own reference implementation here)."""
+    if not is_cca_pharmacist(current_user):
+        raise HTTPException(403, "Only the Pharmacist may record a pharmacy verification")
+    body = await request.json()
+    patient_id = _require_patient_id(body)
+    order_id = body.get("order_id")
+    if not order_id:
+        raise HTTPException(422, "order_id is required")
+    order = _get_order_for_workspace(db, order_id, patient_id, _org_id(current_user))
+    if order.status != "SIGNED":
+        raise HTTPException(409, f"Cannot verify an order that is {order.status}")
+
+    decision = body.get("decision")
+    if decision not in _PHARMACY_DECISIONS:
+        raise HTTPException(422, f"decision must be one of {_PHARMACY_DECISIONS}")
+    checklist = body.get("checklist") or {}
+    if decision == "Verified":
+        missing = [k for k in _PHARMACY_CHECKLIST_KEYS if not checklist.get(k)]
+        if missing:
+            raise HTTPException(422, f"All checklist items must be confirmed to verify -- missing: {', '.join(missing)}")
+    reason_code = body.get("reason_code")
+    message = body.get("message")
+    if decision in ("Query", "Reject"):
+        if not reason_code or reason_code not in _PHARMACY_REASON_CODES:
+            raise HTTPException(422, f"reason_code is required and must be one of {_PHARMACY_REASON_CODES}")
+        if not message:
+            raise HTTPException(422, "message is required for a Query or Reject decision")
+
+    actor = _actor(current_user)
+    verification = PharmacyVerification(
+        patient_id=patient_id, treatment_order_id=order_id, checklist=checklist, decision=decision,
+        reason_code=reason_code, message=message, verified_by=actor,
+    )
+    db.add(verification)
+    db.flush()
+
+    readiness_status = {"Verified": "Verified", "Query": "Queried", "Reject": "Rejected"}[decision]
+    _upsert_pharmacy_readiness_status(db, patient_id, order_id, readiness_status, actor)
+
+    publish(
+        db, "PHARMACY_VERIFICATION_RECORDED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Pharmacy verification: {decision}", category="TREATMENT",
+        description=f"{actor} recorded a pharmacy verification decision of {decision} for Treatment Order #{order_id}." + (f" Reason: {reason_code}." if reason_code else ""),
+        treatment_order_id=order_id,
+    )
+    db.commit()
+    db.refresh(verification)
+    return {"status": "success", "verification": _pharmacy_verification_out(verification)}
+
+
+@router.post("/treatment/pharmacy-verification/{id}/respond")
+async def respond_to_pharmacy_query(
+    id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """The treating oncologist's response to a pharmacy Query/Reject -- resolves it and
+    reopens the order for pharmacy re-review. Gated the same as who may sign the order (the
+    modality-matching treating clinician), not any clinician interchangeably."""
+    verification = db.query(PharmacyVerification).filter(PharmacyVerification.id == id).first()
+    if not verification:
+        raise HTTPException(404, "Pharmacy verification not found")
+    _check_patient_in_org(db, verification.patient_id, _org_id(current_user))
+    order = db.query(TreatmentOrder).filter(TreatmentOrder.id == verification.treatment_order_id).first()
+    plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == order.treatment_plan_id).first() if order else None
+    _require_modality_signer(current_user, plan.modality if plan else "")
+
+    if verification.resolved:
+        raise HTTPException(409, "This pharmacy query has already been resolved")
+    if verification.decision not in ("Query", "Reject"):
+        raise HTTPException(409, "Only a Query or Reject decision can be responded to")
+    body = await request.json()
+    response_action = body.get("response_action")
+    if not response_action:
+        raise HTTPException(422, "response_action is required")
+
+    actor = _actor(current_user)
+    verification.resolved = True
+    verification.resolved_by = actor
+    verification.resolved_at = datetime.utcnow()
+    verification.response_action = response_action
+    verification.response_note = body.get("response_note")
+    db.flush()
+    publish(
+        db, "PHARMACY_QUERY_RESOLVED", patient_id=verification.patient_id, actor=actor, role=current_user.get("role"),
+        title="Pharmacy query resolved", category="TREATMENT",
+        description=f"{actor} responded to a pharmacy {verification.decision.lower()}: {response_action}.",
+        treatment_order_id=verification.treatment_order_id,
+    )
+    db.commit()
+    db.refresh(verification)
+    return {"status": "success", "verification": _pharmacy_verification_out(verification)}
+
+
+def _get_org_drug_line(db: Session, line_id: int, org_id: int) -> tuple[TreatmentOrderDrugLine, TreatmentOrder]:
+    line = db.query(TreatmentOrderDrugLine).filter(TreatmentOrderDrugLine.id == line_id).first()
+    if not line:
+        raise HTTPException(404, "Treatment order drug line not found")
+    order = db.query(TreatmentOrder).filter(TreatmentOrder.id == line.treatment_order_id).first()
+    if not order:
+        raise HTTPException(404, "Treatment order not found")
+    _check_patient_in_org(db, order.patient_id, org_id)
+    return line, order
+
+
+def _pharmacy_preparation_out(p: PharmacyPreparation) -> dict:
+    return {
+        "id": p.id, "treatment_order_drug_line_id": p.treatment_order_drug_line_id, "patient_id": p.patient_id,
+        "treatment_order_id": p.treatment_order_id, "batch_number": p.batch_number,
+        "expiry_date": p.expiry_date.isoformat() if p.expiry_date else None, "drug_batch_id": p.drug_batch_id,
+        "diluent": p.diluent, "actual_volume": p.actual_volume, "actual_volume_unit": p.actual_volume_unit,
+        "final_concentration": p.final_concentration, "stability_hours": p.stability_hours,
+        "beyond_use_at": p.beyond_use_at.isoformat() if p.beyond_use_at else None,
+        "wastage_amount": p.wastage_amount, "wastage_unit": p.wastage_unit, "wastage_reason": p.wastage_reason,
+        "prepared_by": p.prepared_by, "prepared_at": p.prepared_at.isoformat(),
+    }
+
+
+@router.get("/treatment-orders/{order_id}/drug-lines/{line_id}/pharmacy-preparation")
+def get_pharmacy_preparation(
+    order_id: int, line_id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    _require_clinical_or_nursing_role(current_user)
+    line, order = _get_org_drug_line(db, line_id, _org_id(current_user))
+    if line.treatment_order_id != order_id:
+        raise HTTPException(404, "Drug line not found on this order")
+    prep = db.query(PharmacyPreparation).filter(PharmacyPreparation.treatment_order_drug_line_id == line_id).first()
+    return {"preparation": _pharmacy_preparation_out(prep) if prep else None}
+
+
+@router.post("/treatment-orders/{order_id}/drug-lines/{line_id}/pharmacy-preparation", status_code=201)
+async def record_pharmacy_preparation(
+    order_id: int, line_id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Preparation/compounding record for one drug line -- only once the order's latest
+    pharmacy verification decision is Verified (Product 1's Preparation Pending gate)."""
+    if not is_cca_pharmacist(current_user):
+        raise HTTPException(403, "Only the Pharmacist may record a preparation")
+    line, order = _get_org_drug_line(db, line_id, _org_id(current_user))
+    if line.treatment_order_id != order_id:
+        raise HTTPException(404, "Drug line not found on this order")
+    latest_verification = db.query(PharmacyVerification).filter(
+        PharmacyVerification.treatment_order_id == order_id
+    ).order_by(PharmacyVerification.id.desc()).first()
+    if not latest_verification or latest_verification.decision != "Verified":
+        raise HTTPException(409, "This order has not been verified by pharmacy yet")
+    if db.query(PharmacyPreparation).filter(PharmacyPreparation.treatment_order_drug_line_id == line_id).first():
+        raise HTTPException(409, "This drug line already has a preparation record")
+
+    body = await request.json()
+    if body.get("wastage_amount") and not body.get("wastage_reason"):
+        raise HTTPException(422, "wastage_reason is required when wastage_amount is recorded")
+    if body.get("wastage_reason") and body["wastage_reason"] not in _PHARMACY_WASTAGE_REASONS:
+        raise HTTPException(422, f"wastage_reason must be one of {_PHARMACY_WASTAGE_REASONS}")
+
+    actor = _actor(current_user)
+    now = datetime.utcnow()
+    stability_hours = body.get("stability_hours")
+    beyond_use_at = now + timedelta(hours=stability_hours) if stability_hours else None
+    prep = PharmacyPreparation(
+        treatment_order_drug_line_id=line_id, patient_id=order.patient_id, treatment_order_id=order_id,
+        batch_number=body.get("batch_number"),
+        expiry_date=datetime.strptime(body["expiry_date"], "%Y-%m-%d").date() if body.get("expiry_date") else None,
+        drug_batch_id=body.get("drug_batch_id"), diluent=body.get("diluent"), actual_volume=body.get("actual_volume"),
+        actual_volume_unit=body.get("actual_volume_unit"), final_concentration=body.get("final_concentration"),
+        stability_hours=stability_hours, beyond_use_at=beyond_use_at,
+        wastage_amount=body.get("wastage_amount"), wastage_unit=body.get("wastage_unit"),
+        wastage_reason=body.get("wastage_reason"), prepared_by=actor,
+    )
+    db.add(prep)
+    db.flush()
+    _upsert_pharmacy_readiness_status(db, order.patient_id, order_id, "Preparing", actor)
+    publish(
+        db, "PHARMACY_PREPARATION_RECORDED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Prepared: {line.generic_name}", category="TREATMENT",
+        description=f"{actor} recorded preparation of {line.generic_name} for Treatment Order #{order_id}.",
+        treatment_order_id=order_id,
+    )
+    db.commit()
+    db.refresh(prep)
+    return {"status": "success", "preparation": _pharmacy_preparation_out(prep)}
+
+
+def _pharmacy_release_out(r: PharmacyRelease) -> dict:
+    return {
+        "id": r.id, "treatment_order_drug_line_id": r.treatment_order_drug_line_id, "patient_id": r.patient_id,
+        "treatment_order_id": r.treatment_order_id, "second_check_by": r.second_check_by,
+        "label_verified": r.label_verified, "dispensed_to": r.dispensed_to, "manifest_no": r.manifest_no,
+        "dispensed_at": r.dispensed_at.isoformat() if r.dispensed_at else None, "released_by": r.released_by,
+    }
+
+
+@router.get("/treatment-orders/{order_id}/drug-lines/{line_id}/pharmacy-release")
+def get_pharmacy_release(
+    order_id: int, line_id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    _require_clinical_or_nursing_role(current_user)
+    line, order = _get_org_drug_line(db, line_id, _org_id(current_user))
+    if line.treatment_order_id != order_id:
+        raise HTTPException(404, "Drug line not found on this order")
+    release = db.query(PharmacyRelease).filter(PharmacyRelease.treatment_order_drug_line_id == line_id).first()
+    return {"release": _pharmacy_release_out(release) if release else None}
+
+
+@router.post("/treatment-orders/{order_id}/drug-lines/{line_id}/pharmacy-release", status_code=201)
+async def record_pharmacy_release(
+    order_id: int, line_id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Independent double-check + label/release -- requires a *different* pharmacist than the
+    one who prepared the line (see PharmacyRelease's docstring: a real double-check needs two
+    different logged-in pharmacist accounts, stricter than Product 1's free-typed-name check)."""
+    if not is_cca_pharmacist(current_user):
+        raise HTTPException(403, "Only the Pharmacist may record a release")
+    line, order = _get_org_drug_line(db, line_id, _org_id(current_user))
+    if line.treatment_order_id != order_id:
+        raise HTTPException(404, "Drug line not found on this order")
+    prep = db.query(PharmacyPreparation).filter(PharmacyPreparation.treatment_order_drug_line_id == line_id).first()
+    if not prep:
+        raise HTTPException(409, "This drug line has not been prepared yet")
+    if db.query(PharmacyRelease).filter(PharmacyRelease.treatment_order_drug_line_id == line_id).first():
+        raise HTTPException(409, "This drug line already has a release record")
+
+    actor = _actor(current_user)
+    if actor == prep.prepared_by:
+        raise HTTPException(409, "The independent double-check must be performed by a different pharmacist than the one who prepared this line")
+    body = await request.json()
+    if not body.get("label_verified"):
+        raise HTTPException(422, "label_verified must be confirmed to release")
+
+    now = datetime.utcnow()
+    release = PharmacyRelease(
+        treatment_order_drug_line_id=line_id, patient_id=order.patient_id, treatment_order_id=order_id,
+        second_check_by=actor, label_verified=True, dispensed_to=body.get("dispensed_to"),
+        manifest_no=body.get("manifest_no"), dispensed_at=now, released_by=actor,
+    )
+    db.add(release)
+    db.flush()
+
+    # PharmacyReadiness -> Dispensed only once every drug line on this order has a release.
+    all_line_ids = [l.id for l in db.query(TreatmentOrderDrugLine).filter(TreatmentOrderDrugLine.treatment_order_id == order_id).all()]
+    released_count = db.query(PharmacyRelease).filter(PharmacyRelease.treatment_order_drug_line_id.in_(all_line_ids)).count()
+    if all_line_ids and released_count >= len(all_line_ids):
+        _upsert_pharmacy_readiness_status(db, order.patient_id, order_id, "Dispensed", actor)
+
+    publish(
+        db, "PHARMACY_RELEASE_RECORDED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Released: {line.generic_name}", category="TREATMENT",
+        description=f"{actor} released {line.generic_name} for Treatment Order #{order_id}.",
+        treatment_order_id=order_id,
+    )
+    db.commit()
+    db.refresh(release)
+    return {"status": "success", "release": _pharmacy_release_out(release)}
+
+
 def _medication_out(m: InfusionMedicationAdministration) -> dict:
     return {
         "id": m.id, "patient_id": m.patient_id, "treatment_order_id": m.treatment_order_id,
@@ -4160,10 +4654,13 @@ def _medication_out(m: InfusionMedicationAdministration) -> dict:
         "sequence_no": m.sequence_no, "volume_diluent": m.volume_diluent, "rate_duration": m.rate_duration,
         "status": m.status, "product_label_verified": m.product_label_verified,
         "expiry_integrity_checked": m.expiry_integrity_checked, "second_verifier_name": m.second_verifier_name,
+        "label_match_confirmed": m.label_match_confirmed, "label_verified_by": m.label_verified_by,
         "start_time": m.start_time.isoformat() if m.start_time else None,
         "end_time": m.end_time.isoformat() if m.end_time else None,
         "actual_rate": m.actual_rate, "actual_volume": m.actual_volume, "omission_reason": m.omission_reason,
         "administered_by": m.administered_by, "administered_at": m.administered_at.isoformat() if m.administered_at else None,
+        "completion_status": m.completion_status, "reaction_occurred": m.reaction_occurred,
+        "variance_type": m.variance_type, "variance_reason": m.variance_reason, "variance_note": m.variance_note,
     }
 
 
@@ -4177,7 +4674,13 @@ def list_medications(
     rows = db.query(InfusionMedicationAdministration).filter(
         InfusionMedicationAdministration.treatment_order_id == order_id
     ).order_by(InfusionMedicationAdministration.sequence_no.asc(), InfusionMedicationAdministration.id.asc()).all()
-    return {"results": [_medication_out(m) for m in rows]}
+    out = []
+    for m in rows:
+        row = _medication_out(m)
+        iv = db.query(InfusionIndependentVerification).filter(InfusionIndependentVerification.administration_id == m.id).first()
+        row["independent_verification"] = _independent_verification_out(iv) if iv else None
+        out.append(row)
+    return {"results": out}
 
 
 @router.post("/treatment/medications")
@@ -4229,9 +4732,67 @@ async def verify_medication(
     record.expiry_integrity_checked = bool(body.get("expiry_integrity_checked", record.expiry_integrity_checked))
     if "second_verifier_name" in body:
         record.second_verifier_name = body["second_verifier_name"]
+    # Bedside label/barcode re-check (Product 1 vs Product 2 gap report, Batch 3) -- a boolean
+    # attestation matching Product 1's own "Barcode/label match" checkbox (no real scanner
+    # integration in either product), deliberately separate from PharmacyRelease.label_verified.
+    if "label_match_confirmed" in body:
+        record.label_match_confirmed = bool(body["label_match_confirmed"])
+        record.label_verified_by = _actor(current_user)
     db.commit()
     db.refresh(record)
     return {"status": "success", "medication": _medication_out(record)}
+
+
+_INDEPENDENT_VERIFICATION_CHECKLIST_KEYS = [
+    "drug", "dose", "volume_diluent", "route", "rate", "expiry", "physical_integrity", "sequence", "pump_settings",
+]
+
+
+def _independent_verification_out(v: InfusionIndependentVerification) -> dict:
+    return {
+        "id": v.id, "administration_id": v.administration_id, "patient_id": v.patient_id,
+        "checklist": v.checklist, "verified_by": v.verified_by, "verified_at": v.verified_at.isoformat(),
+    }
+
+
+@router.get("/treatment/medications/{admin_id}/independent-verification")
+def get_independent_verification(admin_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_clinical_or_nursing_role(current_user)
+    record = db.query(InfusionMedicationAdministration).filter(InfusionMedicationAdministration.id == admin_id).first()
+    if not record:
+        raise HTTPException(404, "Medication administration record not found")
+    _get_org_patient(db, record.patient_id, _org_id(current_user))
+    v = db.query(InfusionIndependentVerification).filter(InfusionIndependentVerification.administration_id == admin_id).first()
+    return {"verification": _independent_verification_out(v) if v else None}
+
+
+@router.post("/treatment/medications/{admin_id}/independent-verification", status_code=201)
+async def record_independent_verification(admin_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Independent chairside double-check before an Antineoplastic/Targeted Therapy line may
+    be started (Product 1 vs Product 2 gap report, Batch 3) -- the bedside equivalent of
+    PharmacyRelease's own independent double-check. Every checklist item must be confirmed;
+    the START endpoint separately enforces that whoever starts the administration is not the
+    same person who performed this verification (see record_medication_event)."""
+    _require_clinical_or_nursing_role(current_user)
+    record = db.query(InfusionMedicationAdministration).filter(InfusionMedicationAdministration.id == admin_id).first()
+    if not record:
+        raise HTTPException(404, "Medication administration record not found")
+    _get_org_patient(db, record.patient_id, _org_id(current_user))
+    if db.query(InfusionIndependentVerification).filter(InfusionIndependentVerification.administration_id == admin_id).first():
+        raise HTTPException(409, "This medication already has an independent verification recorded")
+
+    body = await request.json()
+    checklist = body.get("checklist") or {}
+    missing = [k for k in _INDEPENDENT_VERIFICATION_CHECKLIST_KEYS if not checklist.get(k)]
+    if missing:
+        raise HTTPException(422, f"All checklist items must be confirmed -- missing: {', '.join(missing)}")
+
+    actor = _actor(current_user)
+    v = InfusionIndependentVerification(administration_id=admin_id, patient_id=record.patient_id, checklist=checklist, verified_by=actor)
+    db.add(v)
+    db.commit()
+    db.refresh(v)
+    return {"status": "success", "verification": _independent_verification_out(v)}
 
 
 # Workflow-sequencing only (which button states make sense next) -- not a clinical rule.
@@ -4244,6 +4805,9 @@ _MEDICATION_TRANSITIONS = {
     "OMIT": ({"Pending"}, "Omitted"),
 }
 _MEDICATION_EVENTS_REQUIRING_REASON = {"STOP", "OMIT"}
+_COMPLETION_STATUSES = ("Administered", "Partially Administered", "Held", "Stopped")
+_MAR_VARIANCE_TYPES = ("None", "Dose variance", "Rate variance", "Route variance", "Timing variance", "Sequence variance", "Other")
+_MAR_VARIANCE_REASONS = ("Clinician instruction", "Infusion reaction", "Access issue", "Patient condition", "Operational delay", "Product issue", "Other")
 
 
 @router.post("/treatment/medications/{admin_id}/event")
@@ -4270,11 +4834,70 @@ async def record_medication_event(
     if record.status not in allowed_from:
         raise HTTPException(409, f"Cannot {event_type} a medication in {record.status} status")
 
+    actor = _actor(current_user)
+
+    if event_type == "START":
+        # Order-level pharmacy gate (Product 1 vs Product 2 gap report, Batch 2): if this
+        # order has any structured drug lines (Batch 1's regimen-driven dosing panel), every
+        # one of them must have a completed pharmacy release before administration can start.
+        # An order with no drug lines (no regimen was linked) stays ungated -- matches
+        # pre-Batch-2 behavior exactly, since there's nothing for pharmacy to have released.
+        drug_line_ids = [l.id for l in db.query(TreatmentOrderDrugLine).filter(
+            TreatmentOrderDrugLine.treatment_order_id == record.treatment_order_id
+        ).all()]
+        if drug_line_ids:
+            released_count = db.query(PharmacyRelease).filter(
+                PharmacyRelease.treatment_order_drug_line_id.in_(drug_line_ids)
+            ).count()
+            if released_count < len(drug_line_ids):
+                raise HTTPException(422, "Cannot start: pharmacy has not released this order yet")
+
+        # Administration sequence (Product 1 vs Product 2 gap report, Batch 3): every earlier
+        # sequence_no line on this same order must already be in a terminal state before this
+        # one may start -- pure workflow ordering off the nurse's own transcribed sequence_no,
+        # never a dose/timing computation.
+        earlier_unfinished = db.query(InfusionMedicationAdministration).filter(
+            InfusionMedicationAdministration.treatment_order_id == record.treatment_order_id,
+            InfusionMedicationAdministration.sequence_no < record.sequence_no,
+            ~InfusionMedicationAdministration.status.in_(("Completed", "Omitted", "Stopped")),
+        ).first()
+        if earlier_unfinished:
+            raise HTTPException(422, f"Medication sequence violation -- {earlier_unfinished.medication_name} (sequence #{earlier_unfinished.sequence_no}) must be finished first")
+
+        # Independent chairside double-check for Antineoplastic lines (Batch 3) -- must exist
+        # and must have been performed by someone other than whoever is starting now.
+        if record.category == "Antineoplastic":
+            iv = db.query(InfusionIndependentVerification).filter(InfusionIndependentVerification.administration_id == record.id).first()
+            if not iv:
+                raise HTTPException(422, "Independent verification is required before starting this antineoplastic medication")
+            if iv.verified_by == actor:
+                raise HTTPException(409, "Independent verification must be performed by someone other than the person starting administration")
+
+    if event_type in ("COMPLETE", "STOP"):
+        # Full MAR completion detail (Batch 3) -- completion_status and reaction_occurred are
+        # mandatory on every entry (Product 1's own design, not an optional afterthought);
+        # anything other than a clean "Administered" outcome, or any named variance type,
+        # requires a documented reason and note. Never a computed variance percentage/threshold
+        # (Product 1 does compute+block on one; we deliberately do not -- standing repo rule).
+        completion_status = body.get("completion_status")
+        if completion_status not in _COMPLETION_STATUSES:
+            raise HTTPException(422, f"completion_status is required and must be one of {_COMPLETION_STATUSES}")
+        if body.get("reaction_occurred") is None:
+            raise HTTPException(422, "reaction_occurred (true/false) is required")
+        variance_type = body.get("variance_type", "None")
+        if variance_type not in _MAR_VARIANCE_TYPES:
+            raise HTTPException(422, f"variance_type must be one of {_MAR_VARIANCE_TYPES}")
+        if completion_status != "Administered" or variance_type != "None":
+            variance_reason = body.get("variance_reason")
+            if not variance_reason or variance_reason not in _MAR_VARIANCE_REASONS:
+                raise HTTPException(422, f"variance_reason is required and must be one of {_MAR_VARIANCE_REASONS}")
+            if not body.get("variance_note"):
+                raise HTTPException(422, "variance_note is required when completion is not a clean Administered outcome")
+
     reason = body.get("notes") or body.get("omission_reason")
     if event_type in _MEDICATION_EVENTS_REQUIRING_REASON and not reason:
         raise HTTPException(422, f"{event_type} requires a documented reason")
 
-    actor = _actor(current_user)
     now = datetime.utcnow()
     db.add(InfusionAdministrationEvent(administration_id=record.id, event_type=event_type, notes=reason, performed_by=actor, performed_at=now))
 
@@ -4287,6 +4910,12 @@ async def record_medication_event(
         record.administered_at = now
     if event_type == "OMIT":
         record.omission_reason = reason
+    if event_type in ("COMPLETE", "STOP"):
+        record.completion_status = body.get("completion_status")
+        record.reaction_occurred = bool(body.get("reaction_occurred"))
+        record.variance_type = body.get("variance_type", "None")
+        record.variance_reason = body.get("variance_reason")
+        record.variance_note = body.get("variance_note")
     if body.get("actual_rate") is not None:
         record.actual_rate = body["actual_rate"]
     if body.get("actual_volume") is not None:
@@ -4592,6 +5221,7 @@ def _completion_out(c: TreatmentDayCompletion) -> dict:
     return {
         "id": c.id, "patient_id": c.patient_id, "treatment_order_id": c.treatment_order_id,
         "final_vitals": c.final_vitals, "final_symptoms": c.final_symptoms, "disposition": c.disposition,
+        "tolerance": c.tolerance,
         "access_status": c.access_status, "patient_education_notes": c.patient_education_notes,
         "red_flags_given": c.red_flags_given,
         "next_treatment_date": c.next_treatment_date.isoformat() if c.next_treatment_date else None,
@@ -4616,6 +5246,7 @@ def get_completion(
 # derives a clinical judgment from raw data, same reasoning as physician_disposition on
 # InfusionReactionEvent).
 _COMPLETION_DISPOSITIONS = ("Completed", "Partially Completed", "Not Completed", "Discontinued")
+_COMPLETION_TOLERANCES = ("Good", "Mild symptoms", "Significant reaction")
 
 
 @router.post("/treatment/completion")
@@ -4639,6 +5270,9 @@ async def record_completion(
     disposition = body.get("disposition")
     if disposition and disposition not in _COMPLETION_DISPOSITIONS:
         raise HTTPException(422, f"disposition must be one of {', '.join(_COMPLETION_DISPOSITIONS)}")
+    tolerance = body.get("tolerance")
+    if tolerance and tolerance not in _COMPLETION_TOLERANCES:
+        raise HTTPException(422, f"tolerance must be one of {', '.join(_COMPLETION_TOLERANCES)}")
 
     if db.query(TreatmentDayCompletion).filter(TreatmentDayCompletion.treatment_order_id == order_id).first():
         raise HTTPException(409, "This treatment order's nursing record is already completed and locked")
@@ -4656,7 +5290,7 @@ async def record_completion(
     next_date = body.get("next_treatment_date")
     completion = TreatmentDayCompletion(
         patient_id=patient_id, treatment_order_id=order_id, final_vitals=body.get("final_vitals"),
-        final_symptoms=body.get("final_symptoms"), disposition=disposition,
+        final_symptoms=body.get("final_symptoms"), disposition=disposition, tolerance=tolerance,
         access_status=body.get("access_status"), patient_education_notes=body.get("patient_education_notes"),
         red_flags_given=bool(body.get("red_flags_given", False)),
         next_treatment_date=datetime.strptime(next_date, "%Y-%m-%d").date() if next_date else None,
@@ -4673,6 +5307,60 @@ async def record_completion(
     db.commit()
     db.refresh(completion)
     return {"status": "success", "completion": _completion_out(completion)}
+
+
+@router.get("/treatment/{order_id}/full-mar")
+def get_full_mar(
+    order_id: int, patient_id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Read-only Full MAR report (gap PDF's Day-Care/MAR item) -- stitches together
+    every artifact already captured elsewhere in this workspace into one view for a
+    single treatment order. Adds no new data and computes nothing of its own."""
+    _require_clinical_or_nursing_role(current_user)
+    _get_order_for_workspace(db, order_id, patient_id, _org_id(current_user))
+
+    safety_check = db.query(PreTreatmentSafetyCheck).filter(PreTreatmentSafetyCheck.treatment_order_id == order_id).first()
+    vascular_access = db.query(VascularAccessAssessment).filter(VascularAccessAssessment.treatment_order_id == order_id).first()
+
+    medications = db.query(InfusionMedicationAdministration).filter(
+        InfusionMedicationAdministration.treatment_order_id == order_id
+    ).order_by(InfusionMedicationAdministration.sequence_no).all()
+    medication_rows = []
+    for m in medications:
+        row = _medication_out(m)
+        iv = db.query(InfusionIndependentVerification).filter(InfusionIndependentVerification.administration_id == m.id).first()
+        row["independent_verification"] = _independent_verification_out(iv) if iv else None
+        events = db.query(InfusionAdministrationEvent).filter(
+            InfusionAdministrationEvent.administration_id == m.id
+        ).order_by(InfusionAdministrationEvent.performed_at).all()
+        row["events"] = [
+            {"event_type": e.event_type, "notes": e.notes, "performed_by": e.performed_by, "performed_at": e.performed_at.isoformat()}
+            for e in events
+        ]
+        medication_rows.append(row)
+
+    drug_line_ids = [l.id for l in db.query(TreatmentOrderDrugLine).filter(TreatmentOrderDrugLine.treatment_order_id == order_id).all()]
+    releases = db.query(PharmacyRelease).filter(PharmacyRelease.treatment_order_drug_line_id.in_(drug_line_ids)).all() if drug_line_ids else []
+
+    monitoring = db.query(InfusionMonitoringObservation).filter(InfusionMonitoringObservation.treatment_order_id == order_id).order_by(InfusionMonitoringObservation.observation_time).all()
+    holds = db.query(TreatmentHoldEvent).filter(TreatmentHoldEvent.treatment_order_id == order_id).all()
+    reactions = db.query(InfusionReactionEvent).filter(InfusionReactionEvent.treatment_order_id == order_id).all()
+    extravasations = db.query(ExtravasationEvent).filter(ExtravasationEvent.treatment_order_id == order_id).all()
+    completion = db.query(TreatmentDayCompletion).filter(TreatmentDayCompletion.treatment_order_id == order_id).first()
+
+    return {
+        "treatment_order_id": order_id, "patient_id": patient_id,
+        "safety_check": _safety_check_out(safety_check) if safety_check else None,
+        "vascular_access": _vascular_access_out(vascular_access) if vascular_access else None,
+        "medications": medication_rows,
+        "pharmacy_releases": [_pharmacy_release_out(r) for r in releases],
+        "monitoring_observations": [_monitoring_out(o) for o in monitoring],
+        "holds": [_hold_out(h) for h in holds],
+        "reactions": [_reaction_out(r) for r in reactions],
+        "extravasations": [_extravasation_out(e) for e in extravasations],
+        "completion": _completion_out(completion) if completion else None,
+    }
 
 
 # ---------------------------------------------------------

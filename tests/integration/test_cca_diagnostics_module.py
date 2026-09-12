@@ -108,7 +108,10 @@ def test_pathology_report_and_finalize(client, auth_headers, db_session, oncolog
 
     draft = client.post(f"/api/cca/pathology/orders/{order.id}/report", headers=path_headers, json={
         "findings_text": "Invasive ductal carcinoma.",
-        "structured_report": {"histologic_type": "IDC", "grade": "2", "margins": "Clear"},
+        "structured_report": {
+            "site": "Left breast", "specimen": "Core needle biopsy", "histology": "IDC",
+            "grade": "2", "margin_status": "Clear",
+        },
     })
     assert draft.status_code == 200
     result_id = draft.json()["result"]["id"]

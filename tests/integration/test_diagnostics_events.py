@@ -76,7 +76,10 @@ def test_imaging_and_pathology_finalize_publish_domain_events(client, auth_heade
 
     path_order_id = _raise_order(db_session, patient_id, "PATHOLOGY")
     pathologist_headers = auth_headers(pathologist)
-    path_result_id = client.post(f"/api/cca/pathology/orders/{path_order_id}/report", headers=pathologist_headers, json={"findings_text": "Invasive ductal carcinoma."}).json()["result"]["id"]
+    path_result_id = client.post(f"/api/cca/pathology/orders/{path_order_id}/report", headers=pathologist_headers, json={
+        "findings_text": "Invasive ductal carcinoma.",
+        "structured_report": {"site": "Left breast", "specimen": "Core needle biopsy", "histology": "IDC"},
+    }).json()["result"]["id"]
     path_res = client.post(f"/api/cca/pathology/results/{path_result_id}/finalize", headers=pathologist_headers)
     assert path_res.status_code == 200
     assert db_session.query(DomainEvent).filter(DomainEvent.event_type == "PATHOLOGY_REPORT_FINALIZED").count() == 1

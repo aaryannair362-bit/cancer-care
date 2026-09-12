@@ -30,6 +30,7 @@ const ROLE_HOME = {
   CCAPathologist: '/pathologist.html',
   CCALabPhlebotomy: '/laboratory.html',
   CCAInfusionNurse: '/infusion_nurse.html',
+  CCAPharmacist: '/oncology_pharmacist.html',
   CCAMDTCoordinator: '/mdt_coordinator.html',
   CCAPatientLiaison: '/patient_liaison.html',
   CCAFinancialCounsellor: '/patient_financial_services.html',

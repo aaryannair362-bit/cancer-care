@@ -134,6 +134,48 @@ ADDITIVE_COLUMNS = [
     # Precise per-drug reaction attribution (Gap Analysis PDF item 11) -- see
     # InfusionReactionEvent.administration_id's docstring.
     ("cca_infusion_reaction_events", "administration_id", "INTEGER"),
+    # Product 1 vs Product 2 gap report, Batch 1 (Systemic Treatment Orders): Regimen selection
+    # on TreatmentPlan, and order revision/dose-modification linkage on TreatmentOrder -- see
+    # both columns' docstrings on their respective models.
+    ("cca_treatment_plans", "regimen_id", "INTEGER"),
+    ("cca_treatment_orders", "supersedes_id", "INTEGER"),
+    ("cca_treatment_orders", "revision_reason", "TEXT"),
+    ("cca_treatment_orders", "dose_modification_percent", "VARCHAR(20)"),
+    # Product 1 vs Product 2 gap report, Batch 3 (Day Care / MAR): 2-of-3 patient identifier
+    # match, partial administration/variance tracking, mandatory reaction attestation, bedside
+    # label re-check, and overall tolerance -- see each column's docstring on its model.
+    ("cca_pretreatment_safety_checks", "name_matched", "BOOLEAN DEFAULT FALSE"),
+    ("cca_pretreatment_safety_checks", "mrn_matched", "BOOLEAN DEFAULT FALSE"),
+    ("cca_pretreatment_safety_checks", "dob_matched", "BOOLEAN DEFAULT FALSE"),
+    ("cca_infusion_medication_administrations", "completion_status", "VARCHAR(30)"),
+    ("cca_infusion_medication_administrations", "variance_type", "VARCHAR(30)"),
+    ("cca_infusion_medication_administrations", "variance_reason", "VARCHAR(50)"),
+    ("cca_infusion_medication_administrations", "variance_note", "TEXT"),
+    ("cca_infusion_medication_administrations", "reaction_occurred", "BOOLEAN"),
+    ("cca_infusion_medication_administrations", "label_match_confirmed", "BOOLEAN DEFAULT FALSE"),
+    ("cca_infusion_medication_administrations", "label_verified_by", "VARCHAR(200)"),
+    ("cca_treatment_day_completions", "tolerance", "VARCHAR(30)"),
+    # Batch 4 (Radiation Physics QA): the Physicist's actual Physics QA decision -- previously
+    # entering the physics_qa step was a bare signature with no decision/note/checklist at all.
+    ("cca_radiation_phases", "physics_qa_checklist", "JSON"),
+    ("cca_radiation_phases", "physics_qa_decision", "VARCHAR(30)"),
+    ("cca_radiation_phases", "physics_qa_note", "TEXT"),
+    ("cca_radiation_phases", "physics_qa_decided_by", "VARCHAR(200)"),
+    ("cca_radiation_phases", "physics_qa_decided_at", "TIMESTAMP"),
+    ("cca_radiation_phases", "physician_approval_note", "TEXT"),
+    # Batch 5 (RT Delivery): image guidance/setup detail, an independent second-check, and a
+    # non-computed dose-match attestation on each delivered fraction.
+    ("cca_radiation_fractions", "image_guidance_performed", "BOOLEAN"),
+    ("cca_radiation_fractions", "setup_variation", "TEXT"),
+    ("cca_radiation_fractions", "verified_by", "VARCHAR(200)"),
+    ("cca_radiation_fractions", "dose_match_confirmed", "BOOLEAN"),
+    ("cca_radiation_fractions", "dose_mismatch_note", "TEXT"),
+    # Batch 6 (Pathology): finalized-report immutability/amendment chain on CCAResult.
+    ("cca_results", "supersedes_id", "INTEGER"),
+    ("cca_results", "superseded_by_id", "INTEGER"),
+    ("cca_results", "amendment_reason", "TEXT"),
+    ("cca_results", "amended_by", "VARCHAR(200)"),
+    ("cca_results", "amended_at", "TIMESTAMP"),
 ]
 
 

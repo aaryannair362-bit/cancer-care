@@ -21,6 +21,11 @@ def nurse(make_user, oncologist):
 
 
 @pytest.fixture
+def nurse_b(make_user, oncologist):
+    return make_user(email="nurseb@infusion-reaction-test.com", role="CCAInfusionNurse", organization_id=oncologist.organization_id)
+
+
+@pytest.fixture
 def onc_headers(auth_headers, oncologist):
     return auth_headers(oncologist)
 
@@ -28,6 +33,11 @@ def onc_headers(auth_headers, oncologist):
 @pytest.fixture
 def nurse_headers(auth_headers, nurse):
     return auth_headers(nurse)
+
+
+@pytest.fixture
+def nurse_b_headers(auth_headers, nurse_b):
+    return auth_headers(nurse_b)
 
 
 @pytest.fixture
@@ -120,16 +130,21 @@ def test_reaction_still_works_with_only_free_text_medication_running(client, nur
 # Item 12: Overall Chemotherapy Completion status
 # ---------------------------------------------------------------------------
 
-def _complete_the_only_medication(client, nurse_headers, patient_id, order_id):
+def _complete_the_only_medication(client, nurse_headers, nurse_b_headers, patient_id, order_id):
     admin_id = _add_medication(client, nurse_headers, patient_id, order_id)
+    client.post(f"/api/cca/treatment/medications/{admin_id}/independent-verification", headers=nurse_b_headers, json={
+        "checklist": {k: True for k in ["drug", "dose", "volume_diluent", "route", "rate", "expiry", "physical_integrity", "sequence", "pump_settings"]},
+    })
     client.post(f"/api/cca/treatment/medications/{admin_id}/event", headers=nurse_headers, json={"event_type": "START"})
-    client.post(f"/api/cca/treatment/medications/{admin_id}/event", headers=nurse_headers, json={"event_type": "COMPLETE"})
+    client.post(f"/api/cca/treatment/medications/{admin_id}/event", headers=nurse_headers, json={
+        "event_type": "COMPLETE", "completion_status": "Administered", "reaction_occurred": False,
+    })
 
 
 @pytest.mark.parametrize("disposition", ["Completed", "Partially Completed", "Not Completed", "Discontinued"])
-def test_completion_accepts_each_valid_disposition(client, nurse_headers, onc_headers, patient, disposition):
+def test_completion_accepts_each_valid_disposition(client, nurse_headers, nurse_b_headers, onc_headers, patient, disposition):
     order_id = _create_signed_order(client, onc_headers, patient.id)
-    _complete_the_only_medication(client, nurse_headers, patient.id, order_id)
+    _complete_the_only_medication(client, nurse_headers, nurse_b_headers, patient.id, order_id)
 
     done = client.post("/api/cca/treatment/completion", headers=nurse_headers, json={
         "patient_id": patient.id, "order_id": order_id, "disposition": disposition,
@@ -138,9 +153,9 @@ def test_completion_accepts_each_valid_disposition(client, nurse_headers, onc_he
     assert done.json()["completion"]["disposition"] == disposition
 
 
-def test_completion_rejects_invalid_disposition_value(client, nurse_headers, onc_headers, patient):
+def test_completion_rejects_invalid_disposition_value(client, nurse_headers, nurse_b_headers, onc_headers, patient):
     order_id = _create_signed_order(client, onc_headers, patient.id)
-    _complete_the_only_medication(client, nurse_headers, patient.id, order_id)
+    _complete_the_only_medication(client, nurse_headers, nurse_b_headers, patient.id, order_id)
 
     rejected = client.post("/api/cca/treatment/completion", headers=nurse_headers, json={
         "patient_id": patient.id, "order_id": order_id, "disposition": "Stable, tolerated infusion well.",
@@ -148,10 +163,10 @@ def test_completion_rejects_invalid_disposition_value(client, nurse_headers, onc
     assert rejected.status_code == 422
 
 
-def test_completion_with_no_disposition_still_succeeds(client, nurse_headers, onc_headers, patient):
+def test_completion_with_no_disposition_still_succeeds(client, nurse_headers, nurse_b_headers, onc_headers, patient):
     """disposition stays optional -- the nurse may complete without one."""
     order_id = _create_signed_order(client, onc_headers, patient.id)
-    _complete_the_only_medication(client, nurse_headers, patient.id, order_id)
+    _complete_the_only_medication(client, nurse_headers, nurse_b_headers, patient.id, order_id)
 
     done = client.post("/api/cca/treatment/completion", headers=nurse_headers, json={
         "patient_id": patient.id, "order_id": order_id,

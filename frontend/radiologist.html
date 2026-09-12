@@ -57,6 +57,9 @@
         .btn-navy:hover { background: var(--navy-action-hover); }
         .btn-outline { background: #FFFFFF; border: 1px solid var(--line); color: var(--ink-700); font-size: 12.5px; font-weight: 600; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
         .btn-outline:hover { border-color: var(--ink-400); background: #F8FAFC; }
+        .btn-danger { background: #FFFFFF; border: 1px solid var(--rose-badge-text); color: var(--rose-badge-text); font-size: 12.5px; font-weight: 700; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-danger:hover { background: var(--rose-badge-bg); }
+        .form-checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-800); margin-bottom: 10px; }
         .worklist-row { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px; margin-bottom: 10px; display: grid; grid-template-columns: 1.3fr 1fr 1fr 0.8fr auto; gap: 14px; align-items: center; }
         .wl-label { font-size: 11px; color: var(--ink-500); text-transform: uppercase; margin-bottom: 2px; }
         .wl-value { font-size: 13.5px; font-weight: 700; color: var(--ink-900); }
@@ -510,6 +513,8 @@
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
         }
 
+        const INTERRUPTION_CATEGORIES = ['Clinical/Operational', 'Toxicity/Condition', 'Machine Issue', 'Other'];
+
         async function renderTechPhaseCard(p) {
             let fractions = [];
             try {
@@ -529,7 +534,9 @@
                         <span class="badge ${p.rt_sub_status === 'interrupted' ? 'badge-rose' : 'badge-green'}">${escapeHtml(p.rt_sub_status.replace(/_/g, ' '))}</span>
                     </div>
                     ${p.special_instructions ? `<div class="special-instructions">⚠ Special Instructions: ${escapeHtml(p.special_instructions)}</div>` : ''}
-                    ${nextFraction ? `
+                    ${p.rt_sub_status === 'on_treatment' ? `<button class="btn-outline" style="margin-bottom:12px;" onclick="toggleInterruptForm(${p.id})">⏸ Interrupt Treatment</button><div id="interrupt-form-${p.id}"></div>` : ''}
+                    ${p.rt_sub_status === 'interrupted' ? `<button class="btn-navy" style="margin-bottom:12px;" onclick="resumeTreatment(${p.id})">▶ Resume Treatment</button>` : ''}
+                    ${nextFraction && p.rt_sub_status !== 'interrupted' ? `
                         <div class="wl-label">Next Fraction</div>
                         <div class="wl-value" style="margin-bottom:12px;">#${nextFraction.fraction_number} of ${p.number_of_fractions}</div>
                         <div class="form-grid-2">
@@ -539,24 +546,75 @@
                                     <option value="delivered">Delivered</option>
                                     <option value="missed">Missed</option>
                                     <option value="rescheduled">Rescheduled</option>
+                                    <option value="cancelled">Cancelled</option>
                                 </select>
                             </div>
                         </div>
-                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Variance / Toxicity noted (if any)</label><textarea id="fx-variance-${nextFraction.id}" class="form-textarea" rows="2" placeholder="e.g. setup shift corrected, Grade 1 skin erythema"></textarea></div>
+                        <div class="form-checkbox-row"><input type="checkbox" id="fx-igrt-${nextFraction.id}"/> <label for="fx-igrt-${nextFraction.id}">Image guidance performed</label></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Setup variation (if any)</label><input type="text" id="fx-setup-${nextFraction.id}" class="form-input" placeholder="e.g. shift corrected pre-beam" /></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Variance / Toxicity noted (if any)</label><textarea id="fx-variance-${nextFraction.id}" class="form-textarea" rows="2" placeholder="e.g. Grade 1 skin erythema"></textarea></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Verified by (independent second check)</label><input type="text" id="fx-verifier-${nextFraction.id}" class="form-input" placeholder="e.g. RTT B. Rao" /></div>
+                        <div class="form-checkbox-row"><input type="checkbox" id="fx-dosematch-${nextFraction.id}" checked/> <label for="fx-dosematch-${nextFraction.id}">Delivered dose matches prescription</label></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Dose mismatch note (required if unchecked above)</label><input type="text" id="fx-dosemismatch-${nextFraction.id}" class="form-input" /></div>
                         <button class="btn-navy" onclick="recordFraction(${nextFraction.id})">Record Fraction</button>
-                    ` : '<p style="font-size:12.5px; color:var(--ink-500);">No fractions currently scheduled for this phase.</p>'}
+                    ` : (p.rt_sub_status !== 'interrupted' ? '<p style="font-size:12.5px; color:var(--ink-500);">No fractions currently scheduled for this phase.</p>' : '')}
                 </div>
             `;
         }
 
         async function recordFraction(fractionId) {
+            const dosMatch = document.getElementById(`fx-dosematch-${fractionId}`).checked;
             try {
                 await Api.post(`${CCA_API}/radiation-fractions/${fractionId}/event`, {
                     status: document.getElementById(`fx-status-${fractionId}`).value,
                     delivered_dose_gy: Number(document.getElementById(`fx-dose-${fractionId}`).value) || undefined,
                     variance_or_toxicity: document.getElementById(`fx-variance-${fractionId}`).value || undefined,
+                    image_guidance_performed: document.getElementById(`fx-igrt-${fractionId}`).checked,
+                    setup_variation: document.getElementById(`fx-setup-${fractionId}`).value || undefined,
+                    verified_by: document.getElementById(`fx-verifier-${fractionId}`).value || undefined,
+                    dose_match_confirmed: dosMatch,
+                    dose_mismatch_note: dosMatch ? undefined : document.getElementById(`fx-dosemismatch-${fractionId}`).value,
                 });
                 toast('Fraction recorded', 'success');
+                loadTechWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function toggleInterruptForm(phaseId) {
+            const host = document.getElementById(`interrupt-form-${phaseId}`);
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div class="section-card" style="background:var(--rose-badge-bg); margin-bottom:12px;">
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Reason *</label><textarea id="int-reason-${phaseId}" class="form-textarea" rows="2"></textarea></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Category</label>
+                        <select id="int-category-${phaseId}" class="form-select">${INTERRUPTION_CATEGORIES.map(c => `<option>${c}</option>`).join('')}</select>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Compensation plan (how the missed time will be made up)</label><textarea id="int-plan-${phaseId}" class="form-textarea" rows="2"></textarea></div>
+                    <button class="btn-danger" onclick="submitInterruption(${phaseId})">Confirm Interruption</button>
+                    <button class="btn-outline" style="margin-left:8px;" onclick="toggleInterruptForm(${phaseId})">Cancel</button>
+                </div>
+            `;
+        }
+
+        async function submitInterruption(phaseId) {
+            const reason = document.getElementById(`int-reason-${phaseId}`).value;
+            if (!reason) { toast('Reason is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/radiation-phases/${phaseId}/transition`, {
+                    status: 'interrupted', reason,
+                    category: document.getElementById(`int-category-${phaseId}`).value,
+                    compensation_plan: document.getElementById(`int-plan-${phaseId}`).value || undefined,
+                });
+                toast('Treatment interrupted', 'success');
+                loadTechWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function resumeTreatment(phaseId) {
+            try {
+                await Api.post(`${CCA_API}/radiation-phases/${phaseId}/transition`, { status: 'on_treatment' });
+                toast('Treatment resumed', 'success');
                 loadTechWorklist();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }

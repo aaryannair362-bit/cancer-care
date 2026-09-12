@@ -111,9 +111,20 @@ class CCARadiationPhase(Base):
     physicist_signer_email = Column(String(200), nullable=True)
     physicist_signer_role = Column(String(50), nullable=True)
     physicist_signed_at = Column(DateTime, nullable=True)
+    # Physics QA (Product 1 vs Product 2 gap report, Batch 4) -- Product 1's real physics_qa
+    # is a single holistic decision + mandatory note; we decompose it into a small attestation
+    # checklist (never a computed pass/fail) mirroring PharmacyVerification's own pattern.
+    # Recording a decision does NOT itself move rt_sub_status (matches Product 1: rejecting
+    # doesn't auto-revert) -- see record_physics_qa/transition_radiation_phase.
+    physics_qa_checklist = Column(JSON, nullable=True)
+    physics_qa_decision = Column(String(30), nullable=True)  # Approved, Rejected / Replan Required
+    physics_qa_note = Column(Text, nullable=True)
+    physics_qa_decided_by = Column(String(200), nullable=True)
+    physics_qa_decided_at = Column(DateTime, nullable=True)
     physician_signer_email = Column(String(200), nullable=True)
     physician_signer_role = Column(String(50), nullable=True)
     physician_signed_at = Column(DateTime, nullable=True)
+    physician_approval_note = Column(Text, nullable=True)
     created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -140,8 +151,60 @@ class RadiationFraction(Base):
     # Radiation Technologist notes about THIS delivery (a setup variance, an observed
     # toxicity) at the point of delivery.
     variance_or_toxicity = Column(Text, nullable=True)
+    # Product 1 vs Product 2 gap report, Batch 5 (RT Delivery) -- image guidance and setup
+    # variance are two distinct real fields in Product 1's delivery record, not one merged
+    # variance_or_toxicity string. verified_by is an independent second-check attestation,
+    # deliberately separate from recorded_by (who performed the delivery).
+    image_guidance_performed = Column(Boolean, nullable=True)
+    setup_variation = Column(Text, nullable=True)
+    verified_by = Column(String(200), nullable=True)
+    # Product 1's rt_fraction_safety() computes and BLOCKS on a delivered-dose-vs-prescription
+    # tolerance check and a projected-cumulative-vs-total-dose check -- standing repo rule
+    # forbids porting that computation. This is the non-computed substitute: the RTT's own
+    # attestation that the delivered dose matches what was prescribed, never a system
+    # comparison. dose_mismatch_note is required only when the RTT flags a mismatch.
+    dose_match_confirmed = Column(Boolean, nullable=True)
+    dose_mismatch_note = Column(Text, nullable=True)
     recorded_by = Column(String(200), nullable=True)
     recorded_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RadiationInterruption(Base):
+    """A real, append-only interruption record for a CCARadiationPhase's on-treatment course
+    (Product 1 vs Product 2 gap report, Batch 5) -- previously `interrupted` was a bare
+    rt_sub_status flip with zero captured detail. Mirrors Product 1's real `interruptions`
+    list: multiple interruptions can occur across a course, each with its own reason/category/
+    compensation plan, and its own resume (end_at). Deliberately its own table, not a reuse
+    of Day Care's TreatmentHoldEvent (a different workspace/workflow) and not a mere status
+    flag."""
+    __tablename__ = "cca_radiation_interruptions"
+    id = Column(Integer, primary_key=True)
+    phase_id = Column(Integer, ForeignKey("cca_radiation_phases.id"), nullable=False)
+    reason = Column(Text, nullable=False)
+    category = Column(String(50), nullable=True)  # Clinical/Operational, Toxicity/Condition, Machine Issue, Other
+    start_at = Column(DateTime, default=datetime.utcnow)
+    end_at = Column(DateTime, nullable=True)
+    compensation_plan = Column(Text, nullable=True)
+    recorded_by = Column(String(200), nullable=True)
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RadiationOnTreatmentVisit(Base):
+    """The Radiation Oncologist's periodic On-Treatment Visit (Product 1 vs Product 2 gap
+    report, Batch 5) -- a real, separate, multiple-per-course signed clinical review distinct
+    from any single fraction's own notes (previously conflated into on_treatment_review_note,
+    a single string on whichever fraction row happened to receive it)."""
+    __tablename__ = "cca_radiation_otvs"
+    id = Column(Integer, primary_key=True)
+    phase_id = Column(Integer, ForeignKey("cca_radiation_phases.id"), nullable=False)
+    after_fraction_number = Column(Integer, nullable=True)
+    assessment = Column(Text, nullable=False)
+    toxicity_summary = Column(Text, nullable=False)
+    plan = Column(Text, nullable=False)
+    weight_kg = Column(Float, nullable=True)
+    performance_status = Column(String(50), nullable=True)
+    signed_by = Column(String(200), nullable=True)
+    signed_at = Column(DateTime, default=datetime.utcnow)
 
 
 class SurgicalPlan(Base):
@@ -357,6 +420,30 @@ class RegimenDrugLine(Base):
     standard_protocol_dose = Column(String(200), nullable=True)  # descriptive reference text, not computed
     route = Column(String(50), nullable=True)
     notes = Column(Text, nullable=True)
+
+
+class TreatmentOrderDrugLine(Base):
+    """Structured per-drug dosing panel on a TreatmentOrder (Product 1 vs Product 2 gap report,
+    Batch 1: "Systemic Treatment/Chemotherapy Orders" -- regimen-driven order lines, supportive
+    care, five-value dosing panel). Auto-seeded from the parent order's TreatmentPlan.regimen's
+    RegimenDrugLines at order creation, then clinician-edited before signing.
+    standard_protocol_dose is copied reference text from the regimen line (what the library
+    says); planned_dose is what the clinician actually orders for this cycle -- both are
+    clinician-authored strings, never computed, matching RegimenDrugLine.standard_protocol_dose's
+    own documented reasoning (standing repo rule: no dose-calculation logic)."""
+    __tablename__ = "cca_treatment_order_drug_lines"
+    id = Column(Integer, primary_key=True)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=False)
+    sequence_number = Column(Integer, default=1)
+    generic_name = Column(String(200), nullable=False)
+    category = Column(String(30), default="Antineoplastic")  # Premedication, Antineoplastic, Other
+    dose_basis = Column(String(30), nullable=True)  # reference only, e.g. fixed, mg_kg, mg_m2, auc
+    standard_protocol_dose = Column(String(200), nullable=True)  # reference text copied from the regimen line
+    planned_dose = Column(String(200), nullable=True)  # clinician-typed for this specific order, never computed
+    route = Column(String(50), nullable=True)
+    notes = Column(Text, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class TreatmentPlanPhase(Base):

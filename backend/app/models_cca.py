@@ -303,11 +303,22 @@ class CCAResult(Base):
     comparison = Column(Text, nullable=True)
     impression = Column(Text, nullable=True)
     structured_report = Column(JSON, nullable=True)
-    report_status = Column(String(30), default="Draft")  # Draft|Finalized -- "No autonomous final report"
+    report_status = Column(String(30), default="Draft")  # Draft|Finalized|Superseded -- "No autonomous final report"
     finalized_by = Column(String(200), nullable=True)
     finalized_at = Column(DateTime, nullable=True)
     critical_acknowledged_by = Column(String(200), nullable=True)
     critical_acknowledged_at = Column(DateTime, nullable=True)
+    # Amendment/immutability (Product 1 vs Product 2 gap report, Batch 6: Pathology) -- once
+    # Finalized, a report is immutable; a further edit must go through the amendment path
+    # instead, which creates a NEW linked row rather than mutating the finalized one, so the
+    # original finalized content is never silently lost. supersedes_id/superseded_by_id point
+    # in opposite directions along the same chain (old->new and new->old are both stored so
+    # either end can be found without a reverse query).
+    supersedes_id = Column(Integer, ForeignKey("cca_results.id"), nullable=True)
+    superseded_by_id = Column(Integer, nullable=True)
+    amendment_reason = Column(Text, nullable=True)
+    amended_by = Column(String(200), nullable=True)
+    amended_at = Column(DateTime, nullable=True)
 
 class StagingRecord(Base):
     __tablename__ = "cca_staging_records"
@@ -693,6 +704,11 @@ class TreatmentPlan(Base):
     intent = Column(String(100), default="Curative")
     modality = Column(String(100), default="Systemic Chemotherapy")
     protocol_name = Column(String(200), default="AC-T (Doxorubicin/Cyclophosphamide followed by Paclitaxel)")
+    # Links to the controlled Regimen library (models_cca_oncology_ext.py's Regimen, PDF item 6)
+    # -- optional convenience prefill for protocol_name/drug lines, never a hard lock; a plan
+    # can still be drafted with protocol_name alone (Product 1 gap report item 9: "Regimen
+    # selection"). See TreatmentOrderDrugLine for how this seeds an order's dosing panel.
+    regimen_id = Column(Integer, ForeignKey("cca_regimens.id"), nullable=True)
     planned_sessions = Column(Integer, default=8)
     completed_sessions = Column(Integer, default=0)
     start_date = Column(Date, default=datetime.utcnow)
@@ -785,6 +801,13 @@ class TreatmentOrder(Base):
     instructions = Column(JSON, nullable=True)  # e.g. {"drug":..., "dose":..., "route":..., "rate":...}
     version_no = Column(Integer, default=1)
     status = Column(String(30), default="DRAFT")  # DRAFT, SIGNED, EXECUTED, HELD, CANCELLED
+    # Order revision / dose-modification linkage (Product 1 gap report item 9) -- mirrors
+    # TreatmentPlan.supersedes_id's own pattern. dose_modification_percent is a clinician-chosen
+    # label (e.g. "75%"), never computed -- see TreatmentOrderDrugLine's docstring for why no
+    # dose is ever calculated in this repo.
+    supersedes_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=True)
+    revision_reason = Column(Text, nullable=True)
+    dose_modification_percent = Column(String(20), nullable=True)
     signer_email = Column(String(200), nullable=True)
     signer_role = Column(String(50), nullable=True)
     signed_at = Column(DateTime, nullable=True)
@@ -907,6 +930,13 @@ class PreTreatmentSafetyCheck(Base):
     treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=False)
     identity_verified = Column(Boolean, default=False)
     identity_method = Column(String(200), nullable=True)
+    # 2-of-3 patient identifier match (Product 1 vs Product 2 gap report, Batch 3: Day
+    # Care/MAR pre-administration assessment) -- structural count-gate the router enforces
+    # (at least 2 of these 3 must be true before identity_verified may be set true), never a
+    # computed identity-matching algorithm; each is the nurse's own attestation.
+    name_matched = Column(Boolean, default=False)
+    mrn_matched = Column(Boolean, default=False)
+    dob_matched = Column(Boolean, default=False)
     order_cycle_confirmed = Column(Boolean, default=False)
     allergy_review_done = Column(Boolean, default=False)
     allergy_review_notes = Column(Text, nullable=True)
@@ -940,9 +970,11 @@ class PharmacyReadiness(Base):
     """One row per Treatment Order, status updated in place -- traceability comes
     from calling publish() on every transition (DomainEvent/CCAJourneyEvent), the
     same pattern TREATMENT_HELD/TREATMENT_ADMINISTERED already use, rather than a
-    second history table. No CCAPharmacist role exists in auth.CCA_ROLES today, so
-    this is recorded by the nurse coordinating with pharmacy, not a pharmacist
-    login -- deliberately not adding a new role for this pass."""
+    second history table. CCAPharmacist now exists (auth.CCA_ROLES) and drives the
+    richer PharmacyVerification/PharmacyPreparation/PharmacyRelease workflow below
+    (Product 1 vs Product 2 gap report, Batch 2) -- this row stays Day Care's own
+    coarse status flag, auto-upserted as a side effect of that workflow so every
+    existing reader of PharmacyReadiness keeps working unchanged."""
     __tablename__ = "cca_pharmacy_readiness"
     id = Column(Integer, primary_key=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
@@ -956,6 +988,87 @@ class PharmacyReadiness(Base):
     expiry_checked = Column(Boolean, default=False)
     second_checker_name = Column(String(200), nullable=True)
     notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PharmacyVerification(Base):
+    """Oncology Pharmacy verification/query/reject (Product 1 vs Product 2 gap report,
+    Batch 2, "SCR-PHA-002/003"). `checklist` is an 18-key JSON dict of pharmacist
+    attestations (patient_identity, allergy, regimen_version, cycle_day, dose_basis,
+    calculated_dose, ordered_dose, dose_variance, renal_adjustment, hepatic_adjustment,
+    cumulative_dose, interaction, duplication, route, diluent, final_concentration, stock,
+    expiry) -- every key is the pharmacist personally confirming they checked that item, never
+    a system computation or threshold comparison (standing repo rule: no dose-calculation
+    logic -- Product 1's own reference implementation does independently recompute/threshold
+    several of these, which is exactly what we deliberately do NOT port).
+    resolved/resolved_by/resolved_at/response_action/response_note are filled by the treating
+    oncologist's query response (POST .../respond), which reopens the order for re-verification
+    -- mirrors TreatmentClearance's own "decision + reason, clinician-authored" shape."""
+    __tablename__ = "cca_pharmacy_verifications"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=False)
+    checklist = Column(JSON, nullable=True)
+    decision = Column(String(20), nullable=False)  # Verified, Query, Reject
+    reason_code = Column(String(50), nullable=True)  # Dose clarification, Allergy, Interaction, Formulation, Stock, Expiry, Other
+    message = Column(Text, nullable=True)
+    resolved = Column(Boolean, default=False)
+    resolved_by = Column(String(200), nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    response_action = Column(Text, nullable=True)
+    response_note = Column(Text, nullable=True)
+    verified_by = Column(String(200))
+    verified_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PharmacyPreparation(Base):
+    """Oncology Pharmacy preparation/compounding record, one per TreatmentOrderDrugLine
+    (models_cca_oncology_ext.py, Batch 1) -- Product 1 tracks preparation per drug item, and
+    Batch 1 already gives us that granularity, so no new per-line concept is needed.
+    final_concentration is pharmacist-typed, never computed from dose/volume (Product 1 does
+    compute this; we deliberately don't -- standing repo rule). beyond_use_at is simple date
+    arithmetic off a pharmacist-entered stability_hours reference (prepared_at + stability_hours),
+    not a dosing decision. drug_batch_id is an optional link into the general HMS drug/batch
+    master (models.py's DrugBatch) for real traceability without rebuilding inventory tracking."""
+    __tablename__ = "cca_pharmacy_preparations"
+    id = Column(Integer, primary_key=True)
+    treatment_order_drug_line_id = Column(Integer, ForeignKey("cca_treatment_order_drug_lines.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=False)
+    batch_number = Column(String(100), nullable=True)
+    expiry_date = Column(Date, nullable=True)
+    drug_batch_id = Column(Integer, ForeignKey("drug_batches.id"), nullable=True)
+    diluent = Column(String(200), nullable=True)
+    actual_volume = Column(String(50), nullable=True)
+    actual_volume_unit = Column(String(20), nullable=True)
+    final_concentration = Column(String(100), nullable=True)
+    stability_hours = Column(Integer, nullable=True)
+    beyond_use_at = Column(DateTime, nullable=True)
+    wastage_amount = Column(String(50), nullable=True)
+    wastage_unit = Column(String(20), nullable=True)
+    wastage_reason = Column(String(50), nullable=True)
+    prepared_by = Column(String(200))
+    prepared_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PharmacyRelease(Base):
+    """Independent double-check + label/release, 1:1 with PharmacyPreparation. Unlike Product 1
+    (which free-types second_check_by and string-compares it against the preparer's typed
+    name), second_check_by/released_by here are always the authenticated caller's own actor
+    identity (this codebase's own established convention -- actor identity is never a
+    self-typed name) -- the write endpoint rejects with 409 if it equals the preparation's
+    prepared_by, so a real double-check requires two different logged-in pharmacist accounts."""
+    __tablename__ = "cca_pharmacy_releases"
+    id = Column(Integer, primary_key=True)
+    treatment_order_drug_line_id = Column(Integer, ForeignKey("cca_treatment_order_drug_lines.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=False)
+    second_check_by = Column(String(200))
+    label_verified = Column(Boolean, default=False)
+    dispensed_to = Column(String(200), nullable=True)
+    manifest_no = Column(String(100), nullable=True)
+    dispensed_at = Column(DateTime, nullable=True)
+    released_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -989,8 +1102,45 @@ class InfusionMedicationAdministration(Base):
     omission_reason = Column(Text, nullable=True)
     administered_by = Column(String(200), nullable=True)
     administered_at = Column(DateTime, nullable=True)
+    # Full MAR / partial administration / variance (Product 1 vs Product 2 gap report, Batch
+    # 3) -- completion_status is a separate axis from `status` above (a completed line can
+    # still have been only Partially Administered); variance_type/reason/note are the nurse's
+    # own attestation that something differed from the order, never a computed percentage or
+    # threshold (standing repo rule -- Product 1 itself computes a variance % and blocks past
+    # 20%, which we deliberately do not port; see record_medication_event's docstring).
+    completion_status = Column(String(30), nullable=True)  # Administered, Partially Administered, Held, Stopped
+    variance_type = Column(String(30), nullable=True)  # None, Dose variance, Rate variance, Route variance, Timing variance, Sequence variance, Other
+    variance_reason = Column(String(50), nullable=True)  # Clinician instruction, Infusion reaction, Access issue, Patient condition, Operational delay, Product issue, Other
+    variance_note = Column(Text, nullable=True)
+    # Mandatory reaction attestation on every MAR entry (Product 1's own design -- not an
+    # optional afterthought), distinct from the richer InfusionReactionEvent this codebase
+    # already has for the actual clinical detail once reaction_occurred is True.
+    reaction_occurred = Column(Boolean, nullable=True)
+    # Bedside label/barcode re-check -- a boolean attestation (matching Product 1's own
+    # "Barcode/label match" checkbox, not real scanner integration), deliberately separate
+    # from PharmacyRelease.label_verified (pharmacy's own check before dispensing).
+    label_match_confirmed = Column(Boolean, default=False)
+    label_verified_by = Column(String(200), nullable=True)
     created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class InfusionIndependentVerification(Base):
+    """Independent chairside double-check before administering an Antineoplastic/Targeted
+    Therapy line (Product 1 vs Product 2 gap report, Batch 3) -- the bedside equivalent of
+    PharmacyRelease's independent double-check. `checklist` is a 9-key JSON dict of nurse
+    attestations (drug, dose, volume_diluent, route, rate, expiry, physical_integrity,
+    sequence, pump_settings), matching PharmacyVerification's own JSON-checklist shape. Must
+    be performed by someone other than whoever ultimately starts the administration -- the
+    write/START endpoints enforce this by actor identity, never a self-typed name (same
+    convention as PharmacyRelease)."""
+    __tablename__ = "cca_infusion_independent_verifications"
+    id = Column(Integer, primary_key=True)
+    administration_id = Column(Integer, ForeignKey("cca_infusion_medication_administrations.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    checklist = Column(JSON, nullable=True)
+    verified_by = Column(String(200))
+    verified_at = Column(DateTime, default=datetime.utcnow)
 
 
 class InfusionAdministrationEvent(Base):
@@ -1110,6 +1260,10 @@ class TreatmentDayCompletion(Base):
     final_vitals = Column(JSON, nullable=True)
     final_symptoms = Column(Text, nullable=True)
     disposition = Column(String(200), nullable=True)
+    # Overall tolerance of today's treatment (Product 1 vs Product 2 gap report, Batch 3) --
+    # a nurse-chosen governed value, never derived/computed from the per-drug reaction or
+    # variance data recorded above (standing repo rule: never compute a clinical judgment).
+    tolerance = Column(String(30), nullable=True)  # Good, Mild symptoms, Significant reaction
     access_status = Column(String(50), nullable=True)  # Flushed, Removed, Locked, Left in situ
     patient_education_notes = Column(Text, nullable=True)
     red_flags_given = Column(Boolean, default=False)

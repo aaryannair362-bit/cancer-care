@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aivana — Oncology Pharmacist</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-page: #F1F5F9; --bg-sidebar: #EEF2F6; --bg-surface: #FFFFFF; --bg-card-subtle: #F8FAFC;
+            --ink-900: #0F172A; --ink-800: #1E293B; --ink-700: #334155; --ink-600: #475569; --ink-500: #64748B; --ink-400: #94A3B8; --ink-300: #CBD5E1;
+            --line: #E2E8F0; --line-subtle: #F1F5F9;
+            --brand-primary: #3B82F6; --brand-dark: #1E3A8A; --navy-action: #2A4365; --navy-action-hover: #1E3A8A;
+            --green-badge-bg: #DCFCE7; --green-badge-text: #166534;
+            --amber-badge-bg: #FEF3C7; --amber-badge-text: #92400E;
+            --rose-badge-bg: #FFE4E6; --rose-badge-text: #9F1239;
+            --blue-badge-bg: #E0E7FF; --blue-badge-text: #3730A3;
+            --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px; --radius-full: 9999px;
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05); --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', -apple-system, sans-serif; background: var(--bg-page); color: var(--ink-800); height: 100vh; display: flex; flex-direction: column; overflow: hidden; -webkit-font-smoothing: antialiased; }
+        .topbar { height: 64px; background: var(--bg-surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; flex-shrink: 0; z-index: 20; }
+        .brand-logo { font-size: 20px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; display: flex; align-items: center; gap: 8px; text-decoration: none; }
+        .header-actions { display: flex; align-items: center; gap: 12px; }
+        .role-badge-pill { display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: #F8FAFC; border: 1px solid var(--line); border-radius: var(--radius-full); font-size: 13px; font-weight: 500; color: var(--ink-800); cursor: pointer; }
+        .avatar-pill { width: 38px; height: 38px; border-radius: var(--radius-full); background: #E2E8F0; color: var(--ink-800); display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; border: 1px solid var(--line); cursor: pointer; }
+        .app-body { flex: 1; display: flex; overflow: hidden; }
+        .sidebar { width: 240px; background: var(--bg-sidebar); border-right: 1px solid var(--line); padding: 20px 14px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; overflow-y: auto; }
+        .sidebar-section-title { font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: var(--ink-400); text-transform: uppercase; padding: 10px 12px 6px; }
+        .sidebar-nav-item { display: flex; align-items: center; justify-content: space-between; padding: 11px 14px; border-radius: var(--radius-md); font-size: 13.5px; font-weight: 500; color: var(--ink-700); text-decoration: none; cursor: pointer; }
+        .sidebar-nav-item:hover { background: rgba(255, 255, 255, 0.6); color: var(--ink-900); }
+        .sidebar-nav-item.active { background: #FFFFFF; color: var(--ink-900); font-weight: 600; box-shadow: var(--shadow-sm); border: 1px solid rgba(226, 232, 240, 0.8); }
+        .nav-item-left { display: flex; align-items: center; gap: 10px; }
+        .nav-chevron { color: var(--ink-400); font-size: 12px; }
+        .canvas { flex: 1; overflow-y: auto; padding: 28px 36px; }
+        .view-panel { display: none; }
+        .view-panel.active { display: block; }
+        .page-title { font-size: 26px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; margin-bottom: 4px; }
+        .page-subtitle { font-size: 13.5px; color: var(--ink-500); margin-bottom: 20px; }
+        .section-card { background: var(--bg-surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 20px; box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+        .section-title { font-size: 16px; font-weight: 700; color: var(--ink-900); }
+        .section-sub { font-size: 12px; color: var(--ink-500); margin-top: 2px; }
+        .badge { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: var(--radius-sm); display: inline-flex; align-items: center; }
+        .badge-green { background: var(--green-badge-bg); color: var(--green-badge-text); }
+        .badge-amber { background: var(--amber-badge-bg); color: var(--amber-badge-text); }
+        .badge-rose { background: var(--rose-badge-bg); color: var(--rose-badge-text); }
+        .badge-blue { background: var(--blue-badge-bg); color: var(--blue-badge-text); }
+        .btn-navy { background: var(--navy-action); color: #FFFFFF; font-size: 12.5px; font-weight: 600; padding: 9px 16px; border-radius: var(--radius-sm); border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-navy:hover { background: var(--navy-action-hover); }
+        .btn-outline { background: #FFFFFF; border: 1px solid var(--line); color: var(--ink-700); font-size: 12.5px; font-weight: 600; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-outline:hover { border-color: var(--ink-400); background: #F8FAFC; }
+        .btn-danger { background: var(--rose-badge-text); color: #fff; font-size: 12.5px; font-weight: 600; padding: 9px 14px; border-radius: var(--radius-sm); border: none; cursor: pointer; }
+        .btn-sm { font-size: 11px !important; padding: 6px 10px !important; }
+        .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+        .form-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+        .form-group { display: flex; flex-direction: column; gap: 6px; }
+        .form-label { font-size: 12px; font-weight: 600; color: var(--ink-700); }
+        .form-input, .form-select, .form-textarea { width: 100%; height: 38px; padding: 0 12px; background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; color: var(--ink-900); outline: none; }
+        .form-textarea { height: auto; padding: 10px 12px; }
+        .checklist-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
+        .checklist-item { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-700); background: var(--bg-card-subtle); padding: 8px 10px; border-radius: var(--radius-sm); }
+        .form-checkbox-row { display: flex; align-items: center; gap: 8px; }
+        .med-card { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 14px; margin-bottom: 10px; }
+        .med-card-title { font-size: 13px; font-weight: 700; color: var(--ink-900); }
+        .empty-hint { font-size: 12.5px; color: var(--ink-500); }
+        .hms-toast { position: fixed; bottom: 24px; right: 24px; background: var(--ink-900); color: #fff; padding: 12px 18px; border-radius: var(--radius-md); font-size: 13px; box-shadow: var(--shadow-md); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 999; max-width: 360px; }
+        .hms-toast--visible { opacity: 1; transform: translateY(0); }
+        .hms-toast--success { background: var(--green-badge-text); }
+        .hms-toast--error { background: var(--rose-badge-text); }
+        .hms-toast--info { background: var(--blue-badge-text); }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <a href="/oncology_pharmacist.html" class="brand-logo">Aivana</a>
+        <div></div>
+        <div class="header-actions">
+            <div class="role-badge-pill" onclick="location.href='/index.html'"><span>Oncology Pharmacist</span><span>▾</span></div>
+            <div class="avatar-pill" title="Logged in">P ▾</div>
+        </div>
+    </header>
+    <div class="app-body">
+        <aside class="sidebar">
+            <div class="sidebar-section-title">PHARMACY</div>
+            <a class="sidebar-nav-item active" id="nav-worklist" onclick="showTab('worklist')"><div class="nav-item-left"><span>💊</span><span>Verification &amp; Release Worklist</span></div><span class="nav-chevron">›</span></a>
+        </aside>
+        <main class="canvas">
+            <div id="view-worklist" class="view-panel active">
+                <h1 class="page-title">Verification &amp; Release Worklist</h1>
+                <p class="page-subtitle">Signed treatment orders awaiting pharmacy verification, preparation, or release. Order → Verify → Query/Approve → Prepare → Double Check → Release → Administer.</p>
+                <div id="worklist-content"><!-- Populated via JS: loadPharmacyWorklist() --></div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script>
+        const ccaUser = Auth.requirePage(['CCAPharmacist', 'Admin']);
+        const CCA_API = '/cca';
+        const CHECKLIST_ITEMS = [
+            ['patient_identity', 'Patient identity'], ['allergy', 'Allergy review'], ['regimen_version', 'Regimen version'],
+            ['cycle_day', 'Cycle / day'], ['dose_basis', 'Dose basis'], ['calculated_dose', 'Calculated dose'],
+            ['ordered_dose', 'Ordered dose'], ['dose_variance', 'Dose variance'], ['renal_adjustment', 'Renal adjustment'],
+            ['hepatic_adjustment', 'Hepatic adjustment'], ['cumulative_dose', 'Cumulative dose'], ['interaction', 'Drug interaction'],
+            ['duplication', 'Therapy duplication'], ['route', 'Route'], ['diluent', 'Diluent'],
+            ['final_concentration', 'Final concentration'], ['stock', 'Stock availability'], ['expiry', 'Expiry'],
+        ];
+        const REASON_CODES = ['Dose clarification', 'Allergy', 'Interaction', 'Formulation', 'Stock', 'Expiry', 'Other'];
+        const WASTAGE_REASONS = ['Partial vial', 'Dose rounding', 'Preparation error', 'Spill / breakage', 'Cancelled treatment', 'Expired / BUD exceeded', 'Return not reusable', 'Other'];
+
+        function showTab(tab) {
+            document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.sidebar-nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(`view-${tab}`).classList.add('active');
+            document.getElementById(`nav-${tab}`).classList.add('active');
+            if (tab === 'worklist') loadPharmacyWorklist();
+        }
+
+        async function loadPharmacyWorklist() {
+            const container = document.getElementById('worklist-content');
+            try {
+                const patientsData = await Api.get(`${CCA_API}/patients`);
+                const patients = patientsData.results || [];
+                const entries = [];
+                for (const p of patients) {
+                    let orders = [];
+                    try {
+                        const od = await Api.get(`${CCA_API}/patients/${p.id}/treatment-orders`);
+                        orders = (od.treatment_orders || []).filter(o => o.status === 'SIGNED');
+                    } catch (err) { continue; }
+                    for (const o of orders) entries.push({ patient: p, order: o });
+                }
+                if (!entries.length) {
+                    container.innerHTML = '<div class="section-card"><p class="empty-hint">No signed orders currently need pharmacy action.</p></div>';
+                    return;
+                }
+                container.innerHTML = (await Promise.all(entries.map(e => renderOrderCard(e.patient, e.order)))).join('');
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function renderOrderCard(patient, order) {
+            let verifications = [];
+            try {
+                const vd = await Api.get(`${CCA_API}/treatment/${order.id}/pharmacy-verification?patient_id=${patient.id}`);
+                verifications = vd.results || [];
+            } catch (err) { /* none yet */ }
+            const latest = verifications[0] || null;
+
+            let body = '';
+            if (!latest || latest.decision !== 'Verified') {
+                body = renderVerificationForm(order.id, patient.id, latest);
+            } else {
+                body = await renderDrugLinesSection(order);
+            }
+
+            return `
+                <div class="section-card">
+                    <div class="section-head">
+                        <div>
+                            <div class="section-title">${escapeHtml(patient.name)} <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(patient.mrn)}</span></div>
+                            <div class="section-sub">Treatment Order #${order.id}${order.dose_modification_percent ? ' · Dose modification: ' + escapeHtml(order.dose_modification_percent) : ''}</div>
+                        </div>
+                        ${latest ? `<span class="badge ${latest.decision === 'Verified' ? 'badge-green' : latest.decision === 'Query' ? 'badge-amber' : 'badge-rose'}">${escapeHtml(latest.decision)}${latest.decision !== 'Verified' && !latest.resolved ? ' (awaiting oncologist)' : ''}</span>` : '<span class="badge badge-amber">Verification Pending</span>'}
+                    </div>
+                    ${(order.drug_lines || []).length ? `<div class="section-sub" style="margin-bottom:12px;">Drugs: ${order.drug_lines.map(l => escapeHtml(l.generic_name) + (l.planned_dose ? ' (' + escapeHtml(l.planned_dose) + ')' : '')).join(', ')}</div>` : '<p class="empty-hint" style="margin-bottom:12px;">This order has no structured drug lines.</p>'}
+                    ${body}
+                </div>
+            `;
+        }
+
+        function renderVerificationForm(orderId, patientId, latest) {
+            const queryNote = latest && latest.decision !== 'Verified' ? `
+                <div class="section-sub" style="background:var(--amber-badge-bg); color:var(--amber-badge-text); padding:8px 12px; border-radius:var(--radius-sm); margin-bottom:12px;">
+                    Last decision: ${escapeHtml(latest.decision)} (${escapeHtml(latest.reason_code || '')}) — ${escapeHtml(latest.message || '')}${latest.resolved ? ' · Oncologist responded: ' + escapeHtml(latest.response_action || '') : ' · Awaiting oncologist response.'}
+                </div>` : '';
+            return `
+                ${queryNote}
+                <div class="checklist-grid">
+                    ${CHECKLIST_ITEMS.map(([key, label]) => `<label class="checklist-item"><input type="checkbox" id="chk-${orderId}-${key}" /> ${escapeHtml(label)}</label>`).join('')}
+                </div>
+                <div class="form-grid-2">
+                    <div class="form-group"><label class="form-label">Reason (if Query/Reject)</label><select id="reason-${orderId}" class="form-select"><option value="">—</option>${REASON_CODES.map(r => `<option>${r}</option>`).join('')}</select></div>
+                    <div class="form-group"><label class="form-label">Message</label><input type="text" id="message-${orderId}" class="form-input" /></div>
+                </div>
+                <button class="btn-navy" onclick="submitVerification(${orderId}, ${patientId}, 'Verified')">✔ Verify</button>
+                <button class="btn-outline" onclick="submitVerification(${orderId}, ${patientId}, 'Query')">? Query</button>
+                <button class="btn-danger" onclick="submitVerification(${orderId}, ${patientId}, 'Reject')">✕ Reject</button>
+            `;
+        }
+
+        async function submitVerification(orderId, patientId, decision) {
+            const checklist = {};
+            CHECKLIST_ITEMS.forEach(([key]) => { checklist[key] = document.getElementById(`chk-${orderId}-${key}`).checked; });
+            try {
+                await Api.post(`${CCA_API}/treatment/pharmacy-verification`, {
+                    patient_id: patientId, order_id: orderId, decision, checklist,
+                    reason_code: document.getElementById(`reason-${orderId}`).value || null,
+                    message: document.getElementById(`message-${orderId}`).value || null,
+                });
+                toast(`Recorded: ${decision}`, 'success');
+                loadPharmacyWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function renderDrugLinesSection(order) {
+            const lines = order.drug_lines || [];
+            if (!lines.length) return '<p class="empty-hint">Verified — no structured drug lines to prepare.</p>';
+            const cards = await Promise.all(lines.map(l => renderDrugLineCard(order.id, l)));
+            return cards.join('');
+        }
+
+        async function renderDrugLineCard(orderId, line) {
+            let prep = null, release = null;
+            try { prep = (await Api.get(`${CCA_API}/treatment-orders/${orderId}/drug-lines/${line.id}/pharmacy-preparation`)).preparation; } catch (err) {}
+            try { release = (await Api.get(`${CCA_API}/treatment-orders/${orderId}/drug-lines/${line.id}/pharmacy-release`)).release; } catch (err) {}
+
+            if (release) {
+                return `<div class="med-card"><div class="med-card-title">${escapeHtml(line.generic_name)} <span class="badge badge-green">Released</span></div><div class="section-sub">By ${escapeHtml(release.released_by)} · ${escapeHtml(release.dispensed_to || '—')} · ${new Date(release.dispensed_at).toLocaleString()}</div></div>`;
+            }
+            if (prep) {
+                return `
+                    <div class="med-card">
+                        <div class="med-card-title">${escapeHtml(line.generic_name)} <span class="badge badge-blue">Prepared — awaiting release</span></div>
+                        <div class="section-sub" style="margin-bottom:10px;">Batch ${escapeHtml(prep.batch_number || '—')} · Prepared by ${escapeHtml(prep.prepared_by)}</div>
+                        <div class="form-checkbox-row" style="margin-bottom:10px;"><input type="checkbox" id="label-${line.id}" /> <label for="label-${line.id}" style="font-size:12.5px;">Label verified</label></div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Dispensed to</label><input type="text" id="dispto-${line.id}" class="form-input" placeholder="e.g. Day Care Chair 3" /></div>
+                            <div class="form-group"><label class="form-label">Manifest no.</label><input type="text" id="manifest-${line.id}" class="form-input" /></div>
+                        </div>
+                        <button class="btn-navy btn-sm" onclick="submitRelease(${orderId}, ${line.id})">Double-Check &amp; Release</button>
+                    </div>
+                `;
+            }
+            return `
+                <div class="med-card">
+                    <div class="med-card-title">${escapeHtml(line.generic_name)} <span class="badge badge-amber">Preparation Pending</span></div>
+                    <div class="form-grid-3" style="margin-top:10px;">
+                        <div class="form-group"><label class="form-label">Batch number</label><input type="text" id="batch-${line.id}" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Expiry date</label><input type="date" id="expiry-${line.id}" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Diluent</label><input type="text" id="diluent-${line.id}" class="form-input" /></div>
+                    </div>
+                    <div class="form-grid-3">
+                        <div class="form-group"><label class="form-label">Actual volume</label><input type="text" id="volume-${line.id}" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Volume unit</label><input type="text" id="volumeunit-${line.id}" class="form-input" placeholder="mL" /></div>
+                        <div class="form-group"><label class="form-label">Final concentration</label><input type="text" id="concentration-${line.id}" class="form-input" /></div>
+                    </div>
+                    <div class="form-grid-3">
+                        <div class="form-group"><label class="form-label">Stability (hours)</label><input type="number" id="stability-${line.id}" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Wastage amount</label><input type="text" id="wastage-${line.id}" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Wastage reason</label><select id="wastagereason-${line.id}" class="form-select"><option value="">—</option>${WASTAGE_REASONS.map(r => `<option>${r}</option>`).join('')}</select></div>
+                    </div>
+                    <button class="btn-outline btn-sm" onclick="submitPreparation(${orderId}, ${line.id})">Record Preparation</button>
+                </div>
+            `;
+        }
+
+        async function submitPreparation(orderId, lineId) {
+            try {
+                await Api.post(`${CCA_API}/treatment-orders/${orderId}/drug-lines/${lineId}/pharmacy-preparation`, {
+                    batch_number: document.getElementById(`batch-${lineId}`).value || null,
+                    expiry_date: document.getElementById(`expiry-${lineId}`).value || null,
+                    diluent: document.getElementById(`diluent-${lineId}`).value || null,
+                    actual_volume: document.getElementById(`volume-${lineId}`).value || null,
+                    actual_volume_unit: document.getElementById(`volumeunit-${lineId}`).value || null,
+                    final_concentration: document.getElementById(`concentration-${lineId}`).value || null,
+                    stability_hours: Number(document.getElementById(`stability-${lineId}`).value) || null,
+                    wastage_amount: document.getElementById(`wastage-${lineId}`).value || null,
+                    wastage_reason: document.getElementById(`wastagereason-${lineId}`).value || null,
+                });
+                toast('Preparation recorded', 'success');
+                loadPharmacyWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitRelease(orderId, lineId) {
+            const labelVerified = document.getElementById(`label-${lineId}`).checked;
+            if (!labelVerified) { toast('Label verified must be confirmed', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/treatment-orders/${orderId}/drug-lines/${lineId}/pharmacy-release`, {
+                    label_verified: true,
+                    dispensed_to: document.getElementById(`dispto-${lineId}`).value || null,
+                    manifest_no: document.getElementById(`manifest-${lineId}`).value || null,
+                });
+                toast('Released', 'success');
+                loadPharmacyWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => { loadPharmacyWorklist(); });
+    </script>
+</body>
+</html>

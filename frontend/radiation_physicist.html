@@ -98,7 +98,15 @@
             'prescribed', 'simulation_pending', 'simulation_complete', 'contouring', 'planning',
             'physics_qa', 'physician_approved', 'treatment_ready', 'on_treatment', 'completed',
         ];
-        const PHYSICIST_ACTIONABLE = ['prescribed', 'simulation_pending', 'simulation_complete', 'contouring', 'planning'];
+        const PHYSICIST_ACTIONABLE = ['prescribed', 'simulation_pending', 'simulation_complete', 'contouring', 'planning', 'physics_qa'];
+        // Physics QA checklist (matches backend's _PHYSICS_QA_CHECKLIST_KEYS exactly) --
+        // attestation items the physicist personally confirms, never a computed pass/fail.
+        const PHYSICS_QA_CHECKLIST_ITEMS = [
+            ['prescription_plan_concordance', 'Plan matches the signed prescription (site, dose, fractions)'],
+            ['dose_volume_constraint_review', 'Dose-volume constraints reviewed against organs at risk'],
+            ['target_oar_coverage_review', 'Target coverage and OAR sparing reviewed'],
+            ['machine_deliverability_review', 'Plan is deliverable on the treatment machine'],
+        ];
 
         function showTab(tab) {
             document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
@@ -117,16 +125,47 @@
                     (rows.length ? rows.map(p => {
                         const nextIndex = RT_SUB_STATUS_ORDER.indexOf(p.rt_sub_status) + 1;
                         const nextStatus = RT_SUB_STATUS_ORDER[nextIndex];
+                        const isPhysicsQa = p.rt_sub_status === 'physics_qa';
                         return `
-                        <div class="worklist-row">
+                        <div class="worklist-row" style="${isPhysicsQa ? 'align-items:flex-start;' : ''}">
                             <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(p.patient_name)}</div><div style="font-size:12px; color:var(--ink-500);">${escapeHtml(p.patient_mrn)}</div></div>
                             <div><div class="wl-label">Phase ${p.phase_number} — ${escapeHtml(p.label)}</div><div class="wl-value" style="font-size:13px;">${escapeHtml(p.treatment_site)}</div></div>
                             <div><div class="wl-label">Dose / Fractions</div><div class="wl-value" style="font-size:13px;">${p.total_prescribed_dose_gy} Gy / ${p.number_of_fractions}#</div></div>
-                            <div><span class="badge badge-amber">${escapeHtml(p.rt_sub_status.replace(/_/g, ' '))}</span></div>
-                            <div><button class="btn-navy" onclick="advancePhase(${p.id}, '${nextStatus}')">Advance to ${escapeHtml((nextStatus || '').replace(/_/g, ' '))}</button></div>
+                            <div><span class="badge badge-amber">${escapeHtml(p.rt_sub_status.replace(/_/g, ' '))}</span>${isPhysicsQa && p.physics_qa_decision ? `<div style="margin-top:4px;"><span class="badge ${p.physics_qa_decision === 'Approved' ? 'badge-green' : 'badge-rose'}" style="font-size:10px;">${escapeHtml(p.physics_qa_decision)}</span></div>` : ''}</div>
+                            <div>${isPhysicsQa ? physicsQaFormHtml(p) : `<button class="btn-navy" onclick="advancePhase(${p.id}, '${nextStatus}')">Advance to ${escapeHtml((nextStatus || '').replace(/_/g, ' '))}</button>`}</div>
                         </div>
                     `; }).join('') : '<p style="font-size:12.5px; color:var(--ink-500); padding:8px 0;">No phases currently need physics/planning action.</p>') + `</div>`;
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        function physicsQaFormHtml(p) {
+            return `
+                <div style="min-width:260px;">
+                    ${p.physics_qa_note ? `<div style="font-size:11.5px; color:var(--ink-500); margin-bottom:6px;">Last note: ${escapeHtml(p.physics_qa_note)}</div>` : ''}
+                    ${PHYSICS_QA_CHECKLIST_ITEMS.map(([key, label]) => `
+                        <div style="display:flex; align-items:center; gap:6px; font-size:11.5px; margin-bottom:4px;">
+                            <input type="checkbox" id="qa-${p.id}-${key}" ${p.physics_qa_checklist && p.physics_qa_checklist[key] ? 'checked' : ''}/>
+                            <label for="qa-${p.id}-${key}">${escapeHtml(label)}</label>
+                        </div>
+                    `).join('')}
+                    <textarea id="qa-note-${p.id}" placeholder="Note (required)" style="width:100%; font-size:11.5px; padding:6px; margin:6px 0; border:1px solid var(--line); border-radius:6px;">${escapeHtml(p.physics_qa_note || '')}</textarea>
+                    <div style="display:flex; gap:6px;">
+                        <button class="btn-navy" style="font-size:11px; padding:6px 10px;" onclick="submitPhysicsQa(${p.id}, 'Approved')">Approve</button>
+                        <button class="btn-outline" style="font-size:11px; padding:6px 10px;" onclick="submitPhysicsQa(${p.id}, 'Rejected / Replan Required')">Reject / Replan Required</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        async function submitPhysicsQa(phaseId, decision) {
+            const checklist = {};
+            PHYSICS_QA_CHECKLIST_ITEMS.forEach(([key]) => { checklist[key] = document.getElementById(`qa-${phaseId}-${key}`).checked; });
+            const note = document.getElementById(`qa-note-${phaseId}`).value;
+            try {
+                await Api.post(`${CCA_API}/radiation-phases/${phaseId}/physics-qa`, { decision, checklist, note });
+                toast(`Physics QA recorded: ${decision}`, 'success');
+                loadPhysicistWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
         async function advancePhase(phaseId, status) {
