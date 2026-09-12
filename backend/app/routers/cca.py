@@ -5106,6 +5106,9 @@ def _reaction_out(r: InfusionReactionEvent) -> dict:
         "informed_person": r.informed_person, "interventions": r.interventions,
         "patient_response": r.patient_response, "physician_disposition": r.physician_disposition,
         "directed_by": r.directed_by, "reported_by": r.reported_by, "reported_at": r.reported_at.isoformat(),
+        "rechallenge_attempted": r.rechallenge_attempted, "rechallenge_outcome": r.rechallenge_outcome,
+        "future_rechallenge_decision": r.future_rechallenge_decision, "future_precautions": r.future_precautions,
+        "rechallenge_decided_by": r.rechallenge_decided_by,
     }
 
 
@@ -5170,6 +5173,62 @@ async def record_reaction(
     db.commit()
     db.refresh(reaction)
     return {"status": "success", "reaction": _reaction_out(reaction)}
+
+
+_FUTURE_RECHALLENGE_DECISIONS = (
+    "Permitted with premedication", "Permitted with slower rate", "Permitted after desensitisation",
+    "Not permitted", "Clinician to decide",
+)
+
+
+@router.post("/treatment/reaction/{id}/rechallenge-decision")
+async def record_rechallenge_decision(
+    id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    """Rechallenge decision (reference MAR-023) -- future_rechallenge_decision and
+    future_precautions are what future orders/administrations need to see; they're surfaced
+    via GET /patients/{id}/reaction-precautions rather than duplicated onto CCAPatient."""
+    reaction = db.query(InfusionReactionEvent).filter(InfusionReactionEvent.id == id).first()
+    if not reaction:
+        raise HTTPException(404, "Reaction not found")
+    _check_patient_in_org(db, reaction.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+    future_decision = body.get("future_rechallenge_decision")
+    if future_decision is not None and future_decision not in _FUTURE_RECHALLENGE_DECISIONS:
+        raise HTTPException(422, f"future_rechallenge_decision must be one of {', '.join(_FUTURE_RECHALLENGE_DECISIONS)}")
+    reaction.rechallenge_attempted = body.get("rechallenge_attempted")
+    reaction.rechallenge_outcome = body.get("rechallenge_outcome")
+    reaction.future_rechallenge_decision = future_decision
+    reaction.future_precautions = body.get("future_precautions")
+    reaction.rechallenge_decided_by = _actor(current_user)
+    db.commit()
+    db.refresh(reaction)
+    return {"status": "success", "reaction": _reaction_out(reaction)}
+
+
+@router.get("/patients/{patient_id}/reaction-precautions")
+def get_reaction_precautions(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Read-time view of every documented future-rechallenge precaution for this patient
+    (reference MAR-023: "appears on every future order and administration") -- meant to be
+    checked when drafting a new Treatment Order or opening the Day Care administration
+    workspace, never a stored duplicate of the source InfusionReactionEvent rows."""
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(InfusionReactionEvent).filter(
+        InfusionReactionEvent.patient_id == patient_id, InfusionReactionEvent.future_rechallenge_decision.isnot(None)
+    ).order_by(InfusionReactionEvent.reported_at.desc()).all()
+    precautions = []
+    for r in rows:
+        agent = r.medication_running
+        if r.administration_id:
+            admin_row = db.query(InfusionMedicationAdministration).filter(InfusionMedicationAdministration.id == r.administration_id).first()
+            if admin_row:
+                agent = admin_row.medication_name
+        precautions.append({
+            "reaction_id": r.id, "agent": agent, "future_rechallenge_decision": r.future_rechallenge_decision,
+            "future_precautions": r.future_precautions, "decided_by": r.rechallenge_decided_by, "onset_at": r.onset_at.isoformat(),
+        })
+    return {"precautions": precautions}
 
 
 def _extravasation_out(e: ExtravasationEvent) -> dict:

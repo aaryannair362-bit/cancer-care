@@ -179,6 +179,13 @@ ADDITIVE_COLUMNS = [
     # Safety/dataflow-critical follow-up round: toxicity-driven audit link on TreatmentOrder
     # (reference spec SCR-ORD-005).
     ("cca_treatment_orders", "toxicity_event_id", "INTEGER"),
+    # Safety/dataflow-critical follow-up round: rechallenge decision on InfusionReactionEvent
+    # (reference spec MAR-023).
+    ("cca_infusion_reaction_events", "rechallenge_attempted", "BOOLEAN"),
+    ("cca_infusion_reaction_events", "rechallenge_outcome", "TEXT"),
+    ("cca_infusion_reaction_events", "future_rechallenge_decision", "VARCHAR(50)"),
+    ("cca_infusion_reaction_events", "future_precautions", "TEXT"),
+    ("cca_infusion_reaction_events", "rechallenge_decided_by", "VARCHAR(200)"),
 ]
 
 
