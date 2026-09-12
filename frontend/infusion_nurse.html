@@ -123,6 +123,7 @@
             <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Today's Patients</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-treatment_day" onclick="showTab('treatment_day')"><div class="nav-item-left"><span>💉</span><span>Treatment Day / Infusion</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-history" onclick="showTab('history')"><div class="nav-item-left"><span>🗂️</span><span>Patient History</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-liveboard" onclick="showTab('liveboard')"><div class="nav-item-left"><span>📺</span><span>Live Infusion Board</span></div><span class="nav-chevron">›</span></a>
             <div class="sidebar-section-title">CLINICAL SUPPORT</div>
             <a class="sidebar-nav-item" id="nav-nexus" onclick="showTab('nexus')"><div class="nav-item-left"><span>⚡</span><span>NEXUS</span></div><span class="nav-chevron">›</span></a>
         </aside>
@@ -151,6 +152,16 @@
                 <h1 class="page-title">Patient History</h1>
                 <p class="page-subtitle">Documents, diagnoses, prior investigations/results, medications, and visit history for the selected patient — including what other clinicians in the pipeline have ordered or prescribed.</p>
                 <div id="history-content"><!-- Populated via JS: renderCaseSummaryPanel() --></div>
+            </div>
+
+            <!-- ===== LIVE INFUSION BOARD (worklist/dashboard follow-up round, reference SCR-MAR-013) ===== -->
+            <div id="view-liveboard" class="view-panel">
+                <h1 class="page-title">Live Infusion Board</h1>
+                <p class="page-subtitle">Unit-wide situational awareness — every chair currently infusing or paused, with elapsed time, observation status, active reactions and interruptions.</p>
+                <div class="section-card">
+                    <div class="section-head"><div class="section-title">Active Chairs</div><span class="badge badge-blue" id="liveboard-count">0 active</span></div>
+                    <div id="liveboard-content"></div>
+                </div>
             </div>
 
             <div id="view-nexus" class="view-panel">
@@ -198,6 +209,7 @@
             if (tab === 'patients') loadPatientList();
             if (tab === 'treatment_day') loadTreatmentDayAssessment();
             if (tab === 'history') renderCaseSummaryPanel('history-content', currentPatientId);
+            if (tab === 'liveboard') loadLiveBoard();
             if (tab === 'nexus') loadNexusBanner();
             document.getElementById('ai-search-results').style.display = 'none';
         }
@@ -266,12 +278,14 @@
                 const data = await Api.get(`${CCA_API}/treatment/queue?date=${today}`);
                 document.getElementById('patient-count').textContent = `${data.results.length} scheduled`;
                 listEl.innerHTML = data.results.map(r => `
-                    <div class="worklist-row">
+                    <div class="worklist-row" style="grid-template-columns: 1.1fr 1fr 0.8fr 0.8fr 1.6fr auto;">
                         <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(r.name)}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(r.mrn)}</div></div>
                         <div><div class="wl-label">Protocol</div><div class="wl-value" style="font-size:12.5px;">${escapeHtml(r.protocol || '—')}</div><div style="font-size:11.5px;color:var(--ink-500);">${escapeHtml(r.cycle_day)}</div></div>
                         <div><div class="wl-label">Arrival</div><span class="badge ${r.arrival_status === 'Arrived' ? 'badge-green' : 'badge-amber'}">${escapeHtml(r.arrival_status)}</span></div>
                         <div><div class="wl-label">Chair / Bed</div><div class="wl-value" style="font-size:13px;">${escapeHtml(r.chair_bed || '—')}</div></div>
-                        <div><div class="wl-label">Order</div><span class="badge ${r.order_status === 'SIGNED' || r.order_status === 'EXECUTED' ? 'badge-blue' : 'badge-amber'}">${escapeHtml(r.order_status || 'None')}</span>
+                        <div>
+                          <div class="wl-label">Gates</div>
+                          ${renderGateStrip(r.gates)}
                           ${r.flags.length ? `<div style="margin-top:4px;">${r.flags.map(f => `<span class="badge badge-rose" style="margin-right:4px;">${escapeHtml(f)}</span>`).join('')}</div>` : ''}
                         </div>
                         <div style="display:flex; flex-direction:column; gap:6px;">
@@ -289,6 +303,41 @@
                 toast('Marked arrived', 'success');
                 loadInfusionQueue();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        const GATE_DOT_COLOR = { green: '#16A34A', amber: '#D97706', red: '#E11D48', grey: '#CBD5E1' };
+        function renderGateStrip(gates) {
+            if (!gates) return '';
+            const order = [['identity', 'ID'], ['consent', 'Consent'], ['clearance', 'Clear'], ['product', 'Product'], ['access', 'Access'], ['verification', 'Verify']];
+            return `<div style="display:flex; gap:5px; flex-wrap:wrap; margin-top:2px;">${order.map(([key, label]) => {
+                const g = gates[key] || { status: 'grey', label: '—' };
+                return `<span title="${escapeHtml(label)}: ${escapeHtml(g.label || g.status)}" style="display:inline-flex; align-items:center; gap:3px; font-size:10.5px; color:var(--ink-600); background:var(--bg-card-subtle); border:1px solid var(--line); border-radius:999px; padding:2px 7px;"><span style="width:7px; height:7px; border-radius:50%; background:${GATE_DOT_COLOR[g.status] || GATE_DOT_COLOR.grey};"></span>${label}</span>`;
+            }).join('')}</div>`;
+        }
+
+        // ---------------------------------------------------------------
+        // Live Infusion Board (worklist/dashboard follow-up round, reference SCR-MAR-013)
+        // ---------------------------------------------------------------
+        async function loadLiveBoard() {
+            const contentEl = document.getElementById('liveboard-content');
+            try {
+                const data = await Api.get(`${CCA_API}/treatment/live-board`);
+                document.getElementById('liveboard-count').textContent = `${data.total} active`;
+                contentEl.innerHTML = data.results.map(r => `
+                    <div class="worklist-row" style="grid-template-columns: 1fr 1fr 1fr 1fr 1fr auto;">
+                        <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(r.name || '—')}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(r.mrn || '')} · ${escapeHtml(r.chair_bed || 'No chair set')}</div></div>
+                        <div><div class="wl-label">Drug (seq)</div><div class="wl-value" style="font-size:12.5px;">${escapeHtml(r.medication_name)} <span style="color:var(--ink-500); font-weight:500;">#${r.sequence_no}</span></div><div style="font-size:11.5px;color:var(--ink-500);">${escapeHtml(r.protocol || '—')}</div></div>
+                        <div><div class="wl-label">Status</div><span class="badge ${r.status === 'Paused' ? 'badge-amber' : 'badge-green'}">${escapeHtml(r.status)}</span></div>
+                        <div><div class="wl-label">Elapsed</div><div class="wl-value" style="font-size:13px;">${r.elapsed_minutes != null ? r.elapsed_minutes + ' min' : '—'}</div>${r.observation_overdue ? '<span class="badge badge-rose" style="margin-top:4px;">Observation overdue</span>' : ''}</div>
+                        <div>
+                          ${r.reaction_active ? '<span class="badge badge-rose" style="margin-right:4px;">Reaction active</span>' : ''}
+                          ${r.interruption_active ? `<span class="badge badge-amber">${escapeHtml(r.interruption_type || 'Interrupted')}</span>` : ''}
+                          ${!r.reaction_active && !r.interruption_active ? '<span class="badge badge-blue">Nominal</span>' : ''}
+                        </div>
+                        <div><button class="btn-navy btn-sm" onclick="openPatient(${Number(r.patient_id)})">Open →</button></div>
+                    </div>
+                `).join('') || '<p class="empty-hint">No infusions currently active.</p>';
+            } catch (err) { contentEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
         }
 
         async function loadAllPatients() {

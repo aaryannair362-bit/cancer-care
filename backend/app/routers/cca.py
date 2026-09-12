@@ -4190,8 +4190,55 @@ def get_infusion_queue(
             "order_status": order.status if order else None,
             "session_status": s.status,
             "flags": flags,
+            "gates": _day_care_gate_status(db, s, order),
         })
     return {"date": target_date.isoformat(), "results": results, "total": len(results)}
+
+
+def _day_care_gate_status(db: Session, session: TreatmentSession, order: Optional[TreatmentOrder]) -> dict:
+    """The gate-status strip (reference SCR-MAR-001) -- at-a-glance, unit-wide visibility
+    into what's blocking each patient from starting treatment. Every gate is read straight
+    off an already-recorded row, never computed/inferred (same convention the queue's own
+    `flags` list already follows)."""
+    def _gate(status: str, label: str = None) -> dict:
+        return {"status": status, "label": label}
+
+    active_consent = db.query(CCAConsent).filter(CCAConsent.patient_id == session.patient_id, CCAConsent.status == "ACTIVE").first()
+    identity_gate = _gate("grey", "Not checked")
+    access_gate = _gate("grey", "Not assessed")
+    product_gate = _gate("grey", "Not started")
+    verification_gate = _gate("grey", "Not required yet")
+    clearance = db.query(TreatmentClearance).filter(TreatmentClearance.session_id == session.id).order_by(TreatmentClearance.id.desc()).first()
+    if clearance:
+        clearance_gate = _gate("green" if clearance.decision in ("CLEARED", "CLEARED_DOSE_REDUCTION") else "red", clearance.decision)
+    else:
+        clearance_gate = _gate("grey", "Pending")
+
+    if order:
+        safety_check = db.query(PreTreatmentSafetyCheck).filter(PreTreatmentSafetyCheck.treatment_order_id == order.id).order_by(PreTreatmentSafetyCheck.id.desc()).first()
+        if safety_check:
+            identity_gate = _gate("green" if safety_check.identity_verified else "amber", "Verified" if safety_check.identity_verified else "Incomplete")
+        access = db.query(VascularAccessAssessment).filter(VascularAccessAssessment.treatment_order_id == order.id).order_by(VascularAccessAssessment.id.desc()).first()
+        if access:
+            access_gate = _gate("green" if access.access_ready else "red", "Ready" if access.access_ready else "Not ready")
+        readiness = db.query(PharmacyReadiness).filter(PharmacyReadiness.treatment_order_id == order.id).order_by(PharmacyReadiness.id.desc()).first()
+        if readiness:
+            product_gate = _gate("green" if readiness.status in ("Ready", "Dispensed", "Received") else "amber", readiness.status)
+        verified_admin = db.query(InfusionIndependentVerification).join(
+            InfusionMedicationAdministration, InfusionMedicationAdministration.id == InfusionIndependentVerification.administration_id
+        ).filter(InfusionMedicationAdministration.treatment_order_id == order.id).first()
+        admin_exists = db.query(InfusionMedicationAdministration.id).filter(InfusionMedicationAdministration.treatment_order_id == order.id).first()
+        if admin_exists:
+            verification_gate = _gate("green", "Verified") if verified_admin else _gate("amber", "Pending")
+
+    return {
+        "identity": identity_gate,
+        "consent": _gate("green", "Active") if active_consent else _gate("red", "Not on file"),
+        "clearance": clearance_gate,
+        "product": product_gate,
+        "access": access_gate,
+        "verification": verification_gate,
+    }
 
 
 @router.patch("/treatment/queue/{session_id}/arrival")
@@ -4222,6 +4269,53 @@ async def update_queue_arrival(
         "arrived_at": session.arrived_at.isoformat() if session.arrived_at else None,
         "chair_bed": session.chair_bed, "expected_duration_minutes": session.expected_duration_minutes,
     }
+
+
+@router.get("/treatment/live-board")
+def get_live_infusion_board(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Live Infusion Board (reference SCR-MAR-013, worklist/dashboard follow-up round) --
+    unit-wide situational awareness across every chair currently infusing or paused.
+    elapsed_minutes/observation_overdue are plain time-since arithmetic (the same class of
+    computation the queue's own expected_duration/waiting-time already does), never a
+    clinical judgment or dosage/threshold comparison."""
+    _require_clinical_or_nursing_role(current_user)
+    org_id = _org_id(current_user)
+    now = datetime.utcnow()
+    admins = db.query(InfusionMedicationAdministration).join(
+        CCAPatient, CCAPatient.id == InfusionMedicationAdministration.patient_id
+    ).filter(
+        CCAPatient.organization_id == org_id,
+        InfusionMedicationAdministration.status.in_(["InProgress", "Paused"]),
+    ).order_by(InfusionMedicationAdministration.start_time.asc()).all()
+
+    results = []
+    for a in admins:
+        patient = db.query(CCAPatient).filter(CCAPatient.id == a.patient_id).first()
+        order = db.query(TreatmentOrder).filter(TreatmentOrder.id == a.treatment_order_id).first()
+        session = db.query(TreatmentSession).filter(TreatmentSession.id == order.treatment_session_id).first() if order else None
+        plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == order.treatment_plan_id).first() if order else None
+        elapsed_minutes = int((now - a.start_time).total_seconds() // 60) if a.start_time else None
+        last_obs = db.query(InfusionMonitoringObservation).filter(
+            InfusionMonitoringObservation.treatment_order_id == a.treatment_order_id
+        ).order_by(InfusionMonitoringObservation.id.desc()).first()
+        minutes_since_obs = int((now - last_obs.observation_time).total_seconds() // 60) if last_obs else elapsed_minutes
+        observation_overdue = bool(minutes_since_obs is not None and minutes_since_obs > 30)
+        active_reaction = db.query(InfusionReactionEvent).filter(InfusionReactionEvent.administration_id == a.id).first()
+        open_hold = db.query(TreatmentHoldEvent).filter(
+            TreatmentHoldEvent.patient_id == a.patient_id, TreatmentHoldEvent.resumed == False  # noqa: E712
+        ).order_by(TreatmentHoldEvent.id.desc()).first()
+        results.append({
+            "administration_id": a.id, "patient_id": a.patient_id, "name": patient.name if patient else None,
+            "mrn": patient.mrn if patient else None, "chair_bed": session.chair_bed if session else None,
+            "protocol": plan.protocol_name if plan else None, "medication_name": a.medication_name,
+            "sequence_no": a.sequence_no, "status": a.status,
+            "start_time": a.start_time.isoformat() if a.start_time else None, "elapsed_minutes": elapsed_minutes,
+            "actual_rate": a.actual_rate, "minutes_since_last_observation": minutes_since_obs,
+            "observation_overdue": observation_overdue,
+            "reaction_active": active_reaction is not None,
+            "interruption_active": bool(open_hold), "interruption_type": open_hold.hold_type if open_hold else None,
+        })
+    return {"results": results, "total": len(results)}
 
 
 def _safety_check_out(c: PreTreatmentSafetyCheck) -> dict:
