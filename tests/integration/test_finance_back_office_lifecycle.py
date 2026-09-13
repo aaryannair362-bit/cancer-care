@@ -22,6 +22,16 @@ def fc_headers(auth_headers, counsellor):
 
 
 @pytest.fixture
+def biller(make_user, counsellor):
+    return make_user(email="biller@finance-test.com", role="CCABiller", organization_id=counsellor.organization_id)
+
+
+@pytest.fixture
+def biller_headers(auth_headers, biller):
+    return auth_headers(biller)
+
+
+@pytest.fixture
 def patient(db_session, counsellor):
     p = CCAPatient(mrn="FINANCE-TEST-0001", name="Finance Test Patient", age=57, sex="Male", organization_id=counsellor.organization_id)
     db_session.add(p)
@@ -70,13 +80,26 @@ def test_preauthorization_denial_and_appeal(client, fc_headers, case_id):
     assert len(listed.json()["preauthorizations"]) == 1
 
 
-def test_billable_events_and_high_cost_drug_approval(client, fc_headers, case_id):
-    event = client.post(f"/api/cca/financial/cases/{case_id}/billable-events", headers=fc_headers, json={
+def test_billable_events_and_high_cost_drug_approval(client, fc_headers, biller_headers, case_id):
+    """Charge capture is Biller's transaction-level scope; high-cost-drug approval stays with
+    Finance/Billing's broader case-decisioning scope -- separate roles (7 Role/Module Updates
+    developer handoff, checklist item 08)."""
+    forbidden = client.post(f"/api/cca/financial/cases/{case_id}/billable-events", headers=fc_headers, json={
+        "service_description": "Chemotherapy administration, cycle 1", "amount": "45000",
+    })
+    assert forbidden.status_code == 403, "Finance/Billing must not be able to record a billable event (Biller-only)"
+
+    event = client.post(f"/api/cca/financial/cases/{case_id}/billable-events", headers=biller_headers, json={
         "service_description": "Chemotherapy administration, cycle 1", "amount": "45000",
     })
     assert event.status_code == 201, event.text
     listed = client.get(f"/api/cca/financial/cases/{case_id}/billable-events", headers=fc_headers)
     assert len(listed.json()["billable_events"]) == 1
+
+    biller_forbidden = client.post(f"/api/cca/financial/cases/{case_id}/high-cost-drug-approvals", headers=biller_headers, json={
+        "drug_name": "Trastuzumab", "estimated_cost": "180000",
+    })
+    assert biller_forbidden.status_code == 403, "Biller must not be able to create a high-cost-drug approval (Finance/Billing-only)"
 
     hcd = client.post(f"/api/cca/financial/cases/{case_id}/high-cost-drug-approvals", headers=fc_headers, json={
         "drug_name": "Trastuzumab", "estimated_cost": "180000",
@@ -91,31 +114,41 @@ def test_billable_events_and_high_cost_drug_approval(client, fc_headers, case_id
     assert decided.json()["approval"]["approval_status"] == "Approved"
 
 
-def test_claim_and_refund_lifecycle(client, fc_headers, case_id):
-    claim = client.post(f"/api/cca/financial/cases/{case_id}/claims", headers=fc_headers, json={
+def test_claim_and_refund_lifecycle(client, fc_headers, biller_headers, case_id):
+    """Claims/refunds are Biller's transaction-level scope -- Finance/Billing must not be able
+    to author them (checklist item 08)."""
+    fc_forbidden = client.post(f"/api/cca/financial/cases/{case_id}/claims", headers=fc_headers, json={
+        "claim_number": "CLM-001", "payer_name": "Star Health Insurance", "submitted_amount": "300000",
+    })
+    assert fc_forbidden.status_code == 403, "Finance/Billing must not be able to create a claim (Biller-only)"
+
+    claim = client.post(f"/api/cca/financial/cases/{case_id}/claims", headers=biller_headers, json={
         "claim_number": "CLM-001", "payer_name": "Star Health Insurance", "submitted_amount": "300000",
     })
     assert claim.status_code == 201, claim.text
     claim_id = claim.json()["claim"]["id"]
 
-    bad_status = client.post(f"/api/cca/claims/{claim_id}/update-status", headers=fc_headers, json={"status": "Nope"})
+    bad_status = client.post(f"/api/cca/claims/{claim_id}/update-status", headers=biller_headers, json={"status": "Nope"})
     assert bad_status.status_code == 422
 
-    paid = client.post(f"/api/cca/claims/{claim_id}/update-status", headers=fc_headers, json={
+    paid = client.post(f"/api/cca/claims/{claim_id}/update-status", headers=biller_headers, json={
         "status": "Paid", "paid_amount": "280000", "payer_reference": "PAY-REF-001",
     })
     assert paid.status_code == 200, paid.text
     assert paid.json()["claim"]["status"] == "Paid"
 
-    refund = client.post(f"/api/cca/financial/cases/{case_id}/refunds", headers=fc_headers, json={
+    refund = client.post(f"/api/cca/financial/cases/{case_id}/refunds", headers=biller_headers, json={
         "amount": "5000", "reason": "Overpayment on deposit.",
     })
     assert refund.status_code == 201, refund.text
     refund_id = refund.json()["refund"]["id"]
 
-    issued = client.post(f"/api/cca/refunds/{refund_id}/issue", headers=fc_headers, json={})
+    fc_forbidden_issue = client.post(f"/api/cca/refunds/{refund_id}/issue", headers=fc_headers, json={})
+    assert fc_forbidden_issue.status_code == 403, "Finance/Billing must not be able to issue a refund (Biller-only)"
+
+    issued = client.post(f"/api/cca/refunds/{refund_id}/issue", headers=biller_headers, json={})
     assert issued.status_code == 200, issued.text
     assert issued.json()["refund"]["status"] == "Issued"
 
-    already_issued = client.post(f"/api/cca/refunds/{refund_id}/issue", headers=fc_headers, json={})
+    already_issued = client.post(f"/api/cca/refunds/{refund_id}/issue", headers=biller_headers, json={})
     assert already_issued.status_code == 409

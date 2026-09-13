@@ -34,7 +34,14 @@ from typing import Dict, Optional, Set
 from .auth import is_admin, is_doctor, is_cca_oncologist
 
 _CARE_PLAN_FULL_ACCESS_ROLES = {"CCANurseNavigator"}
-_CARE_PLAN_OPERATIONAL_ROLES = {"CCAFrontDesk", "CCAPatientLiaison", "CCAFinancialCounsellor"}
+# CCABiller and CCAPatientRelationsExecutive (7 Role/Module Updates developer handoff) added
+# alongside their closest existing analogs (CCAFinancialCounsellor: another financial role;
+# CCAPatientLiaison: another coordination role) -- without this they'd silently fall through
+# to the much broader CLINICAL_CONTEXT default below, which neither non-clinical role should get.
+_CARE_PLAN_OPERATIONAL_ROLES = {
+    "CCAFrontDesk", "CCAPatientLiaison", "CCAFinancialCounsellor",
+    "CCABiller", "CCAPatientRelationsExecutive",
+}
 
 CARE_PLAN_TIER_FIELDS: Dict[str, Optional[Set[str]]] = {
     "FULL": None,
@@ -107,9 +114,14 @@ def treatment_plan_tier(current_user: dict) -> str:
         # safely. Row-level visibility (drafts hidden from this role) is enforced by the
         # caller; this only decides field shape once a row is visible at all.
         return "FULL"
-    if role == "CCAFrontDesk":
+    if role in ("CCAFrontDesk", "CCAPatientRelationsExecutive"):
+        # PRE (7 Role/Module Updates developer handoff) is a strictly non-clinical role -- even
+        # narrower than CCAPatientLiaison's existing MINIMAL tier below, matching Front Desk's
+        # near-zero tier.
         return "NONE"
-    if role == "CCAFinancialCounsellor":
+    if role in ("CCAFinancialCounsellor", "CCABiller"):
+        # CCABiller shares CCAFinancialCounsellor's FINANCE tier -- both are financial roles
+        # needing modality/cycle-count context, neither clinical rationale.
         return "FINANCE"
     if role in _TREATMENT_PLAN_MINIMAL_ROLES:
         return "MINIMAL"

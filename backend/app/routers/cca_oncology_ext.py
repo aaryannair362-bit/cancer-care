@@ -19,9 +19,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from ..auth import (
-    get_current_user, is_admin, is_cca_radiation_physicist, is_cca_radiologist,
+    get_current_user, is_admin, is_cca_radiation_physicist,
     is_cca_surgical_nurse, is_cca_surgical_oncologist, is_cca_medical_oncologist,
     is_cca_radiation_oncologist, is_cca_palliative_care_specialist,
+    is_cca_radiation_technologist,
 )
 from ..models_cca import CCAPatient, DomainEvent, MDTCase
 from ..models_cca import ResponseAssessment, ToxicityEvent, TreatmentPlan
@@ -83,10 +84,8 @@ _FRACTION_STATUSES = ("delivered", "missed", "rescheduled", "cancelled")
 def _require_rt_delivery_or_ro(current_user: dict):
     """Interruption may be recorded/resumed by either the treating Radiation Oncologist or
     the Radiation Technologist at the machine (Product 1: rt_record_interruption is gated to
-    either role). Radiation Technologist and Radiologist are the same login in this
-    hospital's role structure (no separate CCARadiationTechnologist role exists), matching
-    record_radiation_fraction_event's own gate below."""
-    if is_cca_radiologist(current_user) or is_admin(current_user):
+    either role)."""
+    if is_cca_radiation_technologist(current_user) or is_admin(current_user):
         return
     _require_modality_signer(current_user, "radiation")
 SURGICAL_STATUS_ORDER = [
@@ -795,8 +794,8 @@ async def record_pretreatment_verification(fraction_id: int, request: Request, d
     confirmed fraction-number check (RTT-020's hard stop is enforced here on a mismatch,
     unless explicitly overridden with a note -- a count comparison, not a computed dose
     check). Safety/dataflow-critical follow-up round."""
-    if not (is_cca_radiologist(current_user) or is_admin(current_user)):
-        raise HTTPException(403, "Only the Radiologist may record a pre-treatment verification")
+    if not (is_cca_radiation_technologist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Radiation Technologist may record a pre-treatment verification")
     fraction = db.query(RadiationFraction).filter(RadiationFraction.id == fraction_id).first()
     if not fraction:
         raise HTTPException(404, "Radiation fraction not found")
@@ -829,11 +828,10 @@ async def record_pretreatment_verification(fraction_id: int, request: Request, d
 async def record_radiation_fraction_event(fraction_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     """Recording an actual delivered/missed/rescheduled fraction is the Radiation
     Technologist's action (PDF item 20/21) -- previously any clinical/nursing role could do
-    this, which is the actual gap those items describe. Radiation Technologist and Radiologist
-    are the same login in this hospital's role structure (no separate CCARadiationTechnologist
-    role exists), so this gates on CCARadiologist."""
-    if not (is_cca_radiologist(current_user) or is_admin(current_user)):
-        raise HTTPException(403, "Only the Radiologist may record a fraction delivery event")
+    this, which is the actual gap those items describe. Now its own CCARadiationTechnologist
+    role (7 Role/Module Updates developer handoff) rather than standing in on CCARadiologist."""
+    if not (is_cca_radiation_technologist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Radiation Technologist may record a fraction delivery event")
     fraction = db.query(RadiationFraction).filter(RadiationFraction.id == fraction_id).first()
     if not fraction:
         raise HTTPException(404, "Radiation fraction not found")
@@ -1950,12 +1948,12 @@ _ISSUE_CATEGORIES = ("Interlock", "Mechanical", "Imaging", "Dosimetry", "Softwar
 
 
 def _require_rt_reporter_or_physicist(current_user: dict):
-    """Who may report/notify on a machine issue -- the RTT at the console (Radiologist login,
-    same reasoning as _require_rt_delivery_or_ro above), the treating Radiation Oncologist, or
-    the Radiation Physicist. Admin never substitutes for clinical/technical staff here."""
-    if is_cca_radiologist(current_user) or is_cca_radiation_physicist(current_user) or is_cca_radiation_oncologist(current_user):
+    """Who may report/notify on a machine issue -- the Radiation Technologist at the console,
+    the treating Radiation Oncologist, or the Radiation Physicist. Admin never substitutes for
+    clinical/technical staff here."""
+    if is_cca_radiation_technologist(current_user) or is_cca_radiation_physicist(current_user) or is_cca_radiation_oncologist(current_user):
         return
-    raise HTTPException(403, "Only Radiology/RTT, Radiation Oncologist, or Radiation Physicist staff may report an equipment issue")
+    raise HTTPException(403, "Only the Radiation Technologist, Radiation Oncologist, or Radiation Physicist may report an equipment issue")
 
 
 def _get_org_treatment_unit(db: Session, unit_id: int, org_id: int) -> RadiationTreatmentUnit:

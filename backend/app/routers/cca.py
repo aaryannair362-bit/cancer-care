@@ -22,6 +22,7 @@ from ..auth import (
     is_cca_radiologist, is_cca_financial_counsellor, is_cca_external_mdt_specialist,
     is_cca_pharmacist, is_nursing_station, can_sign_treatment_plan,
     can_approve_mdt_recommendation, log_audit,
+    is_cca_biller, is_cca_patient_relations_executive,
 )
 from ..config import settings
 from ..ocr_service import extract_document, strip_markup_for_display
@@ -64,8 +65,8 @@ from ..models_cca import (
 from ..cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
     evaluate_guideline_readiness, synthesize_nexus_brief, generate_care_plan_prefill,
-    classify_document, extract_clinical_facts, build_results_from_document_facts,
-    build_medication_lists,
+    classify_document, extract_clinical_facts, extract_deterministic_lab_facts,
+    build_results_from_document_facts, build_medication_lists,
 )
 from ..cca_seed import seed_cca_database, simulate_ct_result
 from ..cca_product_decisions import CARE_PLAN_IN_PROGRESS_STATUSES, TREATMENT_ORDERS_SYSTEM_OF_RECORD
@@ -983,7 +984,10 @@ def get_case_summary(
         return note_content.get(key) if isinstance(note_content, dict) else None
 
     # --- Role-specific projections (Spec Section 39/58) ---
-    if is_cca_financial_counsellor(current_user):
+    # CCABiller (7 Role/Module Updates developer handoff) shares this same restricted,
+    # non-clinical projection as Finance/Billing -- both are financial roles, neither should
+    # ever see the full clinical record.
+    if is_cca_financial_counsellor(current_user) or is_cca_biller(current_user):
         return {
             "generated_at": datetime.utcnow().isoformat(),
             "patient": {
@@ -1004,6 +1008,13 @@ def get_case_summary(
 
     if is_cca_front_desk(current_user):
         raise HTTPException(403, "Front Desk does not have access to patient clinical summary. Use patient list or registration search to view registration and visit status.")
+
+    if is_cca_patient_relations_executive(current_user):
+        # PRE is a strictly non-clinical, operational role (7 Role/Module Updates developer
+        # handoff; data/specs/CCA_Demo_Spec_v1.0.md's "PRE / Patient Navigation" AC-17: "No
+        # clinical detail is visible, OPEN PATIENT is absent"). Hard 403, same as Front Desk
+        # above, rather than a narrower projection -- PRE never opens the clinical record at all.
+        raise HTTPException(403, "PRE does not have access to patient clinical summary. Use the Patients or Appointments view.")
 
     return {
         "generated_at": datetime.utcnow().isoformat(),
@@ -1210,6 +1221,17 @@ async def upload_document(
     result_rows = []
     if not ocr_failed_reason:
         drafted_facts = extract_clinical_facts(ocr_text)
+        # Deterministic lab-value safety net (ocr_service._clinical_signals's "lab_values" scan,
+        # run over the FULL raw text -- see extract_deterministic_lab_facts's docstring): merged
+        # in here, deduped against what the AI pass already drafted, so the same exact lab line
+        # never becomes two ClinicalFact rows.
+        seen_facts = {(f["fact_type"], f["value"]) for f in drafted_facts}
+        for f in extract_deterministic_lab_facts(ocr_result.get("signals")):
+            key = (f["fact_type"], f["value"])
+            if key in seen_facts:
+                continue
+            seen_facts.add(key)
+            drafted_facts.append(f)
         for f in drafted_facts:
             fact = ClinicalFact(
                 patient_id=patient_id, document_id=doc.id, fact_type=f["fact_type"], value=f["value"],
@@ -4232,19 +4254,20 @@ def _care_plan_task_dict(task: CarePlanTask) -> dict:
 
 @router.get("/patients/{patient_id}/tasks")
 def list_patient_tasks(
-    patient_id: int, db: Session = Depends(get_cca_db),
+    patient_id: int, owner_role: Optional[str] = None, db: Session = Depends(get_cca_db),
     current_user: dict = Depends(get_current_user)
 ):
     """Every open-or-closed review/reassessment task for this patient, with or without a
-    Care Plan link, oldest-due first. Not role-projected in this slice -- a task description
-    is short, already-actionable operational text (e.g. "Review MDT recommendation..."), a
-    materially smaller disclosure than a full plan; per-role filtering by task category is a
-    reasonable future refinement once tasks carry an owner_role/category field, not invented
-    here without one."""
+    Care Plan link, oldest-due first. Not role-projected by default -- a task description is
+    short, already-actionable operational text (e.g. "Review MDT recommendation..."), a
+    materially smaller disclosure than a full plan. The optional `owner_role` filter (e.g.
+    "CARE_COORDINATION") is what PRE's/Patient Liaison's own task feed uses -- see
+    cca_coordination.py's coordination_tasks for the cross-patient equivalent."""
     _get_org_patient(db, patient_id, _org_id(current_user))
-    tasks = db.query(CarePlanTask).filter(
-        CarePlanTask.patient_id == patient_id
-    ).order_by(CarePlanTask.due_date.asc()).all()
+    query = db.query(CarePlanTask).filter(CarePlanTask.patient_id == patient_id)
+    if owner_role:
+        query = query.filter(CarePlanTask.owner_role == owner_role)
+    tasks = query.order_by(CarePlanTask.due_date.asc()).all()
     return {"tasks": [_care_plan_task_dict(t) for t in tasks]}
 
 
@@ -4255,12 +4278,20 @@ def resolve_patient_task(
 ):
     """Resolving a review/reassessment task is treated as a clinical act requiring a
     clinician (or Admin) -- deliberately coarse-grained rather than guessing at a
-    per-task-category permission scheme (see list_patient_tasks's docstring)."""
+    per-task-category permission scheme (see list_patient_tasks's docstring). The one
+    exception: a CARE_COORDINATION-owned task (PRE's/Patient Liaison's own appointment/
+    navigation follow-ups) may be resolved by those roles too -- it was never a clinical
+    judgment to begin with."""
     task = db.query(CarePlanTask).filter(CarePlanTask.id == id).first()
     if not task:
         raise HTTPException(404, "Task not found")
     _check_patient_in_org(db, task.patient_id, _org_id(current_user))
-    _require_clinician(current_user)
+    if task.owner_role == "CARE_COORDINATION" and (
+        is_cca_patient_relations_executive(current_user) or is_cca_patient_liaison(current_user) or is_admin(current_user)
+    ):
+        pass
+    else:
+        _require_clinician(current_user)
 
     if task.status == "RESOLVED":
         raise HTTPException(409, "Task is already resolved")

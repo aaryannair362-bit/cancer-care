@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aivana — Radiation Technologist</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-page: #F1F5F9; --bg-sidebar: #EEF2F6; --bg-surface: #FFFFFF; --bg-card-subtle: #F8FAFC;
+            --ink-900: #0F172A; --ink-800: #1E293B; --ink-700: #334155; --ink-600: #475569; --ink-500: #64748B; --ink-400: #94A3B8; --ink-300: #CBD5E1;
+            --line: #E2E8F0; --line-subtle: #F1F5F9;
+            --brand-primary: #3B82F6; --brand-dark: #1E3A8A; --navy-action: #2A4365; --navy-action-hover: #1E3A8A;
+            --green-badge-bg: #DCFCE7; --green-badge-text: #166534;
+            --amber-badge-bg: #FEF3C7; --amber-badge-text: #92400E;
+            --rose-badge-bg: #FFE4E6; --rose-badge-text: #9F1239;
+            --blue-badge-bg: #E0E7FF; --blue-badge-text: #3730A3;
+            --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px; --radius-full: 9999px;
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05); --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', -apple-system, sans-serif; background: var(--bg-page); color: var(--ink-800); height: 100vh; display: flex; flex-direction: column; overflow: hidden; -webkit-font-smoothing: antialiased; }
+        .topbar { height: 64px; background: var(--bg-surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; flex-shrink: 0; z-index: 20; }
+        .brand-logo { font-size: 20px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; display: flex; align-items: center; gap: 8px; text-decoration: none; }
+        .header-actions { display: flex; align-items: center; gap: 12px; }
+        .icon-circle-btn { width: 38px; height: 38px; border-radius: var(--radius-full); border: 1px solid var(--line); background: var(--bg-surface); display: flex; align-items: center; justify-content: center; color: var(--ink-600); cursor: pointer; }
+        .role-badge-pill { display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: #F8FAFC; border: 1px solid var(--line); border-radius: var(--radius-full); font-size: 13px; font-weight: 500; color: var(--ink-800); cursor: pointer; }
+        .avatar-pill { width: 38px; height: 38px; border-radius: var(--radius-full); background: #E2E8F0; color: var(--ink-800); display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; border: 1px solid var(--line); cursor: pointer; }
+        .app-body { flex: 1; display: flex; overflow: hidden; }
+        .sidebar { width: 240px; background: var(--bg-sidebar); border-right: 1px solid var(--line); padding: 20px 14px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; overflow-y: auto; }
+        .sidebar-section-title { font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: var(--ink-400); text-transform: uppercase; padding: 10px 12px 6px; }
+        .sidebar-nav-item { display: flex; align-items: center; justify-content: space-between; padding: 11px 14px; border-radius: var(--radius-md); font-size: 13.5px; font-weight: 500; color: var(--ink-700); text-decoration: none; cursor: pointer; }
+        .sidebar-nav-item:hover { background: rgba(255, 255, 255, 0.6); color: var(--ink-900); }
+        .sidebar-nav-item.active { background: #FFFFFF; color: var(--ink-900); font-weight: 600; box-shadow: var(--shadow-sm); border: 1px solid rgba(226, 232, 240, 0.8); }
+        .nav-item-left { display: flex; align-items: center; gap: 10px; }
+        .nav-chevron { color: var(--ink-400); font-size: 12px; }
+        .canvas { flex: 1; overflow-y: auto; padding: 28px 36px; }
+        .view-panel { display: none; }
+        .view-panel.active { display: block; }
+        .page-title { font-size: 26px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; margin-bottom: 4px; }
+        .page-subtitle { font-size: 13.5px; color: var(--ink-500); margin-bottom: 20px; }
+        .section-card { background: var(--bg-surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 20px; box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+        .section-title { font-size: 16px; font-weight: 700; color: var(--ink-900); }
+        .section-sub { font-size: 12px; color: var(--ink-500); margin-top: 2px; }
+        .badge { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: var(--radius-sm); display: inline-flex; align-items: center; }
+        .badge-green { background: var(--green-badge-bg); color: var(--green-badge-text); }
+        .badge-amber { background: var(--amber-badge-bg); color: var(--amber-badge-text); }
+        .badge-rose { background: var(--rose-badge-bg); color: var(--rose-badge-text); }
+        .badge-blue { background: var(--blue-badge-bg); color: var(--blue-badge-text); }
+        .btn-navy { background: var(--navy-action); color: #FFFFFF; font-size: 12.5px; font-weight: 600; padding: 9px 16px; border-radius: var(--radius-sm); border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-navy:hover { background: var(--navy-action-hover); }
+        .btn-outline { background: #FFFFFF; border: 1px solid var(--line); color: var(--ink-700); font-size: 12.5px; font-weight: 600; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-outline:hover { border-color: var(--ink-400); background: #F8FAFC; }
+        .btn-danger { background: #FFFFFF; border: 1px solid var(--rose-badge-text); color: var(--rose-badge-text); font-size: 12.5px; font-weight: 700; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-danger:hover { background: var(--rose-badge-bg); }
+        .form-checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-800); margin-bottom: 10px; }
+        .wl-label { font-size: 11px; color: var(--ink-500); text-transform: uppercase; margin-bottom: 2px; }
+        .wl-value { font-size: 13.5px; font-weight: 700; color: var(--ink-900); }
+        .special-instructions { background: var(--amber-badge-bg); color: var(--amber-badge-text); padding: 8px 12px; border-radius: var(--radius-sm); font-size: 12.5px; font-weight: 600; margin-bottom: 10px; }
+        .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+        .form-group { display: flex; flex-direction: column; gap: 6px; }
+        .form-label { font-size: 12px; font-weight: 600; color: var(--ink-700); }
+        .form-input, .form-select, .form-textarea { width: 100%; height: 38px; padding: 0 12px; background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; color: var(--ink-900); outline: none; }
+        .form-textarea { height: auto; padding: 10px 12px; }
+        .hms-toast { position: fixed; bottom: 24px; right: 24px; background: var(--ink-900); color: #fff; padding: 12px 18px; border-radius: var(--radius-md); font-size: 13px; box-shadow: var(--shadow-md); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 999; max-width: 360px; }
+        .hms-toast--visible { opacity: 1; transform: translateY(0); }
+        .hms-toast--success { background: var(--green-badge-text); }
+        .hms-toast--error { background: var(--rose-badge-text); }
+        .hms-toast--info { background: var(--blue-badge-text); }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <a href="/radiation_technologist.html" class="brand-logo">Aivana</a>
+        <div style="flex:1;"></div>
+        <div class="header-actions">
+            <button class="icon-circle-btn" title="Notifications">🔔</button>
+            <div class="role-badge-pill" onclick="location.href='/index.html'"><span>Radiation Technologist</span><span>▾</span></div>
+            <div class="avatar-pill" title="Logged in">RT ▾</div>
+        </div>
+    </header>
+    <div class="app-body">
+        <aside class="sidebar">
+            <div class="sidebar-section-title">TREATMENT</div>
+            <a class="sidebar-nav-item active" id="nav-worklist" onclick="showTab('worklist')"><div class="nav-item-left"><span>🎯</span><span>Fraction Delivery</span></div><span class="nav-chevron">›</span></a>
+        </aside>
+        <main class="canvas">
+
+            <div id="view-worklist" class="view-panel active">
+                <h1 class="page-title">Fraction Delivery Worklist</h1>
+                <p class="page-subtitle">Phases ready for or currently on treatment across the census. Verify identity/site, deliver each fraction, and each phase's Special Instructions are shown here throughout delivery.</p>
+                <div id="worklist-content"><!-- Populated via JS: loadTechWorklist() --></div>
+            </div>
+
+        </main>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script>
+        const ccaUser = Auth.requirePage(['CCARadiationTechnologist', 'Admin']);
+        const CCA_API = '/cca';
+        let TREATMENT_UNITS = [];
+        const verifiedFractionIds = new Set();
+
+        function showTab(tab) {
+            document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.sidebar-nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(`view-${tab}`).classList.add('active');
+            document.getElementById(`nav-${tab}`).classList.add('active');
+            if (tab === 'worklist') loadTechWorklist();
+        }
+
+        // ---------------------------------------------------------------
+        // Fraction Delivery Worklist -- Radiation Technologist's own role (7 Role/Module
+        // Updates developer handoff; previously covered by the Radiologist login, see
+        // record_radiation_fraction_event's docstring in cca_oncology_ext.py).
+        // ---------------------------------------------------------------
+        async function loadTechWorklist() {
+            const container = document.getElementById('worklist-content');
+            try {
+                if (!TREATMENT_UNITS.length) {
+                    try { TREATMENT_UNITS = (await Api.get(`${CCA_API}/radiation-units`)).units || []; } catch (err) { /* units are optional context */ }
+                }
+                const data = await Api.get(`${CCA_API}/radiation-phases/worklist`);
+                const rows = (data.worklist || []).filter(p => ['treatment_ready', 'on_treatment', 'interrupted'].includes(p.rt_sub_status));
+                if (!rows.length) {
+                    container.innerHTML = '<div class="section-card"><p style="font-size:12.5px; color:var(--ink-500);">No phases currently ready for or on treatment.</p></div>';
+                    return;
+                }
+                container.innerHTML = (await Promise.all(rows.map(p => renderTechPhaseCard(p)))).join('');
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        const INTERRUPTION_CATEGORIES = ['Clinical/Operational', 'Toxicity/Condition', 'Machine Issue', 'Other'];
+
+        async function renderTechPhaseCard(p) {
+            let fractions = [];
+            try {
+                const data = await Api.get(`${CCA_API}/radiation-phases/${p.id}/fractions`);
+                fractions = data.fractions || [];
+            } catch (err) { /* fall through with empty list */ }
+            const delivered = fractions.filter(f => f.status === 'delivered').length;
+            const nextFraction = fractions.find(f => f.status === 'scheduled');
+
+            return `
+                <div class="section-card">
+                    <div class="section-head">
+                        <div>
+                            <div class="section-title">${escapeHtml(p.patient_name)} <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(p.patient_mrn)}</span></div>
+                            <div class="section-sub">Phase ${p.phase_number} — ${escapeHtml(p.label)} · ${escapeHtml(p.treatment_site)} · ${delivered} of ${p.number_of_fractions} fractions delivered</div>
+                        </div>
+                        <span class="badge ${p.rt_sub_status === 'interrupted' ? 'badge-rose' : 'badge-green'}">${escapeHtml(p.rt_sub_status.replace(/_/g, ' '))}</span>
+                    </div>
+                    ${p.special_instructions ? `<div class="special-instructions">⚠ Special Instructions: ${escapeHtml(p.special_instructions)}</div>` : ''}
+                    ${p.rt_sub_status === 'on_treatment' ? `<button class="btn-outline" style="margin-bottom:12px;" onclick="toggleInterruptForm(${p.id})">⏸ Interrupt Treatment</button><div id="interrupt-form-${p.id}"></div>` : ''}
+                    ${p.rt_sub_status === 'interrupted' ? `<button class="btn-navy" style="margin-bottom:12px;" onclick="resumeTreatment(${p.id})">▶ Resume Treatment</button>` : ''}
+                    ${nextFraction && p.rt_sub_status !== 'interrupted' ? `
+                        <div class="wl-label">Next Fraction</div>
+                        <div class="wl-value" style="margin-bottom:12px;">#${nextFraction.fraction_number} of ${p.number_of_fractions}</div>
+
+                        <div class="section-card" style="background:var(--bg-card-subtle); margin-bottom:12px;">
+                            <div class="section-sub" style="margin-bottom:8px; font-weight:700; color:var(--ink-800);">Unit / Schedule (SCR-RTT-001)</div>
+                            <div class="form-grid-2">
+                                <div class="form-group"><label class="form-label">Treatment unit</label>
+                                    <select id="fx-unit-${nextFraction.id}" class="form-select">
+                                        <option value="">— Unassigned —</option>
+                                        ${TREATMENT_UNITS.map(u => `<option value="${u.id}" ${nextFraction.treatment_unit_id === u.id ? 'selected' : ''}>${escapeHtml(u.name)}</option>`).join('')}
+                                    </select>
+                                </div>
+                                <div class="form-group"><label class="form-label">Scheduled date</label><input type="date" id="fx-date-${nextFraction.id}" class="form-input" value="${nextFraction.scheduled_date || ''}" /></div>
+                            </div>
+                            <button class="btn-outline" onclick="scheduleFraction(${nextFraction.id})">Save Schedule</button>
+                            ${nextFraction.treatment_unit_id ? `<button class="btn-outline" style="margin-left:8px;" onclick="toggleIssueForm(${nextFraction.treatment_unit_id})">⚠ Report Equipment Issue</button>` : ''}
+                        </div>
+                        <div id="issue-form-${nextFraction.treatment_unit_id || 0}"></div>
+
+                        <div class="section-card" style="background:${verifiedFractionIds.has(nextFraction.id) ? 'var(--green-badge-bg)' : 'var(--amber-badge-bg)'}; margin-bottom:12px;">
+                            <div class="section-sub" style="margin-bottom:8px; font-weight:700; color:var(--ink-800);">Pre-Treatment Verification (SCR-RTT-002) ${verifiedFractionIds.has(nextFraction.id) ? '<span class="badge badge-green">Verified ✓</span>' : '<span class="badge badge-amber">Required before delivery</span>'}</div>
+                            <div class="form-checkbox-row"><input type="checkbox" id="fx-idcheck-${nextFraction.id}"/> <label for="fx-idcheck-${nextFraction.id}">Patient identity re-verified</label></div>
+                            <div class="form-checkbox-row"><input type="checkbox" id="fx-sitecheck-${nextFraction.id}"/> <label for="fx-sitecheck-${nextFraction.id}">Site / laterality confirmed</label></div>
+                            <div class="form-grid-2">
+                                <div class="form-group"><label class="form-label">Confirmed fraction number</label><input type="number" id="fx-confirmnum-${nextFraction.id}" class="form-input" value="${nextFraction.fraction_number}" /></div>
+                                <div class="form-group"><label class="form-label">Mismatch note (if number doesn't match)</label><input type="text" id="fx-mismatchnote-${nextFraction.id}" class="form-input" /></div>
+                            </div>
+                            <button class="btn-navy" onclick="verifyFraction(${nextFraction.id})">Verify</button>
+                        </div>
+
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Delivered dose (Gy)</label><input type="number" step="0.01" id="fx-dose-${nextFraction.id}" class="form-input" value="${p.dose_per_fraction_gy || ''}" /></div>
+                            <div class="form-group"><label class="form-label">Outcome</label>
+                                <select id="fx-status-${nextFraction.id}" class="form-select">
+                                    <option value="delivered">Delivered</option>
+                                    <option value="missed">Missed</option>
+                                    <option value="rescheduled">Rescheduled</option>
+                                    <option value="cancelled">Cancelled</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-checkbox-row"><input type="checkbox" id="fx-igrt-${nextFraction.id}"/> <label for="fx-igrt-${nextFraction.id}">Image guidance performed</label></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Setup variation (if any)</label><input type="text" id="fx-setup-${nextFraction.id}" class="form-input" placeholder="e.g. shift corrected pre-beam" /></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Variance / Toxicity noted (if any)</label><textarea id="fx-variance-${nextFraction.id}" class="form-textarea" rows="2" placeholder="e.g. Grade 1 skin erythema"></textarea></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Verified by (independent second check)</label><input type="text" id="fx-verifier-${nextFraction.id}" class="form-input" placeholder="e.g. RTT B. Rao" /></div>
+                        <div class="form-checkbox-row"><input type="checkbox" id="fx-dosematch-${nextFraction.id}" checked/> <label for="fx-dosematch-${nextFraction.id}">Delivered dose matches prescription</label></div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Dose mismatch note (required if unchecked above)</label><input type="text" id="fx-dosemismatch-${nextFraction.id}" class="form-input" /></div>
+                        <button class="btn-navy" onclick="recordFraction(${nextFraction.id})">Record Fraction</button>
+                    ` : (p.rt_sub_status !== 'interrupted' ? '<p style="font-size:12.5px; color:var(--ink-500);">No fractions currently scheduled for this phase.</p>' : '')}
+                </div>
+            `;
+        }
+
+        async function scheduleFraction(fractionId) {
+            const unitId = document.getElementById(`fx-unit-${fractionId}`).value;
+            const date = document.getElementById(`fx-date-${fractionId}`).value;
+            try {
+                await Api.post(`${CCA_API}/radiation-fractions/${fractionId}/schedule`, {
+                    treatment_unit_id: unitId ? Number(unitId) : undefined,
+                    scheduled_date: date || undefined,
+                });
+                toast('Schedule saved', 'success');
+                loadTechWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function toggleIssueForm(unitId) {
+            const host = document.getElementById(`issue-form-${unitId}`);
+            if (!host) return;
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div class="section-card" style="background:var(--rose-badge-bg); margin-bottom:12px;">
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Category</label>
+                        <select id="issue-category-${unitId}" class="form-select">
+                            <option>Interlock</option><option>Mechanical</option><option>Imaging</option>
+                            <option>Dosimetry</option><option>Software</option><option>Accessory</option><option>Environmental</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Description *</label><textarea id="issue-desc-${unitId}" class="form-textarea" rows="2"></textarea></div>
+                    <button class="btn-danger" onclick="reportEquipmentIssue(${unitId})">Report Issue</button>
+                    <button class="btn-outline" style="margin-left:8px;" onclick="toggleIssueForm(${unitId})">Cancel</button>
+                </div>
+            `;
+        }
+
+        async function reportEquipmentIssue(unitId) {
+            const description = document.getElementById(`issue-desc-${unitId}`).value;
+            if (!description) { toast('Description is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/radiation-units/${unitId}/issues`, {
+                    description, category: document.getElementById(`issue-category-${unitId}`).value,
+                });
+                toast('Equipment issue reported to Physics', 'success');
+                toggleIssueForm(unitId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function verifyFraction(fractionId) {
+            const confirmedNumber = document.getElementById(`fx-confirmnum-${fractionId}`).value;
+            try {
+                await Api.post(`${CCA_API}/radiation-fractions/${fractionId}/pretreatment-verification`, {
+                    identity_reverified: document.getElementById(`fx-idcheck-${fractionId}`).checked,
+                    site_laterality_confirmed: document.getElementById(`fx-sitecheck-${fractionId}`).checked,
+                    confirmed_fraction_number: Number(confirmedNumber),
+                    mismatch_note: document.getElementById(`fx-mismatchnote-${fractionId}`).value || undefined,
+                });
+                verifiedFractionIds.add(fractionId);
+                toast('Pre-treatment verification recorded', 'success');
+                loadTechWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function recordFraction(fractionId) {
+            const dosMatch = document.getElementById(`fx-dosematch-${fractionId}`).checked;
+            try {
+                await Api.post(`${CCA_API}/radiation-fractions/${fractionId}/event`, {
+                    status: document.getElementById(`fx-status-${fractionId}`).value,
+                    delivered_dose_gy: Number(document.getElementById(`fx-dose-${fractionId}`).value) || undefined,
+                    variance_or_toxicity: document.getElementById(`fx-variance-${fractionId}`).value || undefined,
+                    image_guidance_performed: document.getElementById(`fx-igrt-${fractionId}`).checked,
+                    setup_variation: document.getElementById(`fx-setup-${fractionId}`).value || undefined,
+                    verified_by: document.getElementById(`fx-verifier-${fractionId}`).value || undefined,
+                    dose_match_confirmed: dosMatch,
+                    dose_mismatch_note: dosMatch ? undefined : document.getElementById(`fx-dosemismatch-${fractionId}`).value,
+                });
+                toast('Fraction recorded', 'success');
+                loadTechWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function toggleInterruptForm(phaseId) {
+            const host = document.getElementById(`interrupt-form-${phaseId}`);
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div class="section-card" style="background:var(--rose-badge-bg); margin-bottom:12px;">
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Reason *</label><textarea id="int-reason-${phaseId}" class="form-textarea" rows="2"></textarea></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Category</label>
+                        <select id="int-category-${phaseId}" class="form-select">${INTERRUPTION_CATEGORIES.map(c => `<option>${c}</option>`).join('')}</select>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Compensation plan (how the missed time will be made up)</label><textarea id="int-plan-${phaseId}" class="form-textarea" rows="2"></textarea></div>
+                    <button class="btn-danger" onclick="submitInterruption(${phaseId})">Confirm Interruption</button>
+                    <button class="btn-outline" style="margin-left:8px;" onclick="toggleInterruptForm(${phaseId})">Cancel</button>
+                </div>
+            `;
+        }
+
+        async function submitInterruption(phaseId) {
+            const reason = document.getElementById(`int-reason-${phaseId}`).value;
+            if (!reason) { toast('Reason is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/radiation-phases/${phaseId}/transition`, {
+                    status: 'interrupted', reason,
+                    category: document.getElementById(`int-category-${phaseId}`).value,
+                    compensation_plan: document.getElementById(`int-plan-${phaseId}`).value || undefined,
+                });
+                toast('Treatment interrupted', 'success');
+                loadTechWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function resumeTreatment(phaseId) {
+            try {
+                await Api.post(`${CCA_API}/radiation-phases/${phaseId}/transition`, { status: 'on_treatment' });
+                toast('Treatment resumed', 'success');
+                loadTechWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => { loadTechWorklist(); });
+    </script>
+</body>
+</html>

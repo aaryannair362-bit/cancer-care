@@ -111,25 +111,31 @@ def _on_treatment_administered(db, patient_id=None, treatment_plan_id=None,
 
 @subscribe("PATIENT_NO_SHOW")
 def _on_patient_no_show(db, patient_id=None, coordination_case_id=None, context=None, **_payload):
-    """Architecture doc: 'Care Coordinator receives recovery task'."""
+    """Architecture doc: 'Care Coordinator receives recovery task'. owner_role/category tagged
+    CARE_COORDINATION/COORDINATION (7 Role/Module Updates developer handoff) -- this is what
+    PRE's and Patient Liaison's task feed (cca_coordination.py's coordination_tasks) filters
+    on; untagged, this task never surfaced there even though it's genuinely coordination-owned."""
     db.add(CarePlanTask(
         care_plan_id=None, patient_id=patient_id,
         description=f"Recovery follow-up after no-show." + (f" {context}" if context else ""),
         owner_id="", owner_name="Patient Liaison / Care Coordinator",
         due_date=datetime.utcnow() + timedelta(days=2),
-        status="OPEN",
+        status="OPEN", owner_role="CARE_COORDINATION", category="COORDINATION",
     ))
 
 
 @subscribe("CARE_PLAN_TASK_BLOCKED")
 def _on_care_plan_task_blocked(db, patient_id=None, barrier_type=None, barrier_notes=None, **_payload):
-    """Architecture doc: 'Care Coordinator + treating team see blocker'."""
+    """Architecture doc: 'Care Coordinator + treating team see blocker'. Tagged
+    TREATING_ONCOLOGIST/CLINICAL_REVIEW, not CARE_COORDINATION -- unlike the no-show task above,
+    this is a clinical escalation for the treating team, and must NOT surface in PRE's/Patient
+    Liaison's non-clinical coordination task feed."""
     db.add(CarePlanTask(
         care_plan_id=None, patient_id=patient_id,
         description=f"Escalated barrier ({barrier_type}): {barrier_notes or 'see coordination case for detail'}",
         owner_id="", owner_name="Treating Team",
         due_date=datetime.utcnow() + timedelta(days=1),
-        status="OPEN",
+        status="OPEN", owner_role="TREATING_ONCOLOGIST", category="CLINICAL_REVIEW",
     ))
 
 

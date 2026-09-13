@@ -80,6 +80,53 @@ def _run_ocr(image) -> str:
     return "\n".join(item[1] for item in (result or [])).strip()
 
 
+# Deterministic lab-value scanner (a supplement alongside the AI-drafted ClinicalFacts -- see
+# cca_engine.extract_deterministic_lab_facts, which turns this key into that same fact shape):
+# unlike the section patterns below (each captures one free-text paragraph after a header like
+# "Investigations:"), this catches individual "<test name>: <value> <unit>" lines ANYWHERE in
+# the document, with no truncation and no LLM call, so a lab value on page 40 of a 50-page
+# report is never missed purely because it's past what extract_clinical_facts's 8000-character
+# whole-document cap ever reaches. Deliberately narrow: it only
+# fires when a recognised test name is immediately followed by "<number> <unit-ish text>" on the
+# SAME line (matching _run_ocr's one-line-per-detected-region output), never on messy/
+# unstructured phrasing -- that's what the LLM passes are still for.
+_LAB_TEST_ALIASES: list[tuple[str, str]] = [
+    ("Hemoglobin", r"h(?:a)?emoglobin|\bhb\b"),
+    ("WBC/TLC", r"total leukocyte count|white blood cell count|leukocyte count|\bwbc\b|\btlc\b"),
+    ("Platelet Count", r"platelet count|platelets?"),
+    ("Neutrophils", r"neutrophils?"),
+    ("Lymphocytes", r"lymphocytes?"),
+    ("ESR", r"erythrocyte sedimentation rate|\besr\b"),
+    ("CRP", r"c-?reactive protein|\bcrp\b"),
+    ("Creatinine", r"creatinine"),
+    ("Blood Urea/BUN", r"blood urea nitrogen|\bbun\b|\burea\b"),
+    ("Sodium", r"\bsodium\b"),
+    ("Potassium", r"\bpotassium\b"),
+    ("Calcium", r"\bcalcium\b"),
+    ("Albumin", r"\balbumin\b"),
+    ("Total Bilirubin", r"total bilirubin|\bbilirubin\b"),
+    ("SGOT/AST", r"\bsgot\b|\bast\b"),
+    ("SGPT/ALT", r"\bsgpt\b|\balt\b"),
+    ("ALP", r"alkaline phosphatase|\balp\b"),
+    ("LDH", r"lactate dehydrogenase|\bldh\b"),
+    ("Blood Glucose", r"(?:random|fasting|post[- ]?prandial)\s+blood\s+(?:sugar|glucose)|blood glucose|blood sugar|\bglucose\b"),
+    ("HbA1c", r"glycated h(?:a)?emoglobin|hba1c"),
+    ("TSH", r"thyroid stimulating hormone|\btsh\b"),
+    ("PSA", r"prostate specific antigen|\bpsa\b"),
+    ("CEA", r"carcinoembryonic antigen|\bcea\b"),
+    ("CA-125", r"ca[- ]?125"),
+    ("CA 19-9", r"ca[- ]?19-9"),
+    ("CA 15-3", r"ca[- ]?15-3"),
+    ("INR", r"\binr\b"),
+]
+# name kept out of the compiled pattern itself -- looked up by list position once a line matches,
+# so the canonical name in the output (e.g. "Hemoglobin") never depends on which alias matched.
+_LAB_VALUE_LINE_PATTERNS = [
+    (name, re.compile(rf"^(?:{alias})\s*[:\-]\s*([0-9]+(?:\.[0-9]+)?)\s*([%A-Za-z/^0-9µμ]*)", re.I))
+    for name, alias in _LAB_TEST_ALIASES
+]
+
+
 def _clinical_signals(text: str) -> dict[str, Any]:
     """Extract conservative, reviewable signals; never manufacture missing clinical facts."""
     compact = re.sub(r"[ \t]+", " ", text or "").strip()
@@ -101,6 +148,20 @@ def _clinical_signals(text: str) -> dict[str, Any]:
                     result[key].append(value[:1000])
     date_matches = re.findall(r"\b(?:0?[1-9]|[12]\d|3[01])[-/.](?:0?[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b", compact)
     result["dates_mentioned"] = list(dict.fromkeys(date_matches))[:20]
+
+    lab_values: list[str] = []
+    for line in lines:
+        for name, pattern in _LAB_VALUE_LINE_PATTERNS:
+            match = pattern.match(line)
+            if not match:
+                continue
+            value, unit = match.group(1), match.group(2).strip()
+            entry = f"{name}: {value}{(' ' + unit) if unit else ''}"
+            if entry not in lab_values:
+                lab_values.append(entry)
+            break  # a line matches at most one test -- stop scanning aliases for it
+    result["lab_values"] = lab_values[:50]
+
     result["text_preview"] = compact[:1200]
     return result
 
@@ -113,10 +174,18 @@ def _extract_local(content: bytes, content_type: str) -> dict[str, Any]:
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(content))
         if reader.is_encrypted:
+            # pypdf's decrypt("") does NOT raise for a real (non-empty-password) encrypted PDF --
+            # confirmed live: it just returns PasswordType.NOT_DECRYPTED (falsy) and leaves the
+            # reader still encrypted, so a bare try/except around the call alone never actually
+            # catches the common case. Previously this fell through to page.extract_text() below,
+            # which raises pypdf's own FileNotDecryptedError -- a confusing internal exception
+            # message reaching ocr_status/ocr_error instead of this function's intended, clear one.
             try:
-                reader.decrypt("")
+                decrypted = reader.decrypt("")
             except Exception as exc:
                 raise ValueError("Password-protected PDFs are not supported") from exc
+            if not decrypted:
+                raise ValueError("Password-protected PDFs are not supported")
         native = [(page.extract_text() or "").strip() for page in reader.pages]
         needs_ocr = [i for i, text in enumerate(native) if len(text) < 40]
         ocr_by_page: dict[int, str] = {}

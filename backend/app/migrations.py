@@ -230,6 +230,17 @@ ADDITIVE_COLUMNS = [
     ("cca_mdt_participants", "arrived_at", "TIMESTAMP"),
     ("cca_mdt_participants", "departed_at", "TIMESTAMP"),
     ("cca_mdt_participants", "dissenting_opinion", "TEXT"),
+    # 7 Role/Module Updates developer handoff: Radiology Technician's imaging-acquisition
+    # workflow (models_cca.py's CCAOrder).
+    ("cca_orders", "acquisition_status", "VARCHAR(30) DEFAULT 'NotStarted'"),
+    ("cca_orders", "acquisition_modality", "VARCHAR(50)"),
+    ("cca_orders", "acquisition_protocol", "VARCHAR(200)"),
+    ("cca_orders", "contrast_used", "BOOLEAN"),
+    ("cca_orders", "contrast_notes", "TEXT"),
+    ("cca_orders", "technical_notes", "TEXT"),
+    ("cca_orders", "technical_issue", "TEXT"),
+    ("cca_orders", "acquired_by", "VARCHAR(200)"),
+    ("cca_orders", "acquired_at", "TIMESTAMP"),
 ]
 
 

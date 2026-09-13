@@ -36,10 +36,15 @@ def physicist(make_user, oncologist):
 
 @pytest.fixture
 def radiologist(make_user, oncologist):
-    """Radiation Technologist and Radiologist are the same login in this hospital's role
-    structure -- no separate CCARadiationTechnologist role exists; fraction delivery is
-    recorded by CCARadiologist."""
+    """Interpretation/reporting only (7 Role/Module Updates developer handoff) -- must NOT be
+    able to perform Radiation Technologist fraction-delivery actions; see
+    test_fraction_events_persist_variance_and_only_rtt_may_record's radiologist-403 assertion."""
     return make_user(email="radiologist@oncext.hosp", role="CCARadiologist", organization_id=oncologist.organization_id)
+
+
+@pytest.fixture
+def rad_tech(make_user, oncologist):
+    return make_user(email="radtech@oncext.hosp", role="CCARadiationTechnologist", organization_id=oncologist.organization_id)
 
 
 @pytest.fixture
@@ -202,11 +207,11 @@ def test_planning_steps_require_physicist_and_final_approval_requires_radiation_
     assert approved.json()["phase"]["physician_signer_email"]
 
 
-def test_fraction_events_persist_variance_and_only_radiologist_may_record(client, auth_headers, db_session, oncologist, rad_onc, physicist, radiologist, nurse):
+def test_fraction_events_persist_variance_and_only_rtt_may_record(client, auth_headers, db_session, oncologist, rad_onc, physicist, radiologist, rad_tech, nurse):
     """PDF item 21: recording a fraction delivery is the Radiation Technologist's action --
-    previously any clinical/nursing role could, which this closes. Radiation Technologist and
-    Radiologist are the same login in this hospital's role structure, so this gates on
-    CCARadiologist (see record_radiation_fraction_event's docstring)."""
+    previously any clinical/nursing role could. Now its own CCARadiationTechnologist role (7
+    Role/Module Updates developer handoff) rather than a CCARadiologist stand-in -- Radiologist
+    must be rejected the same as any other non-RTT role (checklist item 05)."""
     patient_id = _patient_id(db_session, oncologist.organization_id)
     onc_headers = auth_headers(rad_onc)
     course = _create_rx(client, onc_headers, patient_id)
@@ -219,8 +224,11 @@ def test_fraction_events_persist_variance_and_only_radiologist_may_record(client
     rejected = client.post(f"/api/cca/radiation-fractions/{fractions[0]['id']}/event", headers=auth_headers(nurse), json={"status": "missed"})
     assert rejected.status_code == 403
 
-    radiologist_headers = auth_headers(radiologist)
-    missed = client.post(f"/api/cca/radiation-fractions/{fractions[0]['id']}/event", headers=radiologist_headers, json={
+    radiologist_rejected = client.post(f"/api/cca/radiation-fractions/{fractions[0]['id']}/event", headers=auth_headers(radiologist), json={"status": "missed"})
+    assert radiologist_rejected.status_code == 403, "Radiologist must not be able to record a fraction delivery event (checklist item 05)"
+
+    rad_tech_headers = auth_headers(rad_tech)
+    missed = client.post(f"/api/cca/radiation-fractions/{fractions[0]['id']}/event", headers=rad_tech_headers, json={
         "status": "missed", "interruption_reason": "Patient unwell, rescheduled by radiotherapy team",
     })
     assert missed.status_code == 200
@@ -228,10 +236,10 @@ def test_fraction_events_persist_variance_and_only_radiologist_may_record(client
     assert body["status"] == "missed"
     assert body["interruption_reason"] == "Patient unwell, rescheduled by radiotherapy team"
 
-    client.post(f"/api/cca/radiation-fractions/{fractions[1]['id']}/pretreatment-verification", headers=radiologist_headers, json={
+    client.post(f"/api/cca/radiation-fractions/{fractions[1]['id']}/pretreatment-verification", headers=rad_tech_headers, json={
         "identity_reverified": True, "site_laterality_confirmed": True, "confirmed_fraction_number": fractions[1]["fraction_number"],
     })
-    reviewed = client.post(f"/api/cca/radiation-fractions/{fractions[1]['id']}/event", headers=radiologist_headers, json={
+    reviewed = client.post(f"/api/cca/radiation-fractions/{fractions[1]['id']}/event", headers=rad_tech_headers, json={
         "status": "delivered", "on_treatment_review_note": "Skin reaction Grade 1, tolerating well",
         "variance_or_toxicity": "Grade 1 erythema noted",
     })
@@ -239,7 +247,7 @@ def test_fraction_events_persist_variance_and_only_radiologist_may_record(client
     assert reviewed.json()["fraction"]["variance_or_toxicity"] == "Grade 1 erythema noted"
 
 
-def test_phase_cannot_complete_until_all_fractions_delivered(client, auth_headers, db_session, oncologist, rad_onc, physicist, radiologist):
+def test_phase_cannot_complete_until_all_fractions_delivered(client, auth_headers, db_session, oncologist, rad_onc, physicist, rad_tech):
     patient_id = _patient_id(db_session, oncologist.organization_id)
     onc_headers = auth_headers(rad_onc)
     course = _create_rx(client, onc_headers, patient_id)
@@ -250,12 +258,12 @@ def test_phase_cannot_complete_until_all_fractions_delivered(client, auth_header
     assert too_early.status_code == 409
 
     fractions = client.get(f"/api/cca/radiation-phases/{phase['id']}/fractions", headers=onc_headers).json()["fractions"]
-    radiologist_headers = auth_headers(radiologist)
+    rad_tech_headers = auth_headers(rad_tech)
     for f in fractions:
-        client.post(f"/api/cca/radiation-fractions/{f['id']}/pretreatment-verification", headers=radiologist_headers, json={
+        client.post(f"/api/cca/radiation-fractions/{f['id']}/pretreatment-verification", headers=rad_tech_headers, json={
             "identity_reverified": True, "site_laterality_confirmed": True, "confirmed_fraction_number": f["fraction_number"],
         })
-        client.post(f"/api/cca/radiation-fractions/{f['id']}/event", headers=radiologist_headers, json={"status": "delivered"})
+        client.post(f"/api/cca/radiation-fractions/{f['id']}/event", headers=rad_tech_headers, json={"status": "delivered"})
 
     completed = client.post(f"/api/cca/radiation-phases/{phase['id']}/complete", headers=onc_headers)
     assert completed.status_code == 200
@@ -273,7 +281,7 @@ def _create_surgical_plan(client, headers, patient_id):
     }).json()["surgical_plan"]
 
 
-def test_phase_can_be_interrupted_and_resumed(client, auth_headers, db_session, oncologist, rad_onc, physicist, radiologist):
+def test_phase_can_be_interrupted_and_resumed(client, auth_headers, db_session, oncologist, rad_onc, physicist, rad_tech):
     patient_id = _patient_id(db_session, oncologist.organization_id)
     onc_headers = auth_headers(rad_onc)
     course = _create_rx(client, onc_headers, patient_id)
@@ -285,11 +293,11 @@ def test_phase_can_be_interrupted_and_resumed(client, auth_headers, db_session, 
 
     # Enter on_treatment via a fraction event, then interrupt and resume.
     fractions = client.get(f"/api/cca/radiation-phases/{phase['id']}/fractions", headers=onc_headers).json()["fractions"]
-    radiologist_headers = auth_headers(radiologist)
-    client.post(f"/api/cca/radiation-fractions/{fractions[0]['id']}/pretreatment-verification", headers=radiologist_headers, json={
+    rad_tech_headers = auth_headers(rad_tech)
+    client.post(f"/api/cca/radiation-fractions/{fractions[0]['id']}/pretreatment-verification", headers=rad_tech_headers, json={
         "identity_reverified": True, "site_laterality_confirmed": True, "confirmed_fraction_number": fractions[0]["fraction_number"],
     })
-    client.post(f"/api/cca/radiation-fractions/{fractions[0]['id']}/event", headers=radiologist_headers, json={"status": "delivered"})
+    client.post(f"/api/cca/radiation-fractions/{fractions[0]['id']}/event", headers=rad_tech_headers, json={"status": "delivered"})
 
     missing_reason = client.post(f"/api/cca/radiation-phases/{phase['id']}/transition", headers=onc_headers, json={"status": "interrupted"})
     assert missing_reason.status_code == 422

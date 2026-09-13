@@ -14,7 +14,10 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user, is_admin, is_nurse, is_head_nurse, is_cca_infusion_nurse
+from ..auth import (
+    get_current_user, is_admin, is_nurse, is_head_nurse, is_cca_infusion_nurse,
+    is_cca_inpatient_oncology_nurse, is_doctor, is_cca_oncologist,
+)
 from ..models_cca import CCAPatient
 from ..models_cca_inpatient import (
     InpatientAdmission, InpatientHistoryAndPhysical, InpatientProblemListItem,
@@ -29,11 +32,29 @@ router = APIRouter(prefix="/api/cca", tags=["CCA Inpatient Oncology"])
 
 
 def _require_inpatient_nurse(current_user: dict):
-    """No dedicated CCA Inpatient Nurse role exists in this codebase's role vocabulary --
-    the closest existing nursing roles stand in, matching how record_radiation_fraction_event
-    reuses CCARadiologist as the RTT stand-in elsewhere in this codebase."""
-    if not (is_nurse(current_user) or is_head_nurse(current_user) or is_cca_infusion_nurse(current_user) or is_admin(current_user)):
+    """CCAInpatientOncologyNurse (7 Role/Module Updates developer handoff) is the dedicated
+    role for this module; the general Nurse/HeadNurse/CCAInfusionNurse roles that stood in for
+    it before keep working too (additive, not a back-compat break)."""
+    if not (
+        is_cca_inpatient_oncology_nurse(current_user) or is_nurse(current_user)
+        or is_head_nurse(current_user) or is_cca_infusion_nurse(current_user) or is_admin(current_user)
+    ):
         raise HTTPException(403, "Only nursing staff may perform this action")
+
+
+def _require_inpatient_nurse_or_clinician(current_user: dict):
+    """Transfer/handover and deterioration/escalation recording (7 Role/Module Updates
+    developer handoff: explicit Inpatient Oncology Nurse duties) -- previously ungated
+    entirely (any authenticated org member could call these), which is the actual gap this
+    closes. Nursing staff or a treating clinician; matches real ward practice where either
+    may be the one documenting a transfer or a deterioration event."""
+    if (
+        is_cca_inpatient_oncology_nurse(current_user) or is_nurse(current_user)
+        or is_head_nurse(current_user) or is_cca_infusion_nurse(current_user) or is_admin(current_user)
+        or is_doctor(current_user) or is_cca_oncologist(current_user)
+    ):
+        return
+    raise HTTPException(403, "Only nursing staff or a treating clinician may perform this action")
 
 
 def _admission_dict(a: InpatientAdmission) -> dict:
@@ -466,6 +487,7 @@ def _deterioration_dict(d: InpatientDeteriorationEvent) -> dict:
 
 @router.post("/inpatient/admissions/{id}/deterioration-events", status_code=201)
 async def record_deterioration_event(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_inpatient_nurse_or_clinician(current_user)
     admission = _get_org_admission(db, id, _org_id(current_user))
     body = await request.json()
     trigger = (body.get("trigger") or "").strip()
@@ -551,6 +573,7 @@ def _transfer_dict(t: InpatientTransferHandover) -> dict:
 
 @router.post("/inpatient/admissions/{id}/transfers", status_code=201)
 async def record_transfer(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_inpatient_nurse_or_clinician(current_user)
     admission = _get_org_admission(db, id, _org_id(current_user))
     body = await request.json()
     summary = (body.get("handover_summary") or "").strip()

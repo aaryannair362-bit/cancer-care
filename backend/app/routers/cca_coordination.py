@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from ..auth import (
     get_current_user, is_admin, is_cca_oncologist, is_cca_mdt_coordinator,
     is_cca_external_mdt_specialist, is_cca_financial_counsellor, is_cca_patient_liaison,
-    is_cca_front_desk,
+    is_cca_front_desk, is_cca_biller, is_cca_patient_relations_executive,
 )
 from ..models import User
 from ..models_cca import (
@@ -538,8 +538,21 @@ async def submit_opinion(case_id: int, request: Request, db: Session = Depends(g
 # ---------------------------------------------------------------------------
 
 def _require_financial_write(user: dict):
+    """Gates the broader financial-coordination scope -- counselling, estimate, insurance,
+    clearance, next-action, preauthorization, and high-cost-drug approval decisions. Displayed
+    as "Finance / Billing" in the UI (7 Role/Module Updates developer handoff); the underlying
+    role identifier is unchanged. Transaction-level billing (claims/refunds/billable-events) is
+    gated separately by _require_biller_write below, a distinct role."""
     if not (is_cca_financial_counsellor(user) or is_admin(user)):
-        raise HTTPException(403, "Only the Financial Counsellor or Admin may edit financial records")
+        raise HTTPException(403, "Only Finance / Billing or Admin may edit financial records")
+
+
+def _require_biller_write(user: dict):
+    """Transaction/operations-facing billing role (7 Role/Module Updates developer handoff) --
+    deliberately separate from _require_financial_write above so Biller and Finance/Billing
+    stay distinct, non-overlapping permission sets rather than one unrestricted financial role."""
+    if not (is_cca_biller(user) or is_admin(user)):
+        raise HTTPException(403, "Only the Biller or Admin may record billing transactions")
 
 
 def _financial_out(f: CCAFinancialCase) -> dict:
@@ -821,7 +834,7 @@ def _billable_event_out(b: BillableEventRecord) -> dict:
 
 @router.post("/financial/cases/{case_id}/billable-events", status_code=201)
 async def add_billable_event(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
-    _require_financial_write(current_user)
+    _require_biller_write(current_user)
     case = _get_org_financial_case(db, case_id, _org_id(current_user))
     body = await request.json()
     description = (body.get("service_description") or "").strip()
@@ -910,7 +923,7 @@ def _claim_out(c: ClaimRecord) -> dict:
 
 @router.post("/financial/cases/{case_id}/claims", status_code=201)
 async def create_claim(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
-    _require_financial_write(current_user)
+    _require_biller_write(current_user)
     case = _get_org_financial_case(db, case_id, _org_id(current_user))
     body = await request.json()
     claim = ClaimRecord(
@@ -938,7 +951,7 @@ async def update_claim_status(id: int, request: Request, db: Session = Depends(g
     if not claim:
         raise HTTPException(404, "Claim not found")
     _check_patient_in_org(db, claim.patient_id, _org_id(current_user))
-    _require_financial_write(current_user)
+    _require_biller_write(current_user)
     body = await request.json()
     status_val = body.get("status")
     if status_val not in ("UnderReview", "Approved", "PartiallyApproved", "Denied", "Paid"):
@@ -961,7 +974,7 @@ def _refund_out(r: RefundCreditNote) -> dict:
 
 @router.post("/financial/cases/{case_id}/refunds", status_code=201)
 async def create_refund(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
-    _require_financial_write(current_user)
+    _require_biller_write(current_user)
     case = _get_org_financial_case(db, case_id, _org_id(current_user))
     body = await request.json()
     amount = body.get("amount")
@@ -991,7 +1004,7 @@ async def issue_refund(id: int, request: Request, db: Session = Depends(get_cca_
     if not refund:
         raise HTTPException(404, "Refund/credit note not found")
     _check_patient_in_org(db, refund.patient_id, _org_id(current_user))
-    _require_financial_write(current_user)
+    _require_biller_write(current_user)
     if refund.status == "Issued":
         raise HTTPException(409, "This refund/credit note is already issued")
     refund.status = "Issued"
@@ -1045,6 +1058,34 @@ def coordination_queue(db: Session = Depends(get_cca_db), current_user: dict = D
         CCAPatient.organization_id == org_id
     ).order_by(CCACoordinationCase.updated_at.desc()).all()
     return {"queue": [{**_coordination_out(c), "patient_name": p.name, "patient_mrn": p.mrn} for c, p in rows]}
+
+
+@router.get("/coordination/tasks")
+def coordination_tasks(
+    owner_role: str = "CARE_COORDINATION", db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Cross-patient task/alert feed for PRE and Patient Liaison (7 Role/Module Updates
+    developer handoff) -- reuses CarePlanTask (models_cca.py) rather than a bespoke table; see
+    that model's owner_role/category columns and cca.py's list_patient_tasks for the
+    per-patient equivalent this mirrors. Defaults to the CARE_COORDINATION tag both real
+    producers (cca.py's order-raised milestone task, event_subscribers.py's no-show/barrier
+    tasks) already use."""
+    if not (is_cca_patient_relations_executive(current_user) or is_cca_patient_liaison(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only PRE, Patient Liaison, or Admin may view the coordination task feed")
+    org_id = _org_id(current_user)
+    rows = db.query(CarePlanTask, CCAPatient).join(CCAPatient, CarePlanTask.patient_id == CCAPatient.id).filter(
+        CCAPatient.organization_id == org_id, CarePlanTask.owner_role == owner_role,
+    ).order_by(CarePlanTask.due_date.asc()).all()
+    return {"tasks": [
+        {
+            "id": t.id, "patient_id": t.patient_id, "patient_name": p.name, "patient_mrn": p.mrn,
+            "description": t.description, "owner_name": t.owner_name, "owner_role": t.owner_role,
+            "category": t.category, "due_date": t.due_date.isoformat() if t.due_date else None,
+            "status": t.status, "source": t.source,
+        }
+        for t, p in rows
+    ]}
 
 
 @router.post("/coordination/cases", status_code=201)
@@ -1317,8 +1358,8 @@ def list_coordination_appointments(
 
 @router.post("/coordination/appointments", status_code=201)
 async def create_coordination_appointment(request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
-    if not (is_cca_patient_liaison(current_user) or is_admin(current_user)):
-        raise HTTPException(403, "Only the Patient Liaison or Admin may coordinate an appointment")
+    if not (is_cca_patient_liaison(current_user) or is_cca_patient_relations_executive(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Patient Liaison, PRE, or Admin may coordinate an appointment")
     org_id = _org_id(current_user)
     body = await request.json()
     patient_id = body.get("patient_id")
@@ -1354,8 +1395,8 @@ async def create_coordination_appointment(request: Request, db: Session = Depend
 
 @router.patch("/coordination/appointments/{appointment_id}")
 async def update_coordination_appointment(appointment_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
-    if not (is_cca_patient_liaison(current_user) or is_admin(current_user)):
-        raise HTTPException(403, "Only the Patient Liaison or Admin may update a coordinated appointment")
+    if not (is_cca_patient_liaison(current_user) or is_cca_patient_relations_executive(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Patient Liaison, PRE, or Admin may update a coordinated appointment")
     org_id = _org_id(current_user)
     appointment = db.query(CCAAppointmentCoordination).filter(CCAAppointmentCoordination.id == appointment_id).first()
     if not appointment:

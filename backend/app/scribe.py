@@ -149,7 +149,8 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
         # retry loop below at the same time). Blocks this thread until it's this call's turn;
         # under normal, non-concurrent usage the buckets are full and this returns immediately.
         rate_limiter.request_bucket.consume(1)
-        rate_limiter.token_bucket.consume(rate_limiter.estimate_tokens(prompt, payload["max_tokens"]))
+        estimated_tokens = rate_limiter.estimate_tokens(prompt, payload["max_tokens"])
+        rate_limiter.token_bucket.consume(estimated_tokens)
 
         try:
             data = self._post_with_retry(self.base_url, {"headers": headers, "json": payload, "timeout": 60})
@@ -162,6 +163,12 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
                 self._reasoning_format_supported = False
                 return self._call_groq_api(prompt, system, temperature, max_tokens)
             raise
+        # True up the token bucket against what this call actually cost, per Groq's own
+        # returned usage -- see TokenBucket.true_up's docstring for why the pre-call estimate
+        # alone under-paces a reasoning-capable model's hidden "reasoning tokens".
+        actual_total = ((data or {}).get("usage") or {}).get("total_tokens")
+        if isinstance(actual_total, (int, float)):
+            rate_limiter.token_bucket.true_up(actual_total, estimated_tokens)
         return data["choices"][0]["message"]["content"]
 
     def transcribe_audio(self, audio_bytes: bytes, content_type: str, filename: str) -> str:

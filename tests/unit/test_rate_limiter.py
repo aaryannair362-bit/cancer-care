@@ -124,3 +124,40 @@ def test_estimate_tokens_scales_with_prompt_length_and_includes_max_tokens():
     longer = estimate_tokens("hi " * 1000, max_tokens=100)
     assert short < longer
     assert short >= 100  # at minimum, the max_tokens completion budget is included
+
+
+# ---------------------------------------------------------------------------
+# TokenBucket.true_up -- post-call reconciliation against a provider's REAL reported usage.
+# Added after live evidence (a real Selenium end-to-end run against Sarvam+Groq) that a
+# reasoning-capable Groq model spends hidden "reasoning tokens" estimate_tokens() has no way
+# to predict from prompt length alone, which regularly exceeded the pre-call estimate this
+# bucket was paced against and caused real 429s under sustained multi-document load.
+# ---------------------------------------------------------------------------
+
+def test_true_up_deducts_the_shortfall_when_actual_exceeds_estimate():
+    clock = FakeClock()
+    bucket = TokenBucket(rate_per_sec=1.0, capacity=100.0, time_fn=clock.time_fn, sleep_fn=clock.sleep_fn)
+    bucket.consume(20)  # pre-call estimate
+    assert bucket.tokens == 80.0
+    bucket.true_up(actual_amount=50, estimated_amount=20)  # real usage was higher
+    assert bucket.tokens == 50.0  # 80 - (50 - 20) shortfall
+
+
+def test_true_up_does_nothing_when_actual_does_not_exceed_estimate():
+    clock = FakeClock()
+    bucket = TokenBucket(rate_per_sec=1.0, capacity=100.0, time_fn=clock.time_fn, sleep_fn=clock.sleep_fn)
+    bucket.consume(20)
+    bucket.true_up(actual_amount=20, estimated_amount=20)  # exact match
+    assert bucket.tokens == 80.0
+    bucket.true_up(actual_amount=5, estimated_amount=20)  # estimate overshot -- never refunded
+    assert bucket.tokens == 80.0
+
+
+def test_true_up_can_drive_tokens_negative_and_next_consume_waits_it_out():
+    clock = FakeClock()
+    bucket = TokenBucket(rate_per_sec=1.0, capacity=100.0, time_fn=clock.time_fn, sleep_fn=clock.sleep_fn)
+    bucket.consume(10)
+    bucket.true_up(actual_amount=110, estimated_amount=10)  # 100-token real shortfall
+    assert bucket.tokens == pytest.approx(-10.0)
+    bucket.consume(1)  # needs 11 tokens' worth of refill at 1/sec from -10
+    assert sum(clock.sleep_calls) == pytest.approx(11.0)

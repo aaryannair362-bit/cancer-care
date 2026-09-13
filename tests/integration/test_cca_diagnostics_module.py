@@ -34,6 +34,11 @@ def lab_tech(make_user, oncologist):
     return make_user(email="labtech@diaghosp.com", role="CCALabPhlebotomy", organization_id=oncologist.organization_id)
 
 
+@pytest.fixture
+def rad_tech(make_user, oncologist):
+    return make_user(email="radtech@diaghosp.com", role="CCARadiologyTechnician", organization_id=oncologist.organization_id)
+
+
 @pytest.fixture(autouse=True)
 def seed_demo_data(db_session, oncologist):
     seed_cca_database(db_session, force_reset=False, organization_id=oncologist.organization_id)
@@ -192,3 +197,56 @@ def test_diagnostics_worklists_are_org_scoped(client, auth_headers, make_user, d
 
     no_auth = client.get("/api/cca/imaging/worklist")
     assert no_auth.status_code in (401, 403)
+
+
+def test_radiology_technician_acquisition_is_separate_from_radiologist_reporting(client, auth_headers, db_session, oncologist, radiologist, rad_tech):
+    """7 Role/Module Updates developer handoff, checklist item 06: Radiology Technician
+    performs acquisition; Radiologist performs interpretation/reporting -- neither may do the
+    other's action."""
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    order = _make_order(db_session, patient_id, "RADIOLOGY")
+    rad_tech_headers = auth_headers(rad_tech)
+    rad_headers = auth_headers(radiologist)
+
+    radiologist_forbidden = client.patch(f"/api/cca/imaging/orders/{order.id}/acquisition", headers=rad_headers, json={
+        "acquisition_status": "Completed",
+    })
+    assert radiologist_forbidden.status_code == 403, "Radiologist must not be able to record imaging acquisition"
+
+    on_worklist = client.get("/api/cca/imaging/technical-worklist", headers=rad_tech_headers).json()["worklist"]
+    assert any(o["id"] == order.id for o in on_worklist)
+
+    bad_status = client.patch(f"/api/cca/imaging/orders/{order.id}/acquisition", headers=rad_tech_headers, json={
+        "acquisition_status": "NotReal",
+    })
+    assert bad_status.status_code == 422
+
+    completed = client.patch(f"/api/cca/imaging/orders/{order.id}/acquisition", headers=rad_tech_headers, json={
+        "acquisition_status": "Completed", "acquisition_modality": "CT", "acquisition_protocol": "Contrast-enhanced chest",
+        "contrast_used": True, "contrast_notes": "100mL iohexol, no reaction", "technical_notes": "Patient cooperative",
+    })
+    assert completed.status_code == 200, completed.text
+    body = completed.json()["order"]
+    assert body["acquisition_status"] == "Completed"
+    assert body["acquisition_modality"] == "CT"
+    assert body["contrast_used"] is True
+    assert body["acquired_by"] == "radtech@diaghosp.com"
+    assert body["acquired_at"] is not None
+
+    now_off_worklist = client.get("/api/cca/imaging/technical-worklist", headers=rad_tech_headers).json()["worklist"]
+    assert all(o["id"] != order.id for o in now_off_worklist), "a Completed order should drop off the technical worklist"
+
+    rad_tech_forbidden = client.post(f"/api/cca/imaging/orders/{order.id}/report", headers=rad_tech_headers, json={
+        "findings_text": "Should not be allowed", "impression": "N/A",
+    })
+    assert rad_tech_forbidden.status_code == 403, "Radiology Technician must not be able to draft an imaging report"
+
+    report = client.post(f"/api/cca/imaging/orders/{order.id}/report", headers=rad_headers, json={
+        "findings_text": "No acute findings.", "impression": "Normal study.",
+    })
+    assert report.status_code == 200, report.text
+    # The acquisition fields the technician recorded are still visible to the Radiologist via
+    # the same order -- shared record, not duplicated (checklist item 11).
+    assert report.json()["result"]["order_id"] == order.id
+    reloaded = client.get(f"/api/cca/imaging/orders/{order.id}", headers=rad_headers).json()["order"]
+    assert reloaded["acquisition_modality"] == "CT"

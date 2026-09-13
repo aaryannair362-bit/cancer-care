@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from ..auth import (
     get_current_user, is_admin, is_cca_oncologist, is_cca_pathologist,
     is_cca_radiologist, is_cca_radiology_coordinator, is_cca_lab_phlebotomy,
+    is_cca_radiology_technician,
 )
 from ..models_cca import (
     CCAOrder, CCAResult, CCABiomarkerResult, CCAJourneyEvent, CCAPatient, PathologySpecimenAccession,
@@ -62,6 +63,11 @@ def _order_out(o: CCAOrder, patient_name: str = None, patient_mrn: str = None) -
         "preparation_status": o.preparation_status, "preparation_notes": o.preparation_notes,
         "collected_by": o.collected_by, "collected_at": o.collected_at.isoformat() if o.collected_at else None,
         "specimen_container": o.specimen_container, "rejection_reason": o.rejection_reason,
+        "acquisition_status": o.acquisition_status, "acquisition_modality": o.acquisition_modality,
+        "acquisition_protocol": o.acquisition_protocol, "contrast_used": o.contrast_used,
+        "contrast_notes": o.contrast_notes, "technical_notes": o.technical_notes,
+        "technical_issue": o.technical_issue, "acquired_by": o.acquired_by,
+        "acquired_at": o.acquired_at.isoformat() if o.acquired_at else None,
     }
 
 
@@ -177,6 +183,62 @@ async def update_imaging_preparation(order_id: int, request: Request, db: Sessio
             db, "IMAGING_PREPARATION_NEEDS_REVIEW", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
             title=f"Imaging preparation needs review: {order.item_name}", category="INVESTIGATION",
             description=f"{actor} flagged preparation for {order.item_name} as needing clinical review." + (f" {order.preparation_notes}" if order.preparation_notes else ""),
+            order_id=order.id,
+        )
+    db.commit()
+    return {"status": "success", "order": _order_out(order)}
+
+
+_ACQUISITION_STATUSES = ("NotStarted", "InProgress", "Completed", "Aborted")
+
+
+@router.get("/imaging/technical-worklist")
+def imaging_technical_worklist(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Radiology Technician's own worklist (7 Role/Module Updates developer handoff) --
+    imaging orders not yet acquisition-complete, the technical-execution step between
+    Radiology Coordinator's scheduling/preparation and the Radiologist's interpretation."""
+    if not (is_cca_radiology_technician(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Radiology Technician may view the technical worklist")
+    rows = db.query(CCAOrder, CCAPatient).join(
+        CCAPatient, CCAOrder.patient_id == CCAPatient.id
+    ).filter(
+        CCAPatient.organization_id == _org_id(current_user), CCAOrder.order_type == "RADIOLOGY",
+        CCAOrder.acquisition_status != "Completed",
+    ).order_by(CCAOrder.ordered_at.desc()).all()
+    return {"worklist": [_order_out(o, p.name, p.mrn) for o, p in rows]}
+
+
+@router.patch("/imaging/orders/{order_id}/acquisition")
+async def update_imaging_acquisition(order_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Records the technical imaging-acquisition step -- identity/study verification (attested
+    by the technician, never system-checked), modality/protocol/contrast capture, and technical
+    completion/issues. Owned entirely by the Radiology Technician: does NOT touch CCAResult or
+    any interpretation field -- that stays exclusively the Radiologist's (draft/finalize below),
+    matching the separation requirement in the 7 Role/Module Updates developer handoff."""
+    if not (is_cca_radiology_technician(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Radiology Technician may record imaging acquisition")
+    order = _get_org_order(db, order_id, _org_id(current_user))
+    if order.order_type != "RADIOLOGY":
+        raise HTTPException(404, "Not an imaging order")
+    body = await request.json()
+    status_value = body.get("acquisition_status")
+    if status_value not in _ACQUISITION_STATUSES:
+        raise HTTPException(422, f"acquisition_status must be one of {_ACQUISITION_STATUSES}")
+    order.acquisition_status = status_value
+    order.acquisition_modality = body.get("acquisition_modality")
+    order.acquisition_protocol = body.get("acquisition_protocol")
+    order.contrast_used = body.get("contrast_used")
+    order.contrast_notes = body.get("contrast_notes")
+    order.technical_notes = body.get("technical_notes")
+    order.technical_issue = body.get("technical_issue")
+    actor = _actor(current_user)
+    if status_value == "Completed":
+        order.acquired_by = actor
+        order.acquired_at = datetime.utcnow()
+        publish(
+            db, "IMAGING_ACQUISITION_COMPLETED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+            title=f"Imaging acquired: {order.item_name}", category="INVESTIGATION",
+            description=f"{actor} completed technical acquisition for {order.item_name}, ready for radiologist review.",
             order_id=order.id,
         )
     db.commit()

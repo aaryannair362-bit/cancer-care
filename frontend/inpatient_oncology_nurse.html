@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aivana — Inpatient Oncology Nurse</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-page: #F1F5F9; --bg-sidebar: #EEF2F6; --bg-surface: #FFFFFF; --bg-card-subtle: #F8FAFC;
+            --ink-900: #0F172A; --ink-800: #1E293B; --ink-700: #334155; --ink-600: #475569; --ink-500: #64748B; --ink-400: #94A3B8; --ink-300: #CBD5E1;
+            --line: #E2E8F0; --line-subtle: #F1F5F9;
+            --brand-primary: #3B82F6; --brand-dark: #1E3A8A; --navy-action: #2A4365; --navy-action-hover: #1E3A8A;
+            --green-badge-bg: #DCFCE7; --green-badge-text: #166534;
+            --amber-badge-bg: #FEF3C7; --amber-badge-text: #92400E;
+            --rose-badge-bg: #FFE4E6; --rose-badge-text: #9F1239;
+            --blue-badge-bg: #E0E7FF; --blue-badge-text: #3730A3;
+            --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px; --radius-full: 9999px;
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05); --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', -apple-system, sans-serif; background: var(--bg-page); color: var(--ink-800); height: 100vh; display: flex; flex-direction: column; overflow: hidden; -webkit-font-smoothing: antialiased; }
+        .topbar { height: 64px; background: var(--bg-surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; flex-shrink: 0; z-index: 20; }
+        .brand-logo { font-size: 20px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; display: flex; align-items: center; gap: 8px; text-decoration: none; }
+        .header-actions { display: flex; align-items: center; gap: 12px; }
+        .icon-circle-btn { width: 38px; height: 38px; border-radius: var(--radius-full); border: 1px solid var(--line); background: var(--bg-surface); display: flex; align-items: center; justify-content: center; color: var(--ink-600); cursor: pointer; }
+        .role-badge-pill { display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: #F8FAFC; border: 1px solid var(--line); border-radius: var(--radius-full); font-size: 13px; font-weight: 500; color: var(--ink-800); cursor: pointer; }
+        .avatar-pill { width: 38px; height: 38px; border-radius: var(--radius-full); background: #E2E8F0; color: var(--ink-800); display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; border: 1px solid var(--line); cursor: pointer; }
+        .app-body { flex: 1; display: flex; overflow: hidden; }
+        .sidebar { width: 240px; background: var(--bg-sidebar); border-right: 1px solid var(--line); padding: 20px 14px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; overflow-y: auto; }
+        .sidebar-section-title { font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: var(--ink-400); text-transform: uppercase; padding: 10px 12px 6px; }
+        .sidebar-nav-item { display: flex; align-items: center; justify-content: space-between; padding: 11px 14px; border-radius: var(--radius-md); font-size: 13.5px; font-weight: 500; color: var(--ink-700); text-decoration: none; cursor: pointer; }
+        .sidebar-nav-item:hover { background: rgba(255, 255, 255, 0.6); color: var(--ink-900); }
+        .sidebar-nav-item.active { background: #FFFFFF; color: var(--ink-900); font-weight: 600; box-shadow: var(--shadow-sm); border: 1px solid rgba(226, 232, 240, 0.8); }
+        .nav-item-left { display: flex; align-items: center; gap: 10px; }
+        .nav-chevron { color: var(--ink-400); font-size: 12px; }
+        .canvas { flex: 1; overflow-y: auto; padding: 28px 36px; }
+        .view-panel { display: none; }
+        .view-panel.active { display: block; }
+        .page-title { font-size: 26px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; margin-bottom: 4px; }
+        .page-subtitle { font-size: 13.5px; color: var(--ink-500); margin-bottom: 20px; }
+        .section-card { background: var(--bg-surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 20px; box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+        .section-title { font-size: 16px; font-weight: 700; color: var(--ink-900); }
+        .section-sub { font-size: 12px; color: var(--ink-500); margin-top: 2px; }
+        .badge { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: var(--radius-sm); display: inline-flex; align-items: center; }
+        .badge-green { background: var(--green-badge-bg); color: var(--green-badge-text); }
+        .badge-amber { background: var(--amber-badge-bg); color: var(--amber-badge-text); }
+        .badge-rose { background: var(--rose-badge-bg); color: var(--rose-badge-text); }
+        .badge-blue { background: var(--blue-badge-bg); color: var(--blue-badge-text); }
+        .btn-navy { background: var(--navy-action); color: #FFFFFF; font-size: 12.5px; font-weight: 600; padding: 9px 16px; border-radius: var(--radius-sm); border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-navy:hover { background: var(--navy-action-hover); }
+        .btn-outline { background: #FFFFFF; border: 1px solid var(--line); color: var(--ink-700); font-size: 12.5px; font-weight: 600; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-outline:hover { border-color: var(--ink-400); background: #F8FAFC; }
+        .btn-danger { background: #FFFFFF; border: 1px solid var(--rose-badge-text); color: var(--rose-badge-text); font-size: 12.5px; font-weight: 700; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-danger:hover { background: var(--rose-badge-bg); }
+        .onc-patient-card { background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 18px; margin-bottom: 12px; }
+        .onc-card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+        .onc-patient-name { font-size: 15.5px; font-weight: 700; color: var(--ink-900); }
+        .onc-patient-meta { font-size: 12px; color: var(--ink-500); margin-top: 2px; }
+        .onc-card-mid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; margin-bottom: 12px; }
+        .onc-col-label { font-size: 11px; color: var(--ink-500); text-transform: uppercase; margin-bottom: 3px; }
+        .onc-col-value { font-size: 13.5px; font-weight: 700; color: var(--ink-900); }
+        .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+        .form-group { display: flex; flex-direction: column; gap: 6px; }
+        .form-label { font-size: 12px; font-weight: 600; color: var(--ink-700); }
+        .form-input, .form-select, .form-textarea { width: 100%; height: 38px; padding: 0 12px; background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; color: var(--ink-900); outline: none; }
+        .form-textarea { height: auto; padding: 10px 12px; }
+        .checklist-row { display: flex; align-items: center; gap: 10px; padding: 11px 14px; background: var(--bg-card-subtle); border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; margin-bottom: 8px; }
+        .mdt-case-row { padding: 12px 0; border-bottom: 1px solid var(--line-subtle); display: flex; justify-content: space-between; align-items: center; }
+        .hms-toast { position: fixed; bottom: 24px; right: 24px; background: var(--ink-900); color: #fff; padding: 12px 18px; border-radius: var(--radius-md); font-size: 13px; box-shadow: var(--shadow-md); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 999; max-width: 360px; }
+        .hms-toast--visible { opacity: 1; transform: translateY(0); }
+        .hms-toast--success { background: var(--green-badge-text); }
+        .hms-toast--error { background: var(--rose-badge-text); }
+        .hms-toast--info { background: var(--blue-badge-text); }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <a href="/inpatient_oncology_nurse.html" class="brand-logo">Aivana</a>
+        <div style="flex:1;"></div>
+        <div class="header-actions">
+            <button class="icon-circle-btn" title="Notifications">🔔</button>
+            <div class="role-badge-pill" onclick="location.href='/index.html'"><span>Inpatient Oncology Nurse</span><span>▾</span></div>
+            <div class="avatar-pill" title="Logged in">IN ▾</div>
+        </div>
+    </header>
+    <div class="app-body">
+        <aside class="sidebar">
+            <div class="sidebar-section-title">WARD</div>
+            <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Patients</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-inpatient" onclick="showTab('inpatient')"><div class="nav-item-left"><span>🛏️</span><span>Inpatient Record</span></div><span class="nav-chevron">›</span></a>
+        </aside>
+        <main class="canvas">
+
+            <div id="view-patients" class="view-panel active">
+                <h1 class="page-title">Patients</h1>
+                <p class="page-subtitle">Open a patient to view/manage their inpatient admission record.</p>
+                <div class="section-card">
+                    <div class="section-head"><div class="section-title">Patient Census</div><span class="badge badge-blue" id="onc-patient-count">0 patients</span></div>
+                    <div id="onc-patient-list"><!-- Populated via JS: loadPatientQueue() --></div>
+                </div>
+            </div>
+
+            <div id="view-inpatient" class="view-panel">
+                <h1 class="page-title">Inpatient Record</h1>
+                <p class="page-subtitle">Admission, nursing flowsheet, MAR, transfer/handover, and deterioration/escalation. Oncology H&amp;P and discharge-summary authorship/sign-off stay with the treating clinician.</p>
+                <div id="inpatient-content"><!-- Populated via JS: loadInpatientView() --></div>
+            </div>
+
+        </main>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script>
+        const ccaUser = Auth.requirePage(['CCAInpatientOncologyNurse', 'Nurse', 'HeadNurse', 'CCAInfusionNurse', 'Admin']);
+        const CCA_API = '/cca';
+        let currentPatientId = null;
+
+        function showTab(tab) {
+            document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.sidebar-nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(`view-${tab}`).classList.add('active');
+            document.getElementById(`nav-${tab}`).classList.add('active');
+            if (tab === 'patients') loadPatientQueue();
+            if (tab === 'inpatient') loadInpatientView();
+        }
+
+        async function loadPatientQueue() {
+            const listEl = document.getElementById('onc-patient-list');
+            try {
+                const data = await Api.get(`${CCA_API}/patients`);
+                document.getElementById('onc-patient-count').textContent = `${data.results.length} patients`;
+                listEl.innerHTML = data.results.map(p => `
+                    <div class="onc-patient-card">
+                        <div class="onc-card-top">
+                            <div>
+                                <div class="onc-patient-name">${escapeHtml(p.name)}</div>
+                                <div class="onc-patient-meta">${escapeHtml(p.mrn)} · ${p.age != null ? escapeHtml(String(p.age)) + 'y' : '—'} / ${escapeHtml(p.sex)}</div>
+                            </div>
+                            <span class="badge badge-blue">${escapeHtml(p.journey_state)}</span>
+                        </div>
+                        <div style="display:flex; justify-content:flex-end;">
+                            <button class="btn-navy" onclick="openPatientFromQueue(${Number(p.id)})">Open Inpatient Record →</button>
+                        </div>
+                    </div>
+                `).join('') || '<p style="color:var(--ink-500); font-size:13px;">No patients in this queue.</p>';
+            } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        function openPatientFromQueue(patientId) {
+            currentPatientId = patientId;
+            currentAdmissionId = null;
+            showTab('inpatient');
+        }
+
+        // ---------------------------------------------------------------
+        // Inpatient Oncology -- extracted from medical_oncologist.html's own Inpatient tab
+        // (7 Role/Module Updates developer handoff: this is now also its own dedicated,
+        // nurse-facing page rather than living only inside the oncologist's page).
+        // ---------------------------------------------------------------
+        let currentAdmissionId = null;
+        const INPATIENT_STATUS_BADGE = {
+            BED_REQUESTED: 'badge-amber', ADMITTED: 'badge-green', TRANSFERRED: 'badge-blue',
+            DISCHARGED: 'badge-blue', DECEASED: 'badge-rose',
+        };
+
+        async function loadInpatientView() {
+            const container = document.getElementById('inpatient-content');
+            if (!currentPatientId) { container.innerHTML = '<div class="section-card"><p style="color:var(--ink-500); font-size:13px;">Select a patient above, or from Patients, to open their inpatient record.</p></div>'; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/inpatient/admissions`);
+                const admissions = data.admissions || [];
+                const active = admissions.find(a => a.id === currentAdmissionId) || admissions.find(a => a.status !== 'DISCHARGED' && a.status !== 'DECEASED') || admissions[0];
+                currentAdmissionId = active ? active.id : null;
+
+                const listSection = `
+                    <div class="section-card">
+                        <div class="section-title">Admissions</div>
+                        ${admissions.length ? admissions.map(a => `
+                            <div class="mdt-case-row" style="cursor:pointer;" onclick="currentAdmissionId=${a.id}; loadInpatientView();">
+                                <div><div style="font-size:13.5px; font-weight:600;">${escapeHtml(a.admission_reason)}</div><div style="font-size:12px; color:var(--ink-500);">${escapeHtml(a.ward || 'No ward yet')}${a.bed ? ' / ' + escapeHtml(a.bed) : ''}</div></div>
+                                <span class="badge ${INPATIENT_STATUS_BADGE[a.status] || 'badge-blue'}">${escapeHtml(a.status.replace(/_/g, ' '))}</span>
+                            </div>
+                        `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No inpatient admissions on record.</p>'}
+                        <button class="btn-outline" style="margin-top:10px;" onclick="toggleAdmissionForm()">+ Request Admission</button>
+                        <div id="admission-create-form"></div>
+                    </div>
+                `;
+                if (!active) { container.innerHTML = listSection; return; }
+                container.innerHTML = listSection + await renderAdmissionDetail(active);
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        function toggleAdmissionForm() {
+            const host = document.getElementById('admission-create-form');
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div class="form-group" style="margin:10px 0;"><label class="form-label">Admission reason *</label><input type="text" id="adm-reason" class="form-input" /></div>
+                <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Admitting diagnosis</label><input type="text" id="adm-diagnosis" class="form-input" /></div>
+                <button class="btn-navy" onclick="submitAdmissionRequest()">Request Admission</button>
+            `;
+        }
+
+        async function submitAdmissionRequest() {
+            try {
+                const res = await Api.post(`${CCA_API}/inpatient/admissions`, {
+                    patient_id: currentPatientId, admission_reason: document.getElementById('adm-reason').value,
+                    admitting_diagnosis: document.getElementById('adm-diagnosis').value || undefined,
+                });
+                currentAdmissionId = res.admission.id;
+                toast('Admission requested', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function renderAdmissionDetail(a) {
+            const [hpData, problemsData, medsData, roundsData, flowData, deteriorationData, goalsData, transfersData, dischargeData] = await Promise.all([
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/history-physical`).catch(() => ({history_physical: null})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/problems`).catch(() => ({problems: []})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/medications`).catch(() => ({medications: []})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/ward-rounds`).catch(() => ({ward_round_notes: []})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/flowsheet`).catch(() => ({flowsheet_entries: []})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/deterioration-events`).catch(() => ({deterioration_events: []})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/goals-of-care`).catch(() => ({goals_of_care: []})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/transfers`).catch(() => ({transfers: []})),
+                Api.get(`${CCA_API}/inpatient/admissions/${a.id}/discharge-summary`).catch(() => ({discharge_summary: null})),
+            ]);
+            const hp = hpData.history_physical;
+            const discharge = dischargeData.discharge_summary;
+
+            return `
+                <div class="section-card">
+                    <div class="section-head">
+                        <div><div class="section-title">${escapeHtml(a.admission_reason)}</div><div class="section-sub">${escapeHtml(a.admitting_diagnosis || '')}</div></div>
+                        <span class="badge ${INPATIENT_STATUS_BADGE[a.status] || 'badge-blue'}">${escapeHtml(a.status.replace(/_/g, ' '))}</span>
+                    </div>
+                    ${a.status === 'BED_REQUESTED' ? `
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Ward *</label><input type="text" id="adm-ward" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Bed</label><input type="text" id="adm-bed" class="form-input" /></div>
+                        </div>
+                        <button class="btn-navy" onclick="submitAdmit(${a.id})">Admit</button>
+                    ` : ''}
+                    ${['ADMITTED', 'TRANSFERRED'].includes(a.status) ? `<button class="btn-outline" onclick="submitDischarge(${a.id})">Discharge</button> <button class="btn-outline" style="margin-left:8px;" onclick="toggleDeathForm(${a.id})">Document Death</button><div id="death-form-${a.id}"></div>` : ''}
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Oncology History &amp; Physical ${hp ? `<span class="badge ${hp.status === 'SIGNED' ? 'badge-green' : 'badge-amber'}" style="margin-left:6px;">${hp.status}</span>` : ''}</div>
+                    <p class="section-sub" style="margin-bottom:10px;">Read-only here — authored and signed by the treating clinician.</p>
+                    ${hp ? `
+                        <div class="checklist-row" style="display:block;"><strong>Chief complaint:</strong> ${escapeHtml(hp.chief_complaint || '—')}</div>
+                        <div class="checklist-row" style="display:block;"><strong>Current treatment:</strong> ${escapeHtml(hp.current_treatment_summary || '—')}</div>
+                        <div class="checklist-row" style="display:block;"><strong>Performance status:</strong> ${escapeHtml(hp.performance_status || '—')}</div>
+                        <div class="checklist-row" style="display:block;"><strong>Assessment &amp; plan:</strong> ${escapeHtml(hp.assessment_and_plan || '—')}</div>
+                    ` : '<p style="font-size:12.5px; color:var(--ink-500);">No H&amp;P recorded yet.</p>'}
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Problem List</div>
+                    ${problemsData.problems.map(p => `<div class="checklist-row" style="display:flex; justify-content:space-between;"><span>${escapeHtml(p.problem)} <span class="badge ${p.status === 'Resolved' ? 'badge-green' : 'badge-amber'}">${escapeHtml(p.status)}</span></span></div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No problems recorded.</p>'}
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Medication Administration (systemic-therapy-linked MAR)</div>
+                    ${medsData.medications.map(m => `<div class="checklist-row" style="display:block;"><strong>${escapeHtml(m.drug_name)}</strong> ${escapeHtml(m.route || '')} — <span class="badge ${m.status === 'Given' ? 'badge-green' : (m.status === 'Scheduled' ? 'badge-amber' : 'badge-rose')}">${escapeHtml(m.status)}</span>${m.dose_administered ? ' — ' + escapeHtml(m.dose_administered) : ''}${m.status === 'Scheduled' ? ` <button class="btn-outline" style="font-size:11px; padding:4px 8px;" onclick="promptAdministerMedication(${m.id})">Administer</button>` : ''}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No medications scheduled.</p>'}
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Ward Round Notes</div>
+                    <p class="section-sub" style="margin-bottom:10px;">Read-only here — clinician daily notes stay distinct from nursing notes.</p>
+                    ${roundsData.ward_round_notes.map(w => `<div class="checklist-row" style="display:block;"><strong>${escapeHtml(w.department || '')}</strong> — ${escapeHtml(w.assessment || '')} <em>${escapeHtml(w.plan || '')}</em></div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No ward round notes yet.</p>'}
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Nursing Flowsheet</div>
+                    ${flowData.flowsheet_entries.map(f => `<div class="checklist-row">Pain ${f.pain_score ?? '—'}/10, ${escapeHtml(f.mobility_status || '')}${f.notes ? ' — ' + escapeHtml(f.notes) : ''} — ${f.recorded_at ? new Date(f.recorded_at).toLocaleString() : ''}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No flowsheet entries yet.</p>'}
+                    <div class="form-grid-2" style="margin-top:10px;">
+                        <div class="form-group"><label class="form-label">Pain score (0-10)</label><input type="number" id="flow-pain-${a.id}" class="form-input" min="0" max="10" /></div>
+                        <div class="form-group"><label class="form-label">Mobility status</label><input type="text" id="flow-mobility-${a.id}" class="form-input" placeholder="e.g. Ambulatory, Bed rest" /></div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Notes (vitals, intake/output, general observations)</label><textarea id="flow-notes-${a.id}" class="form-textarea" rows="2"></textarea></div>
+                    <button class="btn-navy" onclick="submitFlowsheetEntry(${a.id})">Add Flowsheet Entry</button>
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Deterioration / Escalation</div>
+                    ${deteriorationData.deterioration_events.map(d => `<div class="checklist-row" style="display:block; color:var(--rose-badge-text);"><strong>${escapeHtml(d.trigger)}</strong>${d.escalated_to ? ' — escalated to ' + escapeHtml(d.escalated_to) : ''}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No deterioration events recorded.</p>'}
+                    <div class="form-group" style="margin-top:10px;"><label class="form-label">Trigger *</label><input type="text" id="det-trigger" class="form-input" /></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Escalated to</label><input type="text" id="det-escalated" class="form-input" /></div>
+                    <button class="btn-outline" onclick="submitDeteriorationEvent(${a.id})">Record Deterioration Event</button>
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Goals of Care</div>
+                    ${goalsData.goals_of_care.map(g => `<div class="checklist-row" style="display:block;"><strong>${escapeHtml(g.code_status)}</strong> — ${escapeHtml(g.summary || '')}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No goals-of-care discussion documented.</p>'}
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Transfer / Handover</div>
+                    ${transfersData.transfers.map(t => `<div class="checklist-row" style="display:block;">${escapeHtml(t.from_location || '')} → ${escapeHtml(t.to_location || '')}: ${escapeHtml(t.handover_summary)}</div>`).join('') || '<p style="font-size:12.5px; color:var(--ink-500);">No transfers recorded.</p>'}
+                    <div class="form-grid-2" style="margin-top:10px;">
+                        <div class="form-group"><label class="form-label">To location</label><input type="text" id="tr-to" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Handover summary *</label><input type="text" id="tr-summary" class="form-input" /></div>
+                    </div>
+                    <button class="btn-outline" onclick="submitTransfer(${a.id})">Record Transfer</button>
+                </div>
+
+                <div class="section-card">
+                    <div class="section-title">Oncology Discharge Summary ${discharge ? `<span class="badge ${discharge.status === 'SIGNED' ? 'badge-green' : 'badge-amber'}" style="margin-left:6px;">${discharge.status}</span>` : ''}</div>
+                    <p class="section-sub">Read-only here — authored and signed by the treating clinician.</p>
+                </div>
+            `;
+        }
+
+        async function submitAdmit(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/admit`, {
+                    ward: document.getElementById('adm-ward').value, bed: document.getElementById('adm-bed').value || undefined,
+                });
+                toast('Patient admitted', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitDischarge(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/discharge`, {});
+                toast('Patient discharged', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function toggleDeathForm(admissionId) {
+            const host = document.getElementById(`death-form-${admissionId}`);
+            if (!host) return;
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div class="section-card" style="background:var(--rose-badge-bg); margin-top:10px;">
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Immediate cause *</label><input type="text" id="dd-cause" class="form-input" /></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Certifying clinician *</label><input type="text" id="dd-clinician" class="form-input" /></div>
+                    <button class="btn-danger" onclick="submitDeathDocumentation(${admissionId})">Confirm Death Documentation</button>
+                </div>
+            `;
+        }
+
+        async function submitDeathDocumentation(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/death-documentation`, {
+                    immediate_cause: document.getElementById('dd-cause').value, certifying_clinician: document.getElementById('dd-clinician').value,
+                });
+                toast('Death documented', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function promptAdministerMedication(medId) {
+            const given = confirm('OK = mark Given. Cancel = record a Hold/Refusal/Omission instead.');
+            if (given) { submitAdministerMedication(medId, 'Given', prompt('Dose administered (optional):') || undefined); return; }
+            const reason = prompt('Reason (required for Held/Refused/Omitted):');
+            if (!reason) { toast('A reason is required', 'error'); return; }
+            const status = prompt('Status: Held, Refused, or Omitted?', 'Held') || 'Held';
+            submitAdministerMedication(medId, status, undefined, reason);
+        }
+
+        async function submitAdministerMedication(medId, status, doseAdministered, holdReason) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/medications/${medId}/administer`, {
+                    status, dose_administered: doseAdministered, hold_reason: holdReason,
+                });
+                toast(`Medication recorded as ${status}`, 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitFlowsheetEntry(admissionId) {
+            try {
+                const painValue = document.getElementById(`flow-pain-${admissionId}`).value;
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/flowsheet`, {
+                    pain_score: painValue !== '' ? Number(painValue) : undefined,
+                    mobility_status: document.getElementById(`flow-mobility-${admissionId}`).value || undefined,
+                    notes: document.getElementById(`flow-notes-${admissionId}`).value || undefined,
+                });
+                toast('Flowsheet entry added', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitDeteriorationEvent(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/deterioration-events`, {
+                    trigger: document.getElementById('det-trigger').value, escalated_to: document.getElementById('det-escalated').value || undefined,
+                });
+                toast('Deterioration event recorded', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitTransfer(admissionId) {
+            try {
+                await Api.post(`${CCA_API}/inpatient/admissions/${admissionId}/transfers`, {
+                    to_location: document.getElementById('tr-to').value, handover_summary: document.getElementById('tr-summary').value,
+                });
+                toast('Transfer recorded', 'success');
+                loadInpatientView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => { loadPatientQueue(); });
+    </script>
+</body>
+</html>

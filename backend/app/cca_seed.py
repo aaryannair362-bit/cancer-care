@@ -36,7 +36,7 @@ from .models_cca import (
     MDTActionItem, MDTMeetingMinutes,
     CCACoordinationCase, CoordinationContactLogEntry, TreatmentEducationDeliveryRecord,
     FinancialPreauthorization, BillableEventRecord, HighCostDrugApproval,
-    ClaimRecord, RefundCreditNote,
+    ClaimRecord, RefundCreditNote, CCAFinancialCase,
 )
 from .models_cca_oncology_ext import (
     TreatmentOrderDrugLine, RadiationPrescription, CCARadiationPhase, RadiationFraction,
@@ -135,10 +135,11 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # itself is a pre-existing omission from this reset (not introduced here).
             SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
             SurgicalStomaRecord, SurgicalComplicationRecord,
-            # All have their own patient_id, even though CCAFinancialCase itself is a
-            # pre-existing omission from this reset (not introduced here).
+            # All have their own patient_id (matching CCAFinancialCase, its parent, just below
+            # -- previously CCAFinancialCase itself was a pre-existing omission from this
+            # reset, leaving stale cases to re-attach to freshly recreated patients).
             FinancialPreauthorization, BillableEventRecord, HighCostDrugApproval,
-            ClaimRecord, RefundCreditNote,
+            ClaimRecord, RefundCreditNote, CCAFinancialCase,
             CCAJourneyEvent, ResponseAssessment, TreatmentClearance,
             # Has its own patient_id -- optionally references a ToxicityEvent, deleted
             # before ToxicityEvent itself just below.
@@ -191,10 +192,10 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
                         child_model.admission_id.in_(inpatient_admission_ids)
                     ).delete(synchronize_session=False)
             # CoordinationContactLogEntry/TreatmentEducationDeliveryRecord have no patient_id
-            # of their own -- delete them via their parent CCACoordinationCase ids. Note:
-            # CCACoordinationCase itself is a pre-existing omission from this reset (not
-            # introduced here) and is left as-is; this only prevents these two new child
-            # tables from accumulating orphans of their own.
+            # of their own -- delete them via their parent CCACoordinationCase ids, then
+            # CCACoordinationCase itself by its own patient_id (previously a pre-existing
+            # omission from this reset, leaving stale cases to re-attach to freshly recreated
+            # patients -- same class of bug as CCAFinancialCase above, now fixed the same way).
             coordination_case_ids = [
                 row.id for row in db.query(CCACoordinationCase.id).filter(
                     CCACoordinationCase.patient_id.in_(org_patient_ids)
@@ -207,6 +208,9 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
                 db.query(TreatmentEducationDeliveryRecord).filter(
                     TreatmentEducationDeliveryRecord.coordination_case_id.in_(coordination_case_ids)
                 ).delete(synchronize_session=False)
+            db.query(CCACoordinationCase).filter(
+                CCACoordinationCase.patient_id.in_(org_patient_ids)
+            ).delete(synchronize_session=False)
             # LesionMeasurement has no patient_id of its own -- delete it via its parent
             # TargetLesion ids before TargetLesion itself is deleted below.
             target_lesion_ids = [

@@ -103,6 +103,35 @@ class TokenBucket:
                 shortfall = amount - self.tokens
                 self._sleep_fn(min(shortfall / self.rate, max_wait_sec))
 
+    def true_up(self, actual_amount: float, estimated_amount: float) -> None:
+        """
+        Corrects bucket state AFTER a call completes, using real usage a provider reports back
+        (e.g. Groq's response `usage.total_tokens`) instead of the pre-call estimate that was
+        actually consume()'d before dispatch. Found necessary live: a reasoning-capable Groq
+        model (openai/gpt-oss-120b) spends hidden "reasoning tokens" that never appear in the
+        visible completion text (they're moved out via `reasoning_format: "hidden"`, see
+        scribe.py's _call_groq_api) but still count fully toward the account's real
+        tokens-per-minute limit -- confirmed live via the API's own `usage.completion_tokens_
+        details.reasoning_tokens`. No amount of tuning estimate_tokens()'s char-count-based
+        completion guess can predict that (it depends on how much the model "thinks", not on
+        prompt length), so real per-call usage regularly exceeded the estimate this bucket was
+        paced against, letting calls through faster than the account's actual budget allowed
+        and causing real 429s under sustained load -- exactly what this method fixes.
+
+        Only ever deducts the shortfall (actual - estimated) when actual > estimated -- if the
+        estimate overshot, the bucket is NOT refunded the difference. Erring toward "the bucket
+        believes less capacity is available than it really has" is the safe direction; erring
+        the other way is what caused the problem this method exists to correct. May drive
+        `tokens` negative, which is fine: the next consume() naturally waits out the deficit via
+        its existing refill math, same as if a large amount had been requested outright.
+        """
+        shortfall = actual_amount - estimated_amount
+        if shortfall <= 0:
+            return
+        with self._lock:
+            self._refill()
+            self.tokens -= shortfall
+
 
 # Calibrated against live Groq headers:
 # x-ratelimit-limit-requests: 1000, x-ratelimit-limit-tokens: 8000 (tokens refill continuously in ~60s = ~133 TPM)

@@ -419,6 +419,20 @@ class CCAOrder(Base):
     # against this at read time, never a hardcoded day-count threshold.
     expected_result_by = Column(Date, nullable=True)
     order_set_master_id = Column(Integer, ForeignKey("cca_clinical_masters.id"), nullable=True)
+    # Radiology Technician acquisition step (7 Role/Module Updates developer handoff) -- the
+    # technical imaging-execution workflow that sits between CCARadiologyCoordinator's
+    # scheduling/preparation fields above and CCAResult's interpretation/reporting. RADIOLOGY
+    # orders only in practice; nullable/unused for LAB/PATHOLOGY, same pattern as the
+    # imaging-only fields above.
+    acquisition_status = Column(String(30), default="NotStarted")  # NotStarted|InProgress|Completed|Aborted
+    acquisition_modality = Column(String(50), nullable=True)
+    acquisition_protocol = Column(String(200), nullable=True)
+    contrast_used = Column(Boolean, nullable=True)
+    contrast_notes = Column(Text, nullable=True)
+    technical_notes = Column(Text, nullable=True)
+    technical_issue = Column(Text, nullable=True)
+    acquired_by = Column(String(200), nullable=True)
+    acquired_at = Column(DateTime, nullable=True)
 
 class CCAResult(Base):
     __tablename__ = "cca_results"

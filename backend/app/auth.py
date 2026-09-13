@@ -137,6 +137,12 @@ CCA_ROLES = (
     "CCAPatientLiaison", "CCAFinancialCounsellor", "CCAPharmacist",
     "CCARadiationPhysicist", "CCASurgicalNurse",
     "CCAPalliativeCareSpecialist",
+    # 7 Role/Module Updates (developer handoff PDF): split "Radiologist / Radiation
+    # Technologist" and "Financial Counsellor / Patient Financial Services" into their own
+    # roles, plus two genuinely new modules -- see is_cca_radiation_technologist etc. below
+    # for what each one actually gates.
+    "CCARadiationTechnologist", "CCARadiologyTechnician", "CCABiller",
+    "CCAPatientRelationsExecutive", "CCAInpatientOncologyNurse",
 )
 
 
@@ -197,6 +203,22 @@ def is_cca_radiology_coordinator(user: dict) -> bool:
     return user.get("role") == "CCARadiologyCoordinator"
 
 
+def is_cca_radiation_technologist(user: dict) -> bool:
+    """Executes radiation treatment fractions under the released plan -- pre-treatment
+    verification, fraction delivery, interruption/resume, and equipment-issue reporting
+    (cca_oncology_ext.py). Previously stood in for by CCARadiologist (see that module's git
+    history); now its own role per the 7 Role/Module Updates developer handoff."""
+    return user.get("role") == "CCARadiationTechnologist"
+
+
+def is_cca_radiology_technician(user: dict) -> bool:
+    """Performs the technical imaging acquisition step (identity/study verification, modality/
+    protocol/contrast capture, technical completion) between CCARadiologyCoordinator's
+    scheduling and CCARadiologist's interpretation/reporting -- a workflow step that had no
+    role of its own before the 7 Role/Module Updates developer handoff."""
+    return user.get("role") == "CCARadiologyTechnician"
+
+
 def is_cca_pathologist(user: dict) -> bool:
     return user.get("role") == "CCAPathologist"
 
@@ -232,7 +254,38 @@ def is_cca_patient_liaison(user: dict) -> bool:
 
 
 def is_cca_financial_counsellor(user: dict) -> bool:
+    """Broader financial-coordination role (displayed as "Finance / Billing" per the 7
+    Role/Module Updates developer handoff -- the role identifier itself is unchanged to avoid
+    migrating existing seeded users). Owns financial-case counselling/estimate/insurance/
+    clearance and preauthorization/high-cost-drug-approval decisions; transaction-level billing
+    (claims/refunds/billable-events) is CCABiller's, a separate role, below."""
     return user.get("role") == "CCAFinancialCounsellor"
+
+
+def is_cca_biller(user: dict) -> bool:
+    """Transaction/operations-facing billing role (7 Role/Module Updates developer handoff) --
+    billable-event capture, claim tracking, and refunds/credit notes (cca_coordination.py).
+    Deliberately excludes the broader financial-counselling/preauthorization scope that stays
+    with CCAFinancialCounsellor ("Finance / Billing") -- see that predicate's docstring."""
+    return user.get("role") == "CCABiller"
+
+
+def is_cca_patient_relations_executive(user: dict) -> bool:
+    """PRE: a strictly non-clinical, operational role -- appointment coordination, patient-
+    facing tasks/alerts, and activity/location visibility (7 Role/Module Updates developer
+    handoff). Distinct from CCAPatientLiaison, which has broader clinical Patient History
+    visibility; PRE must never see clinical case-summary detail (see cca.py's get_case_summary,
+    which 403s PRE the same way it already does CCAFrontDesk)."""
+    return user.get("role") == "CCAPatientRelationsExecutive"
+
+
+def is_cca_inpatient_oncology_nurse(user: dict) -> bool:
+    """Dedicated inpatient-ward nursing role for admitted oncology patients (7 Role/Module
+    Updates developer handoff) -- MAR/medication administration, nursing flowsheet, transfer/
+    handover, and deterioration/escalation (cca_inpatient.py). Added alongside (not instead of)
+    the general Nurse/HeadNurse/CCAInfusionNurse roles that stood in for this before, so
+    existing access keeps working."""
+    return user.get("role") == "CCAInpatientOncologyNurse"
 
 
 def can_sign_treatment_plan(user: dict) -> bool:

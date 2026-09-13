@@ -724,6 +724,30 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
     return cleaned
 
 
+def extract_deterministic_lab_facts(signals: Optional[Dict]) -> List[Dict]:
+    """Turns ocr_service._clinical_signals()'s "lab_values" scan (a regex "<test name>: <value>
+    <unit>" line matcher run over the document's FULL raw text, no truncation, no LLM call -- see
+    that function's docstring) into the same {"fact_type", "value", "verbatim", "confidence"}
+    shape extract_clinical_facts/classify_and_extract_page produce, so routers/cca.py's
+    upload_document can merge it with the AI-drafted facts through the same dedup/persistence
+    path instead of a second bespoke one.
+
+    A supplement, not a replacement: it never misses a recognisable lab line purely because a
+    document is long (extract_clinical_facts truncates at 8000 characters; classify_and_extract_
+    page now slices a large page/chunk into multiple bounded LLM calls instead of truncating),
+    but it also can't read messy/unstructured phrasing the way the LLM passes can -- both keep
+    running independently.
+
+    signals may be None/missing "lab_values" entirely (older callers, or a signals dict built
+    before this key existed) -- returns [] in that case, same as extract_clinical_facts's "never
+    raises" contract elsewhere in this module.
+    """
+    return [
+        {"fact_type": "LAB_RESULT", "value": entry, "verbatim": entry, "confidence": 0.95}
+        for entry in (signals or {}).get("lab_values", [])
+    ]
+
+
 # Maps a drafted fact's fact_type onto the CCAResult.result_type it should contribute to --
 # only fact types that ARE a lab/imaging finding, never every fact type (e.g. MEDICATION,
 # ALLERGY have no business becoming a "result").
@@ -788,25 +812,58 @@ _DOC_CLASS_TO_PAGE_TYPE = {
     "UNCLASSIFIED": "UNCLASSIFIED",
 }
 
+# See classify_and_extract_page point 4: a page/chunk's text is walked in slices this size
+# rather than truncated, so a Sarvam chunk (up to 10 bundled pages of markdown) gets full
+# coverage instead of only its first ~6000 characters.
+_PAGE_EXTRACTION_SLICE_CHARS = 6000
+# Resource guard, not a real-document limit: 30 slices * 6000 chars = 180,000 characters, well
+# past any real single page/chunk's dense report content (Sarvam already caps a chunk at 10
+# pages; local OCR's "chunk" is a single physical page). Only binds on pathologically large/
+# garbled OCR text, and degrades to "later slices dropped" rather than raising.
+_MAX_PAGE_EXTRACTION_SLICES = 30
+
 
 def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
     """
-    Hybrid per-page classifier: free heuristic first, LLM only when it's actually needed.
+    Per-page classifier: the LLM is authoritative for page type, with a free deterministic
+    heuristic kept only as a fallback for when the LLM is unavailable.
 
     1. A page ocr_service.extract_document_pages() already flagged image-heavy (an X-ray/MRI/CT
        scan photograph with little or no extractable text) is SCAN_IMAGING by construction --
-       nothing to classify, no LLM call.
-    2. Otherwise, run the existing deterministic keyword classifier (classify_document(),
-       extended above with PRESCRIPTION/INSURANCE buckets) -- free, instant. A confident,
-       non-UNCLASSIFIED match is used directly.
-    3. Only when that's inconclusive: one Groq call combining page-type classification with
-       fact extraction (same FACT_TYPES/PROPOSED-only contract as extract_clinical_facts) into
-       a single JSON response -- one LLM round trip per ambiguous page instead of two.
+       nothing to classify, no LLM call, no facts possible.
+    2. Fact extraction (and, now, classification) runs via at least one real Groq call per
+       page/chunk. Previously the deterministic keyword classifier (classify_document(),
+       extended above with PRESCRIPTION/INSURANCE buckets) took priority whenever it confidently
+       named a page's type, and even skipped fact extraction entirely for that page -- a long
+       multi-chunk document's facts then depended entirely on upload-time
+       extract_clinical_facts()'s single pass over its first ~8000 characters. Fact extraction
+       now always runs regardless (removing that length ceiling -- a 50-page document gets on
+       the order of 5 real extraction passes instead of one truncated one), and the LLM's own
+       page_type/confidence from that same call is now what's actually used: it sees the real
+       page text, not a fixed keyword list, so it wins whenever it produced a usable answer.
+    3. classify_document() still runs and is kept as `fallback_page_type`/`fallback_confidence`
+       -- used ONLY when every slice's LLM call failed outright (network error, malformed
+       response, Groq unavailable), so a page still gets a best-effort page_type instead of
+       always collapsing to UNCLASSIFIED purely because AI enrichment was down. It is never
+       preferred over a real LLM answer.
+    4. Within a single page/chunk, the text itself is walked in bounded
+       _PAGE_EXTRACTION_SLICE_CHARS-sized slices, one extraction call per slice, rather than
+       truncating to whatever the first call's prompt can hold. A local-OCR page is already
+       single-page text and almost always fits in one slice (no behavior change there); a
+       Sarvam chunk bundles up to 10 pages of markdown into one blob, which can easily run past
+       one slice -- previously only the first slice's worth of a dense multi-page chunk ever
+       reached the LLM and every page after it in that chunk silently contributed zero AI-drafted
+       facts (the deterministic lab-value scanner still caught lab lines there, but nothing else
+       fact-type-wise). Facts from every slice are merged and deduped by (fact_type, value); the
+       page_type/confidence used is from the first slice that returned a usable one.
 
-    Returns {"page_type": <one of PAGE_TYPES>, "confidence": float, "facts": List[Dict]} (facts
-    is empty unless step 3 ran). Never raises -- degrades to UNCLASSIFIED/0.0/[] on any failure,
-    matching extract_clinical_facts's "AI enrichment failing must never fail the document"
-    contract; this is best-effort enrichment, not something a document's existence depends on.
+    Returns {"page_type": <one of PAGE_TYPES>, "confidence": float, "facts": List[Dict]}. Never
+    raises -- degrades to the deterministic fallback page_type (or UNCLASSIFIED/0.0 if that also
+    had nothing) with whatever facts were actually collected on any LLM failure, matching
+    extract_clinical_facts's "AI enrichment failing must never fail the document" contract; this
+    is best-effort enrichment, not something a document's existence depends on. Callers
+    (document_pages.py) are expected to dedup facts against what a document already has on
+    record -- this function only ever drafts.
     """
     if is_image_heavy:
         return {"page_type": "SCAN_IMAGING", "confidence": 0.9, "facts": []}
@@ -814,9 +871,9 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
     if not text or not text.strip():
         return {"page_type": "UNCLASSIFIED", "confidence": 0.0, "facts": []}
 
-    doc_cls, confidence = classify_document(text)
-    if doc_cls != "UNCLASSIFIED":
-        return {"page_type": _DOC_CLASS_TO_PAGE_TYPE.get(doc_cls, "OTHER"), "confidence": confidence, "facts": []}
+    doc_cls, doc_confidence = classify_document(text)
+    fallback_page_type = _DOC_CLASS_TO_PAGE_TYPE.get(doc_cls, "OTHER") if doc_cls != "UNCLASSIFIED" else "UNCLASSIFIED"
+    fallback_confidence = doc_confidence if doc_cls != "UNCLASSIFIED" else 0.0
 
     system = (
         "You are a clinical document page classifier and fact-extraction assistant for an "
@@ -834,24 +891,36 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
         'facts are found, return an empty "facts" array. Never include markdown or commentary '
         "outside the JSON object."
     )
-    prompt = f"Classify and extract clinical facts from this page:\n\n{text[:6000]}"
 
-    try:
-        result = scribe._generate_json(prompt, system=system, max_tokens=4000)
-    except Exception:
-        return {"page_type": "UNCLASSIFIED", "confidence": 0.0, "facts": []}
-    if not isinstance(result, dict):
-        return {"page_type": "UNCLASSIFIED", "confidence": 0.0, "facts": []}
+    slices = [
+        text[offset:offset + _PAGE_EXTRACTION_SLICE_CHARS]
+        for offset in range(0, len(text), _PAGE_EXTRACTION_SLICE_CHARS)
+    ][:_MAX_PAGE_EXTRACTION_SLICES]
 
-    page_type = result.get("page_type")
-    if page_type not in PAGE_TYPES:
-        page_type = "UNCLASSIFIED"
-    page_confidence = result.get("confidence")
-    page_confidence = page_confidence if isinstance(page_confidence, (int, float)) and 0 <= page_confidence <= 1 else 0.5
-
-    raw_facts = result.get("facts")
     facts: List[Dict] = []
-    if isinstance(raw_facts, list):
+    seen_facts: set = set()
+    llm_page_type = None
+    llm_confidence = None
+    for slice_text in slices:
+        prompt = f"Classify and extract clinical facts from this page:\n\n{slice_text}"
+        try:
+            result = scribe._generate_json(prompt, system=system, max_tokens=4000)
+        except Exception:
+            continue
+        if not isinstance(result, dict):
+            continue
+
+        if llm_page_type is None:
+            candidate_type = result.get("page_type")
+            if candidate_type in PAGE_TYPES:
+                llm_page_type = candidate_type
+            candidate_confidence = result.get("confidence")
+            if isinstance(candidate_confidence, (int, float)) and 0 <= candidate_confidence <= 1:
+                llm_confidence = candidate_confidence
+
+        raw_facts = result.get("facts")
+        if not isinstance(raw_facts, list):
+            continue
         for f in raw_facts:
             if not isinstance(f, dict):
                 continue
@@ -859,12 +928,27 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
             value = f.get("value")
             if fact_type not in FACT_TYPES or not value:
                 continue
+            value = str(value)[:500]
+            key = (fact_type, value)
+            if key in seen_facts:
+                continue
+            seen_facts.add(key)
             fact_confidence = f.get("confidence")
             facts.append({
                 "fact_type": fact_type,
-                "value": str(value)[:500],
+                "value": value,
                 "verbatim": str(f.get("verbatim") or "")[:1000],
                 "confidence": fact_confidence if isinstance(fact_confidence, (int, float)) and 0 <= fact_confidence <= 1 else 0.75,
             })
+
+    # page_type/confidence: the LLM's own classification wins whenever any slice produced a
+    # usable one -- it saw the real page text, not a fixed keyword list. The deterministic
+    # keyword classifier is only a fallback for when every LLM call failed outright.
+    if llm_page_type:
+        page_type, page_confidence = llm_page_type, llm_confidence if llm_confidence is not None else 0.5
+    elif fallback_page_type != "UNCLASSIFIED":
+        page_type, page_confidence = fallback_page_type, fallback_confidence
+    else:
+        page_type, page_confidence = "UNCLASSIFIED", 0.0
 
     return {"page_type": page_type, "confidence": page_confidence, "facts": facts}
