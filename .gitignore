@@ -24,6 +24,9 @@ final test output/
 single test output/
 tests/scale/results/
 
+# Real (or real-looking) patient documents used for local OCR testing -- never commit these.
+data_insurance/
+
 # Editor/IDE
 .vscode/
 .idea/

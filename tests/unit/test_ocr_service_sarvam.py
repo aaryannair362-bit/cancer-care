@@ -11,6 +11,7 @@ tests/integration/test_patient_document_ocr.py already covers the local RapidOCR
 (OCR_PROVIDER is pinned to "local" for the whole test suite in tests/conftest.py) -- these tests
 are additive, exercising only the Sarvam path and the fallback-to-local behavior.
 """
+import base64
 import io
 import os
 import zipfile
@@ -159,6 +160,74 @@ def test_extract_document_splits_pdfs_over_ten_pages_into_multiple_jobs(monkeypa
     assert result["pages"][1]["page"] == 11
     assert "Lung cancer" in result["text"]
     assert "Cisplatin" in result["text"]
+
+
+def test_extract_document_skips_a_failed_chunk_but_keeps_the_others(monkeypatch):
+    """Regression test: a single chunk job failing (transient network blip, one oversized chunk)
+    must not lose every other chunk's already-successful text -- previously this whole function
+    was a list comprehension where any one job's exception aborted the entire document, throwing
+    away chunks that had already succeeded."""
+    job1 = _FakeDocJob(_make_zip({"a.md": "Diagnosis: Lung cancer stage II"}))
+    job2 = _FakeDocJob(b"", final_state="Failed")
+    job3 = _FakeDocJob(_make_zip({"a.md": "Medications: Cisplatin"}))
+    _install_fake_sdk(monkeypatch, [job1, job2, job3])
+
+    result = ocr_service.extract_document(_make_pdf(25), "application/pdf")  # 3 chunks: 1-10, 11-20, 21-25
+
+    assert result["engine"] == "sarvam_doc_ai"
+    assert "Lung cancer" in result["text"]
+    assert "Cisplatin" in result["text"]
+    assert len(result["pages"]) == 2  # the failed middle chunk is simply absent, not fatal
+
+
+def test_extract_document_pages_reuses_sarvam_chunks_without_new_calls(monkeypatch):
+    """Regression test for the real bug found against files in data_insurance/ (50- and 25-page
+    fully-scanned real hospital records, 0 pages with any native text): extract_document_pages()
+    used to fire one brand-new Sarvam job PER PAGE to get true page granularity, which reliably
+    rate-limited itself into silence against Sarvam's real, documented Document Intelligence
+    limit (10 requests/minute, uniform across every plan tier) -- a single job's own lifecycle
+    already spends most of that budget, so a real multi-page document meant dozens of jobs
+    back-to-back with no pacing, each failure silently dropping that page. It must now reuse the
+    SAME chunk jobs extract_document() already ran, making zero additional Sarvam calls."""
+    job1 = _FakeDocJob(_make_zip({"a.md": "Diagnosis: Lung cancer stage II"}))
+    job2 = _FakeDocJob(_make_zip({"a.md": "Medications: Cisplatin"}))
+    _install_fake_sdk(monkeypatch, [job1, job2])
+
+    content = _make_pdf(15)
+    ocr_result = ocr_service.extract_document(content, "application/pdf")
+    assert ocr_result["engine"] == "sarvam_doc_ai"
+
+    def _blow_up(*, api_subscription_key):
+        raise AssertionError("extract_document_pages must not create any new Sarvam jobs")
+    monkeypatch.setattr(ocr_service, "SarvamAI", _blow_up)
+
+    pages = ocr_service.extract_document_pages(content, "application/pdf", ocr_result)
+
+    assert len(pages) == 2
+    assert pages[0]["page"] == 1
+    assert "Lung cancer" in pages[0]["text"]
+    assert pages[1]["page"] == 11
+    assert "Cisplatin" in pages[1]["text"]
+
+
+def test_extract_document_pages_carries_embedded_chunk_image_through(monkeypatch):
+    """A chunk's representative embedded image (an actual scan photo, not just a stamp/logo)
+    must survive from extract_document() into extract_document_pages() -- previously the
+    whole-document path (_run_one_sarvam_doc_job) discarded it entirely, so a reused chunk could
+    never show a scan thumbnail even after the redundant per-page re-OCR was removed."""
+    fake_image_b64 = base64.b64encode(b"fake-scan-bytes").decode()
+    zip_bytes = _make_zip({"a.md": f"*The image shows a chest X-ray.*\n\n![Image](data:image/jpeg;base64,{fake_image_b64})"})
+    _install_fake_sdk(monkeypatch, [_FakeDocJob(zip_bytes)])
+
+    content = _make_pdf(1)
+    ocr_result = ocr_service.extract_document(content, "application/pdf")
+
+    pages = ocr_service.extract_document_pages(content, "application/pdf", ocr_result)
+
+    assert len(pages) == 1
+    assert pages[0]["image_bytes"] == b"fake-scan-bytes"
+    assert pages[0]["image_mime_type"] == "image/jpeg"
+    assert pages[0]["is_image_heavy"] is True  # negligible remaining text once the image data is stripped, image present
 
 
 def test_extract_document_falls_back_to_local_ocr_when_sarvam_job_fails(monkeypatch):

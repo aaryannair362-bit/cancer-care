@@ -111,6 +111,12 @@ def _no_rate_limit_pacing_in_tests(monkeypatch):
     from app import rate_limiter as rl
     monkeypatch.setattr(rl, "request_bucket", rl.TokenBucket(rate_per_sec=1e6, capacity=1e6))
     monkeypatch.setattr(rl, "token_bucket", rl.TokenBucket(rate_per_sec=1e6, capacity=1e6))
+    # Same reasoning applies to sarvam_doc_ai_request_bucket (ocr_service.py's Sarvam Document
+    # AI pacing, added alongside the fix for real multi-page scanned documents silently losing
+    # their "Scans" section under Sarvam's 10 req/min limit) -- tests/unit/test_ocr_service_sarvam.py
+    # calls the real _run_sarvam_job_and_read_zip body (via a fake SDK) many times across the
+    # session against this same shared singleton.
+    monkeypatch.setattr(rl, "sarvam_doc_ai_request_bucket", rl.TokenBucket(rate_per_sec=1e6, capacity=1e6))
 
 
 @pytest.fixture

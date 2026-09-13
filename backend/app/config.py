@@ -49,7 +49,13 @@ class Settings(BaseSettings):
     # same-origin by default. "*" or specific domains allow external access.
     ALLOWED_ORIGINS: str = os.getenv("ALLOWED_ORIGINS", "*")
     RATE_LIMIT_ENABLED: bool = True
-    MAX_PATIENT_DOCUMENT_MB: int = 25
+    # A real multi-page scanned hospital record (every page a full-resolution photo, no
+    # compression applied by the scanning hospital) legitimately exceeds a low cap -- confirmed
+    # against real files in data_insurance/: a 30-page fully-scanned case file measured 36.4MB.
+    # Sarvam Document AI's own accepted upload size is 200MB (docs.sarvam.ai), so raising this is
+    # not shifting the failure to the OCR vendor; 60MB gives headroom above the largest real file
+    # seen so far without approaching that ceiling.
+    MAX_PATIENT_DOCUMENT_MB: int = 60
     # Read by main.py's create_default_user() to auto-seed the first Admin account on a fresh
     # deploy (empty DB). Declared here so settings.ADMIN_EMAIL doesn't raise AttributeError --
     # it previously did on every single startup (caught by that function's broad except, so the

@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-from app.rate_limiter import TokenBucket, estimate_tokens
+from app.rate_limiter import TokenBucket, estimate_tokens, sarvam_doc_ai_request_bucket
 
 
 class FakeClock:
@@ -108,6 +108,15 @@ def test_concurrent_consumers_never_overspend_the_bucket_below_zero():
 
     assert not errors
     assert bucket.tokens >= -1e-9  # never went negative (floating point epsilon aside)
+
+
+def test_sarvam_doc_ai_bucket_paced_under_the_documented_10_per_minute_limit():
+    """sarvam_doc_ai_request_bucket must stay under Sarvam's own documented Document
+    Intelligence ceiling (10 requests/minute, uniform across every plan tier -- see
+    ocr_service.py's usage for the incident this was added to fix), with real headroom rather
+    than being calibrated right up against it."""
+    assert sarvam_doc_ai_request_bucket.rate * 60 < 10
+    assert sarvam_doc_ai_request_bucket.capacity <= 10
 
 
 def test_estimate_tokens_scales_with_prompt_length_and_includes_max_tokens():

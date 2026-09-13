@@ -5,12 +5,13 @@ fact extraction (cca_engine.classify_and_extract_page), persisted as CCADocument
 extra, correctly page-attributed ClinicalFact rows).
 
 Runs as a FastAPI BackgroundTask scheduled from routers/cca.py's upload_document, AFTER the
-document itself is already saved and the upload response has been sent -- a multi-page PDF
-processed via Sarvam needs one OCR job per page for a true page split (see
-ocr_service.extract_document_pages's docstring for why), which is too slow to make Front Desk
-wait on inline. The document and its whole-document OCR text/classification are already usable
-immediately; this only adds the Patient History "Scans" section and page-attributed facts a short
-time later.
+document itself is already saved and the upload response has been sent -- purely so a multi-page
+document's per-page/per-chunk classification+fact-extraction LLM calls (one per page/chunk, see
+cca_engine.classify_and_extract_page) don't add to Front Desk's upload wait. It costs no extra
+OCR calls beyond what upload_document's own extract_document() already made (see
+ocr_service.extract_document_pages's docstring). The document and its whole-document OCR text/
+classification are already usable immediately; this only adds the Patient History "Scans"
+section and page-attributed facts a short time later.
 
 Opens its own DB session (SessionLocal, the same factory routers/cca.py's own get_cca_db uses) --
 the request's own session is gone by the time this runs, same reason every other out-of-request

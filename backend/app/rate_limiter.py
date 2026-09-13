@@ -116,6 +116,26 @@ request_bucket = TokenBucket(rate_per_sec=_REQUEST_RATE_PER_SEC, capacity=_REQUE
 token_bucket = TokenBucket(rate_per_sec=_TOKEN_RATE_PER_SEC, capacity=_TOKEN_BURST_CAPACITY)
 
 
+# Calibrated against Sarvam's own documented rate limit for Document Intelligence / Vision
+# (docs.sarvam.ai/api-reference-docs/ratelimits): 10 requests/minute, uniform across every plan
+# tier (upgrading the plan does not raise this) -- a vendor-stated number, not a guess. This
+# matters here specifically: ocr_service.py's per-document-chunk job lifecycle (create_job,
+# upload_file, start, one poll per _SARVAM_DOC_AI_POLL_INTERVAL_SEC inside wait_until_complete,
+# download_output) can easily spend most of that budget on a SINGLE chunk job, and a multi-chunk
+# PDF (>10 pages) or concurrent uploads from different Front Desk users can blow through it in
+# seconds with no pacing at all -- confirmed as the cause of per-page/per-chunk Sarvam OCR calls
+# silently failing (and being silently dropped -- see extract_document_pages()) for real
+# multi-page scanned hospital records. Paced at 8/min, not the full 10, to leave headroom for
+# wait_until_complete's own internal polling cadence, which this bucket does not individually
+# gate call-by-call.
+_SARVAM_DOC_AI_REQUEST_RATE_PER_SEC = 8.0 / 60.0
+_SARVAM_DOC_AI_REQUEST_BURST_CAPACITY = 8.0
+
+sarvam_doc_ai_request_bucket = TokenBucket(
+    rate_per_sec=_SARVAM_DOC_AI_REQUEST_RATE_PER_SEC, capacity=_SARVAM_DOC_AI_REQUEST_BURST_CAPACITY
+)
+
+
 def estimate_tokens(prompt: str, max_tokens: int) -> float:
     """
     Cheap, tokenizer-free estimate of a call's total token cost, used to pace the token

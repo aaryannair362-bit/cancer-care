@@ -232,12 +232,14 @@ class CCADocument(Base):
 
 class CCADocumentPage(Base):
     """
-    True per-page breakdown of a CCADocument -- CCADocument.ocr_text/classification_class are
-    whole-document (one blob, one bucket), which can't tell a doctor "page 3 of this bundle is
-    an X-ray report" vs "page 1 is the referral letter". Populated asynchronously after upload
-    (see routers/cca.py's upload_document + the background task in document_pages.py) because
-    getting true (not just job-batched) per-page text out of Sarvam Document AI means one OCR
-    job per page for a multi-page PDF, which is too slow to do inline within the upload request.
+    Per-page (or, for a Sarvam-processed PDF longer than 10 pages, per-chunk -- see
+    ocr_service.extract_document_pages's docstring for why) breakdown of a CCADocument --
+    CCADocument.ocr_text/classification_class are whole-document (one blob, one bucket), which
+    can't tell a doctor "page 3 of this bundle is an X-ray report" vs "page 1 is the referral
+    letter". Populated asynchronously after upload (see routers/cca.py's upload_document + the
+    background task in document_pages.py) purely to keep the upload request itself fast, not
+    (any more) because getting this needs any extra OCR calls -- see extract_document_pages()
+    for why it no longer re-OCRs per page against Sarvam.
     """
     __tablename__ = "cca_document_pages"
     id = Column(Integer, primary_key=True)

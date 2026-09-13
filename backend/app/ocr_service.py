@@ -46,6 +46,7 @@ from typing import Any
 
 from sarvamai import SarvamAI
 
+from . import rate_limiter
 from .config import settings
 
 logger = logging.getLogger(__name__)
@@ -199,9 +200,15 @@ _SARVAM_DOC_AI_MAX_PAGES_PER_JOB = 10
 # ZIP whose internal layout isn't otherwise documented -- Markdown is the one format that's
 # still meaningfully readable as near-plain-text without needing to know that layout in advance
 # (an HTML file would need tag-stripping; an undocumented JSON block schema would need guessing
-# field names). This keeps _run_one_sarvam_doc_job's parsing honest about what it actually knows.
+# field names). This keeps _run_sarvam_job_and_read_zip's parsing honest about what it actually knows.
 _SARVAM_DOC_AI_OUTPUT_FORMAT = "md"
-_SARVAM_DOC_AI_POLL_INTERVAL_SEC = 2.0
+# Sarvam's Document Intelligence rate limit is 10 requests/minute, uniform across every plan tier
+# (docs.sarvam.ai/api-reference-docs/ratelimits; also see rate_limiter.sarvam_doc_ai_request_bucket,
+# which paces this module's own explicit calls against that same number). Their own docs poll
+# example uses a 5s interval -- matched here (was 2.0s) so wait_until_complete's internal polling
+# doesn't by itself spend most of that budget on one job before create_job/upload_file/start/
+# download_output ever get a turn.
+_SARVAM_DOC_AI_POLL_INTERVAL_SEC = 5.0
 _SARVAM_DOC_AI_TIMEOUT_SEC = 300.0
 
 
@@ -275,6 +282,13 @@ def _run_sarvam_job_and_read_zip(client, file_bytes: bytes, ext: str) -> tuple[s
     and returns (cleaned_text, representative_embedded_image). Raises on any failure -- callers
     decide how to degrade (extract_document() falls back to local OCR for the whole document;
     extract_document_pages() skips just the failed page).
+
+    Proactively paces each explicit call against rate_limiter.sarvam_doc_ai_request_bucket
+    (Sarvam's documented 10 req/min Document Intelligence ceiling) BEFORE dispatch, the same
+    "queue fairly instead of firing blind and hoping" approach rate_limiter.py already uses for
+    Groq -- the SDK itself already retries a 429 reactively (see its http_client.py), but reactive
+    retry-after-the-fact still means a burst of chunk/page jobs fired back-to-back mostly just
+    fails-then-waits instead of never bursting in the first place.
     """
     import os
     import tempfile
@@ -285,10 +299,13 @@ def _run_sarvam_job_and_read_zip(client, file_bytes: bytes, ext: str) -> tuple[s
         with open(in_path, "wb") as f:
             f.write(file_bytes)
 
+        rate_limiter.sarvam_doc_ai_request_bucket.consume(1)
         job = client.document_intelligence.create_job(
             language=settings.SARVAM_OCR_LANGUAGE, output_format=_SARVAM_DOC_AI_OUTPUT_FORMAT,
         )
+        rate_limiter.sarvam_doc_ai_request_bucket.consume(1)
         job.upload_file(in_path)
+        rate_limiter.sarvam_doc_ai_request_bucket.consume(1)
         job.start()
         status = job.wait_until_complete(
             poll_interval=_SARVAM_DOC_AI_POLL_INTERVAL_SEC, timeout=_SARVAM_DOC_AI_TIMEOUT_SEC,
@@ -297,6 +314,7 @@ def _run_sarvam_job_and_read_zip(client, file_bytes: bytes, ext: str) -> tuple[s
             raise RuntimeError(f"Sarvam Document AI job did not complete (state={status.job_state})")
 
         zip_path = os.path.join(tmp_dir, "output.zip")
+        rate_limiter.sarvam_doc_ai_request_bucket.consume(1)
         job.download_output(zip_path)
 
         # Sarvam's digitise output ZIP was NOT documented in advance to hold more than one
@@ -332,14 +350,6 @@ def _run_sarvam_job_and_read_zip(client, file_bytes: bytes, ext: str) -> tuple[s
         return combined, image
 
 
-def _run_one_sarvam_doc_job(client, file_bytes: bytes, ext: str) -> str:
-    """Text-only convenience wrapper around _run_sarvam_job_and_read_zip(), for the existing
-    whole-document extraction path (_extract_via_sarvam), which doesn't need the embedded
-    image."""
-    text, _image = _run_sarvam_job_and_read_zip(client, file_bytes, ext)
-    return text
-
-
 def _extract_via_sarvam(content: bytes, content_type: str) -> dict[str, Any]:
     if not settings.SARVAM_API_KEY:
         raise ValueError("Sarvam API key not configured.")
@@ -361,11 +371,28 @@ def _extract_via_sarvam(content: bytes, content_type: str) -> dict[str, Any]:
     # Each chunk is tagged with the 1-indexed page it starts at -- Sarvam's response doesn't
     # give per-page text within a job, so this is job-level (not true per-page) granularity;
     # for the common case (<=10 page document, one job) it's exactly one entry for the whole
-    # document, same shape a single-image OCR result already has.
-    page_text: list[dict[str, Any]] = [
-        {"page": first_page, "text": _run_one_sarvam_doc_job(client, chunk_bytes, ext), "method": "sarvam_ocr"}
-        for first_page, chunk_bytes in chunks
-    ]
+    # document, same shape a single-image OCR result already has. The embedded representative
+    # image is kept per chunk (not just text) so extract_document_pages() can reuse these same
+    # already-paid-for chunk jobs for the Patient History "Scans" section instead of re-OCRing
+    # the whole document again one page at a time (see that function's docstring for why that
+    # used to happen, and why it doesn't any more).
+    #
+    # Each chunk is attempted independently -- same "one bad chunk must not sink every chunk
+    # after it" principle _extract_local already applies per-page -- rather than one failing
+    # (transient network blip, a chunk that happens to exceed Sarvam's per-job limits) aborting
+    # the whole document and losing every other chunk's already-successful text.
+    page_text: list[dict[str, Any]] = []
+    for first_page, chunk_bytes in chunks:
+        try:
+            text, image = _run_sarvam_job_and_read_zip(client, chunk_bytes, ext)
+        except Exception:
+            logger.warning("Sarvam Document AI job failed for chunk starting at page %d", first_page, exc_info=True)
+            continue
+        page_text.append({
+            "page": first_page, "text": text, "method": "sarvam_ocr",
+            "image_mime_type": image[0] if image else None,
+            "image_bytes": image[1] if image else None,
+        })
 
     full_text = "\n\n".join(p["text"] for p in page_text if p["text"]).strip()
     if not full_text:
@@ -409,18 +436,33 @@ _IMAGE_HEAVY_TEXT_THRESHOLD = 150
 
 def extract_document_pages(content: bytes, content_type: str, ocr_result: dict[str, Any]) -> list[dict[str, Any]]:
     """
-    True per-page breakdown for per-page classification (Patient History's "Scans" section, and
-    correctly page-attributed clinical facts) -- distinct from extract_document()'s own `pages`
-    field, which is only job-level for the Sarvam path (see _extract_via_sarvam's comment): a
-    multi-page PDF batched into one <=10-page Sarvam job has no page boundary in that job's
-    returned text. Re-deriving a true split is too slow to do inline within an upload request
-    (see below), so this is meant to be called from a background task after the document/
-    ocr_result from extract_document() already exist -- see routers/cca.py's upload_document and
-    document_pages.py's background task.
+    Per-page/per-chunk breakdown for the hybrid page classifier (Patient History's "Scans"
+    section, and correctly page-attributed clinical facts).
+
+    An earlier version of this function re-OCR'd a multi-page Sarvam-processed PDF a SECOND
+    time, one brand-new Document AI job per individual page, to get true single-page boundaries
+    (Sarvam's own per-job response has no page break within a <=10-page chunk). That turned out
+    to be unworkable against Sarvam's real, documented Document Intelligence rate limit -- 10
+    requests/minute, uniform across every plan tier (docs.sarvam.ai/api-reference-docs/
+    ratelimits) -- because a single job's own lifecycle (create_job, upload_file, start, poll,
+    download_output) already spends most of that budget; firing one full job per page for, say,
+    a 50-page real scanned hospital record meant dozens of jobs back-to-back with no pacing,
+    which silently rate-limited and dropped almost every page (each failure just `continue`s --
+    see the loop this replaced), leaving the "Scans" section and page-attributed facts empty for
+    exactly the multi-page real-world documents that most needed them. Confirmed against real
+    files in data_insurance/ (50- and 25-page fully-scanned PDFs, 0 pages with any native text).
+
+    Fix: reuse the SAME <=10-page chunk jobs extract_document() already paid for (ocr_result
+    already carries their text AND embedded image -- see _extract_via_sarvam) instead of ever
+    re-OCRing. This costs zero extra Sarvam calls, at the trade-off of chunk-level (not always
+    single-page) granularity for a Sarvam-processed PDF longer than 10 pages -- an explicit,
+    accepted trade-off given the alternative was reliably losing the section altogether, not a
+    single-page long-document PDF is unaffected either way (≤10 pages is exactly one chunk).
 
     Returns [{"page": int, "text": str, "is_image_heavy": bool, "image_mime_type": str|None,
-    "image_bytes": bytes|None}, ...], in page order. Never raises -- a page that fails is simply
-    omitted (best-effort enrichment, not a required part of the document existing).
+    "image_bytes": bytes|None}, ...], in page/chunk order. Never raises -- a page/chunk missing
+    from ocr_result is simply absent here (best-effort enrichment, not a required part of the
+    document existing).
     """
     if ocr_result.get("engine") != "sarvam_doc_ai":
         # Local OCR (_extract_local) already gives true per-page text via pypdf/pymupdf page
@@ -439,45 +481,18 @@ def extract_document_pages(content: bytes, content_type: str, ocr_result: dict[s
             for p in ocr_result.get("pages", [])
         ]
 
-    if content_type not in _SARVAM_DOC_AI_CONTENT_TYPES:
-        return []
-
-    if content_type != "application/pdf" or ocr_result.get("page_count", 1) <= 1:
-        # A single-page PDF or a single image upload already has true page granularity in
-        # ocr_result -- no need to re-run OCR to get it again.
-        text = ocr_result.get("text", "")
-        return [{
-            "page": 1,
-            "text": text,
-            "is_image_heavy": len(text.strip()) < _IMAGE_HEAVY_TEXT_THRESHOLD,
-            "image_mime_type": None,
-            "image_bytes": None,
-        }]
-
-    # Multi-page PDF processed via Sarvam: one job per page (reusing the same
-    # _split_pdf_into_chunks() already used/tested for <=10-page batching, just with
-    # max_pages=1) is the only way to get an unambiguous true per-page split without depending
-    # on Sarvam's undocumented metadata/page_NNN.json shape (see _run_sarvam_job_and_read_zip's
-    # docstring for why that's deliberately never parsed). Slower than the whole-document path
-    # (N sequential jobs instead of 1) -- acceptable here because this only ever runs in the
-    # background, after the document itself is already saved and visible.
-    if not settings.SARVAM_API_KEY:
-        return []
-    client = SarvamAI(api_subscription_key=settings.SARVAM_API_KEY)
-    chunks = _split_pdf_into_chunks(content, 1)
-    pages: list[dict[str, Any]] = []
-    for page_number, chunk_bytes in chunks:
-        try:
-            text, image = _run_sarvam_job_and_read_zip(client, chunk_bytes, ".pdf")
-        except Exception as exc:
-            logger.warning("Per-page Sarvam OCR failed for page %d: %s", page_number, exc)
-            continue
-        is_image_heavy = len(text.strip()) < _IMAGE_HEAVY_TEXT_THRESHOLD and image is not None
-        pages.append({
-            "page": page_number,
-            "text": text,
-            "is_image_heavy": is_image_heavy,
-            "image_mime_type": image[0] if is_image_heavy and image else None,
-            "image_bytes": image[1] if is_image_heavy and image else None,
-        })
-    return pages
+    # Sarvam path: every chunk's text and embedded image already exist in ocr_result["pages"]
+    # (from extract_document()'s own _extract_via_sarvam call) -- no network call here at all.
+    return [
+        {
+            "page": p["page"],
+            "text": p.get("text") or "",
+            "is_image_heavy": (
+                len((p.get("text") or "").strip()) < _IMAGE_HEAVY_TEXT_THRESHOLD
+                and p.get("image_bytes") is not None
+            ),
+            "image_mime_type": p.get("image_mime_type"),
+            "image_bytes": p.get("image_bytes"),
+        }
+        for p in ocr_result.get("pages", [])
+    ]
