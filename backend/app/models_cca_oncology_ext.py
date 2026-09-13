@@ -63,6 +63,9 @@ class RadiationPrescription(Base):
     id = Column(Integer, primary_key=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     mdt_case_id = Column(Integer, ForeignKey("cca_mdt_cases.id"), nullable=True)
+    # Core Oncology 4 Sections gap-fill, item 4.6 -- same optional CancerEpisode link as
+    # SurgicalPlan.episode_id above; nullable, populated opportunistically only.
+    episode_id = Column(Integer, ForeignKey("cca_cancer_episodes.id"), nullable=True)
     diagnosis = Column(String(255))
     intent = Column(String(50))
     modality = Column(String(100))
@@ -291,6 +294,12 @@ class SurgicalPlan(Base):
     id = Column(Integer, primary_key=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     mdt_case_id = Column(Integer, ForeignKey("cca_mdt_cases.id"), nullable=True)
+    # Core Oncology 4 Sections gap-fill, item 4.6 -- optional link to the same CancerEpisode
+    # Medical Oncology's TreatmentPlan already carries (models_cca.py), so Surgery shares the
+    # formal episode object, not just the patient, with the other three modalities. Nullable
+    # and populated opportunistically only when the caller already has an episode in context
+    # (e.g. created from a Care Plan/MDT flow) -- every existing caller is unaffected.
+    episode_id = Column(Integer, ForeignKey("cca_cancer_episodes.id"), nullable=True)
     procedure = Column(String(255), nullable=False)
     indication = Column(Text, nullable=True)
     intent = Column(String(50))
@@ -362,6 +371,21 @@ class SurgicalOperativeNote(Base):
     estimated_blood_loss = Column(String(50), nullable=True)
     authored_by = Column(String(200))
     authored_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SurgicalIntraOpNote(Base):
+    """Core Oncology 4 Sections gap-fill, Surgery item 2.2 -- a dedicated, append-only
+    intra-operative narrative log kept by the Surgical Nurse, distinct from the surgeon's own
+    SurgicalOperativeNote (the formal post-op record) and from SurgicalIntraOpMonitoring
+    (structured vitals). Matches SurgicalDrainRecord.output_log's append-only, nurse-typed
+    convention -- pure documentation, never computed or thresholded."""
+    __tablename__ = "cca_surgical_intraop_notes"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    note_text = Column(Text, nullable=False)
+    author = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class SurgicalSpecimen(Base):
@@ -513,6 +537,97 @@ class SurgicalComplicationRecord(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+# ---------------------------------------------------------------------------
+# R10 Anaesthetist module (11 Additional Modules Detailed Developer Handoff, page 11 + the
+# Cross-Module Requirements on page 13, applied to R10 only). Every table below keys off the
+# existing SurgicalPlan/CCAPatient -- no new patient table, matching the cross-module
+# requirement that every role shares the same patient/episode object. No dose-calculation or
+# clinical-safety-threshold logic here (standing repo rule) -- every field is a structured
+# capture, never a computed clinical judgment. medical_clearance_status/asa_grade are always
+# the anaesthetist's own typed classification.
+# ---------------------------------------------------------------------------
+
+class AnaesthesiaPreOpEvaluation(Base):
+    """The anaesthetist's pre-operative evaluation and anaesthetic plan -- gates SurgicalPlan's
+    own pre_op_ready transition (see routers/cca_oncology_ext.py's transition_surgical_plan),
+    the literal implementation of the handoff's "must link to the surgery" requirement.
+    Immutable once Finalized except via the same amendment pattern CCAEncounter uses
+    (models_cca.py item 1.5): a further write after Finalized requires amendment_reason and
+    snapshots the pre-amendment content, satisfying the cross-module "signed records must not
+    be silently overwritten" rule."""
+    __tablename__ = "cca_anaesthesia_pre_op_evaluations"
+    id = Column(Integer, primary_key=True)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    diagnosis = Column(Text, nullable=True)
+    proposed_procedure = Column(Text, nullable=True)
+    asa_grade = Column(String(10), nullable=True)  # I, II, III, IV, V, VI
+    relevant_history = Column(Text, nullable=True)
+    previous_anaesthesia_complications = Column(Text, nullable=True)
+    current_medications_reviewed = Column(Boolean, default=False)
+    current_medications_notes = Column(Text, nullable=True)
+    allergies_reviewed = Column(Boolean, default=False)
+    allergies_notes = Column(Text, nullable=True)
+    prohibited_high_risk_drugs = Column(Text, nullable=True)
+    airway_assessment = Column(Text, nullable=True)
+    head_neck_dentition_findings = Column(Text, nullable=True)
+    system_review = Column(Text, nullable=True)
+    investigations_reviewed = Column(JSON, nullable=True)  # [{"type": "Lab|ECG|Echo|Other", "reference": "..."}]
+    # Pending, Cleared, ClearedWithConditions, NotCleared
+    medical_clearance_status = Column(String(30), default="Pending")
+    clearance_conditions = Column(Text, nullable=True)
+    anaesthetic_plan = Column(Text, nullable=True)
+    consent_obtained = Column(Boolean, default=False)
+    consent_notes = Column(Text, nullable=True)
+    status = Column(String(20), default="Draft")  # Draft, Finalized
+    evaluated_by = Column(String(200))
+    evaluated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AnaesthesiaPreOpEvaluationVersion(Base):
+    """Append-only amendment history for AnaesthesiaPreOpEvaluation, mirroring
+    CCAEncounterVersion's pattern (models_cca.py item 1.5)."""
+    __tablename__ = "cca_anaesthesia_pre_op_evaluation_versions"
+    id = Column(Integer, primary_key=True)
+    evaluation_id = Column(Integer, ForeignKey("cca_anaesthesia_pre_op_evaluations.id"), nullable=False)
+    snapshot = Column(JSON, nullable=False)
+    amendment_reason = Column(Text, nullable=False)
+    amended_by = Column(String(200))
+    amended_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AnaesthesiaIntraOpRecord(Base):
+    """Intra-operative anaesthesia record -- deliberately separate from
+    SurgicalIntraOpMonitoring/SurgicalOperativeNote (the surgical team's own records) so the
+    anaesthetist's documentation never depends on, or can overwrite, the surgeon's."""
+    __tablename__ = "cca_anaesthesia_intraop_records"
+    id = Column(Integer, primary_key=True)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    anaesthesia_type = Column(String(100), nullable=True)  # General, Regional, Local, Sedation, Combined
+    monitoring_notes = Column(Text, nullable=True)
+    airway_management = Column(Text, nullable=True)
+    analgesia_given = Column(Text, nullable=True)
+    intraop_events = Column(Text, nullable=True)
+    recorded_by = Column(String(200))
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AnaesthesiaRecoveryRecord(Base):
+    """Post-anaesthesia recovery/PACU record."""
+    __tablename__ = "cca_anaesthesia_recovery_records"
+    id = Column(Integer, primary_key=True)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    recovery_vitals = Column(JSON, nullable=True)
+    pain_score = Column(Integer, nullable=True)
+    post_op_destination = Column(String(30), nullable=True)  # Ward, HDU, ICU
+    readiness_for_discharge_confirmed = Column(Boolean, default=False)
+    discharge_criteria_notes = Column(Text, nullable=True)
+    recorded_by = Column(String(200))
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+
+
 class ClinicalProcedureNote(Base):
     """Procedures & Notes (Gap Analysis PDF items 31-33: Palliative, Medical Oncology, and
     Radiation Oncology Procedures & Notes) -- a bedside/outpatient procedure performed by a
@@ -576,6 +691,11 @@ class Regimen(Base):
     supportive_therapy = Column(Text, nullable=True)
     hold_parameters = Column(Text, nullable=True)
     reference_notes = Column(Text, nullable=True)
+    # Core Oncology 4 Sections gap-fill, item 3.5 -- rescue/emergency-standby instructions
+    # (e.g. hypersensitivity rescue medications and steps), alongside the existing
+    # premedications/hydration/supportive_therapy reference text. Clinician-authored
+    # reference text, never a computed/thresholded dosing rule.
+    emergency_standby_instructions = Column(Text, nullable=True)
     version = Column(String(30), default="1.0")
     effective_date = Column(Date, nullable=True)
     approved_by = Column(String(200), nullable=True)
@@ -615,6 +735,26 @@ class TreatmentOrderDrugLine(Base):
     planned_dose = Column(String(200), nullable=True)  # clinician-typed for this specific order, never computed
     route = Column(String(50), nullable=True)
     notes = Column(Text, nullable=True)
+    # Core Oncology 4 Sections gap-fill (Chemotherapy) -- all of the below are clinician-typed
+    # strings, never computed, matching this class's own existing standing rule.
+    # Item 3.1: which Regimen.version was actually in effect when this order line was created,
+    # so a historical order records its true source even if the library regimen changes later.
+    protocol_version = Column(String(30), nullable=True)
+    # Item 3.3: the patient-specific calculated dose (e.g. from BSA/AUC), distinct from
+    # standard_protocol_dose (the library's reference text) and planned_dose (what the
+    # clinician actually orders) -- closes the "5 distinct dose concepts" gap.
+    patient_calculated_dose = Column(String(200), nullable=True)
+    # Item 3.4: order-time diluent/volume/concentration/rate/special-instructions -- previously
+    # these only existed downstream (pharmacy's actuals, nurse's actuals); this is the doctor's
+    # own order-time specification.
+    diluent = Column(String(200), nullable=True)
+    volume = Column(String(100), nullable=True)
+    concentration = Column(String(100), nullable=True)
+    infusion_rate_duration = Column(String(100), nullable=True)
+    special_instructions = Column(Text, nullable=True)
+    # Item 3.9: an actual rounding annotation per drug line, distinct from the existing
+    # wastage-reason enum value elsewhere in this module.
+    dose_rounding_note = Column(Text, nullable=True)
     created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
 

@@ -146,11 +146,31 @@ def test_completion_accepts_each_valid_disposition(client, nurse_headers, nurse_
     order_id = _create_signed_order(client, onc_headers, patient.id)
     _complete_the_only_medication(client, nurse_headers, nurse_b_headers, patient.id, order_id)
 
-    done = client.post("/api/cca/treatment/completion", headers=nurse_headers, json={
-        "patient_id": patient.id, "order_id": order_id, "disposition": disposition,
-    })
+    body = {"patient_id": patient.id, "order_id": order_id, "disposition": disposition}
+    # Core Oncology 4 Sections gap-fill, item 3.7 -- a reason is now required for any
+    # disposition other than "Completed".
+    if disposition != "Completed":
+        body["disposition_reason"] = f"{disposition} due to test scenario."
+    done = client.post("/api/cca/treatment/completion", headers=nurse_headers, json=body)
     assert done.status_code == 200, done.text
     assert done.json()["completion"]["disposition"] == disposition
+
+
+def test_completion_non_completed_disposition_requires_reason(client, nurse_headers, nurse_b_headers, onc_headers, patient):
+    order_id = _create_signed_order(client, onc_headers, patient.id)
+    _complete_the_only_medication(client, nurse_headers, nurse_b_headers, patient.id, order_id)
+
+    missing_reason = client.post("/api/cca/treatment/completion", headers=nurse_headers, json={
+        "patient_id": patient.id, "order_id": order_id, "disposition": "Not Completed",
+    })
+    assert missing_reason.status_code == 422
+
+    with_reason = client.post("/api/cca/treatment/completion", headers=nurse_headers, json={
+        "patient_id": patient.id, "order_id": order_id, "disposition": "Not Completed",
+        "disposition_reason": "Patient requested early stop.",
+    })
+    assert with_reason.status_code == 200, with_reason.text
+    assert with_reason.json()["completion"]["disposition_reason"] == "Patient requested early stop."
 
 
 def test_completion_rejects_invalid_disposition_value(client, nurse_headers, nurse_b_headers, onc_headers, patient):

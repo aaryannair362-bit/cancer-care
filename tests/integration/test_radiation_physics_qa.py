@@ -19,6 +19,7 @@ from app.models_cca import CCAPatient
 _FULL_CHECKLIST = {
     "prescription_plan_concordance": True, "dose_volume_constraint_review": True,
     "target_oar_coverage_review": True, "machine_deliverability_review": True,
+    "patient_specific_qa_review": True, "independent_dose_calc_verified": True,
 }
 
 

@@ -241,6 +241,32 @@ ADDITIVE_COLUMNS = [
     ("cca_orders", "technical_issue", "TEXT"),
     ("cca_orders", "acquired_by", "VARCHAR(200)"),
     ("cca_orders", "acquired_at", "TIMESTAMP"),
+    # Core Oncology 4 Sections gap-fill (Consultation): visit_type as a queryable column
+    # (item 1.1), and the ACTIONED result-lifecycle terminal state (item 1.3).
+    ("cca_encounters", "visit_type", "VARCHAR(30)"),
+    ("cca_results", "actioned_by", "VARCHAR(200)"),
+    ("cca_results", "actioned_at", "TIMESTAMP"),
+    # Core Oncology 4 Sections gap-fill (Radiation item 4.6): shared Cancer Episode link on
+    # SurgicalPlan/RadiationPrescription (models_cca_oncology_ext.py), so Surgery and Radiation
+    # share the formal episode object Medical Oncology's TreatmentPlan already carries.
+    ("cca_surgical_plans", "episode_id", "INTEGER"),
+    ("cca_radiation_prescriptions", "episode_id", "INTEGER"),
+    # Core Oncology 4 Sections gap-fill (Radiation item 4.5): radiation -> completion linkage.
+    ("cca_treatment_completions", "radiation_phase_id", "INTEGER"),
+    # Core Oncology 4 Sections gap-fill (Chemotherapy items 3.1/3.3/3.4/3.5/3.9).
+    ("cca_regimens", "emergency_standby_instructions", "TEXT"),
+    ("cca_treatment_order_drug_lines", "protocol_version", "VARCHAR(30)"),
+    ("cca_treatment_order_drug_lines", "patient_calculated_dose", "VARCHAR(200)"),
+    ("cca_treatment_order_drug_lines", "diluent", "VARCHAR(200)"),
+    ("cca_treatment_order_drug_lines", "volume", "VARCHAR(100)"),
+    ("cca_treatment_order_drug_lines", "concentration", "VARCHAR(100)"),
+    ("cca_treatment_order_drug_lines", "infusion_rate_duration", "VARCHAR(100)"),
+    ("cca_treatment_order_drug_lines", "special_instructions", "TEXT"),
+    ("cca_treatment_order_drug_lines", "dose_rounding_note", "TEXT"),
+    ("cca_infusion_medication_administrations", "actual_dose", "VARCHAR(100)"),
+    ("cca_extravasation_events", "administration_id", "INTEGER"),
+    ("cca_treatment_day_completions", "disposition_reason", "TEXT"),
+    ("cca_response_assessments", "treatment_session_id", "INTEGER"),
 ]
 
 

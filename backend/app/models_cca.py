@@ -136,7 +136,29 @@ class CCAEncounter(Base):
     note_status = Column(String(30), default="AI_DRAFT")  # TRANSCRIPT, AI_DRAFT, DOCTOR_EDITED, FINAL, AMENDED
     note_content = Column(JSON, nullable=True)
     raw_transcript = Column(Text, nullable=True)
+    # Core Oncology 4 Sections gap-fill, Consultation item 1.1 -- previously only present as
+    # a key inside note_content's JSON blob (set by finalise_encounter_note but never queryable),
+    # so a patient's encounter history could not be filtered/grouped by New vs Follow-up visit
+    # without parsing JSON. Set from the same finalise request body; purely additive.
+    visit_type = Column(String(30), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CCAEncounterVersion(Base):
+    """Append-only amendment history for CCAEncounter (Core Oncology 4 Sections gap-fill,
+    Consultation item 1.5), mirroring TreatmentPlanVersion's pattern. Previously, finalising an
+    already-FINAL encounter's note silently overwrote note_content with no trace of the prior
+    content -- the same "signed record must not be silently overwritten" gap TreatmentPlan
+    already closed for itself. A row here is a snapshot of note_content as it stood immediately
+    before the amendment that superseded it."""
+    __tablename__ = "cca_encounter_versions"
+    id = Column(Integer, primary_key=True)
+    encounter_id = Column(Integer, ForeignKey("cca_encounters.id"), nullable=False)
+    note_content = Column(JSON, nullable=True)
+    amendment_reason = Column(Text, nullable=False)
+    amended_by = Column(String(200))
+    amended_at = Column(DateTime, default=datetime.utcnow)
+
 
 class CCAIntakeAssessment(Base):
     __tablename__ = "cca_intake_assessments"
@@ -485,6 +507,10 @@ class CCAResult(Base):
     amendment_reason = Column(Text, nullable=True)
     amended_by = Column(String(200), nullable=True)
     amended_at = Column(DateTime, nullable=True)
+    # Core Oncology 4 Sections gap-fill, Consultation item 1.3 -- closes the result-acknowledgement
+    # lifecycle. ACTIONED was already declared as a status value but no endpoint ever set it.
+    actioned_by = Column(String(200), nullable=True)
+    actioned_at = Column(DateTime, nullable=True)
 
 class StagingRecord(Base):
     __tablename__ = "cca_staging_records"
@@ -1262,6 +1288,11 @@ class ResponseAssessment(Base):
     __tablename__ = "cca_response_assessments"
     id = Column(Integer, primary_key=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    # Core Oncology 4 Sections gap-fill, item 3.8 -- optional link to the TreatmentSession this
+    # assessment was made in the context of, mirroring ToxicityEvent.session_id. Populated
+    # opportunistically from the patient's currently-open session when one exists; never
+    # required.
+    treatment_session_id = Column(Integer, ForeignKey("cca_treatment_sessions.id"), nullable=True)
     framework = Column(String(50), default="RECIST")
     framework_version = Column(String(50), default="1.1")
     response_category = Column(String(50), nullable=False)  # CR, PR, SD, PD, NE
@@ -1566,6 +1597,11 @@ class InfusionMedicationAdministration(Base):
     # from PharmacyRelease.label_verified (pharmacy's own check before dispensing).
     label_match_confirmed = Column(Boolean, default=False)
     label_verified_by = Column(String(200), nullable=True)
+    # Core Oncology 4 Sections gap-fill, item 3.3 -- the actual dose administered, distinct
+    # from `dose` above (what was ordered, per this class's own docstring). Nurse-typed,
+    # never computed; nullable so every existing caller that never records a variance is
+    # unaffected.
+    actual_dose = Column(String(100), nullable=True)
     created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -1691,6 +1727,10 @@ class ExtravasationEvent(Base):
     id = Column(Integer, primary_key=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     treatment_order_id = Column(Integer, ForeignKey("cca_treatment_orders.id"), nullable=True)
+    # Core Oncology 4 Sections gap-fill, item 3.6 -- per-drug attribution, mirroring
+    # InfusionReactionEvent.administration_id above; closes the inconsistency where a reaction
+    # can be attributed to a specific drug but extravasation could not.
+    administration_id = Column(Integer, ForeignKey("cca_infusion_medication_administrations.id"), nullable=True)
     agent = Column(String(200), nullable=False)
     site = Column(String(200), nullable=True)
     symptoms = Column(Text, nullable=False)
@@ -1725,6 +1765,10 @@ class TreatmentDayCompletion(Base):
     red_flags_given = Column(Boolean, default=False)
     next_treatment_date = Column(Date, nullable=True)
     next_labs_required = Column(Text, nullable=True)
+    # Core Oncology 4 Sections gap-fill, item 3.7 -- there was previously no reason field at
+    # all; record_completion now requires this when disposition != "Completed" (a genuinely
+    # new validation, verified against this table's own test suite before enforcing it).
+    disposition_reason = Column(Text, nullable=True)
     completed_by = Column(String(200))
     completed_at = Column(DateTime, default=datetime.utcnow)
 
@@ -1809,6 +1853,11 @@ class TreatmentCompletion(Base):
     cancer_episode_ref = Column(String(200), nullable=True)
     episode_id = Column(Integer, ForeignKey("cca_cancer_episodes.id"), nullable=True)
     treatment_plan_id = Column(Integer, ForeignKey("cca_treatment_plans.id"), nullable=True)
+    # Core Oncology 4 Sections gap-fill, item 4.5 -- optional link to the radiation course
+    # phase this completion reconciles, so a completed radiation course surfaces here without
+    # requiring separate manual entry. Set only by the RADIATION_PHASE_COMPLETED subscriber
+    # below (event_subscribers.py); never required on any other caller.
+    radiation_phase_id = Column(Integer, ForeignKey("cca_radiation_phases.id"), nullable=True)
     treatment_intent = Column(String(50), nullable=True)
     treatment_start_date = Column(Date, nullable=True)
     treatment_end_date = Column(Date, nullable=True)

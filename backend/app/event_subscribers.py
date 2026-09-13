@@ -18,7 +18,7 @@ docstring in models_cca.py).
 from datetime import datetime, timedelta
 
 from .events import publish, subscribe
-from .models_cca import CCAPatient, TreatmentPlan, TreatmentSession, CarePlanTask
+from .models_cca import CCAPatient, TreatmentPlan, TreatmentSession, CarePlanTask, TreatmentCompletion
 
 
 def _get_patient(db, patient_id):
@@ -68,6 +68,33 @@ def _on_treatment_plan_signed(db, patient_id=None, actor=None, role=None,
         )
 
 
+@subscribe("RADIATION_PHASE_COMPLETED")
+def _on_radiation_phase_completed(db, patient_id=None, actor=None, phase_id=None, **_payload):
+    """Core Oncology 4 Sections gap-fill, item 4.5 -- a completed radiation phase previously
+    had no way to surface in the survivorship/follow-up module short of a clinician manually
+    creating a TreatmentCompletion from scratch. This creates a DRAFT row only (never
+    auto-finalized -- matches this repo's 'AI/system proposes, clinician confirms'
+    convention, the same reason TreatmentCompletion.status defaults to DRAFT for every other
+    caller); the clinician still reviews and signs it via the existing completion workflow.
+    Skips silently if a completion already exists for this phase (idempotent on republish)."""
+    if patient_id is None or phase_id is None:
+        return
+    existing = db.query(TreatmentCompletion).filter(
+        TreatmentCompletion.radiation_phase_id == phase_id
+    ).first()
+    if existing:
+        return
+    db.add(TreatmentCompletion(
+        patient_id=patient_id,
+        radiation_phase_id=phase_id,
+        treatment_intent=None,
+        completion_type="Completed as Planned",
+        reason="Auto-drafted on radiation phase completion -- pending clinician review.",
+        status="DRAFT",
+        created_by=actor or "system",
+    ))
+
+
 @subscribe("MDT_RECOMMENDATION_FINALIZED")
 def _on_mdt_recommendation_finalized(db, patient_id=None, mdt_case_id=None, mdt_decision_id=None, **_payload):
     """Architecture doc: 'Treating clinician receives review task'. CarePlanTask.care_plan_id
@@ -92,9 +119,13 @@ def _on_mdt_recommendation_finalized(db, patient_id=None, mdt_case_id=None, mdt_
 
 @subscribe("TREATMENT_ADMINISTERED")
 def _on_treatment_administered(db, patient_id=None, treatment_plan_id=None,
-                                treatment_session_id=None, **_payload):
+                                treatment_session_id=None, next_day_no=None, **_payload):
     """Architecture doc: 'Care milestone completes; next step becomes due'. Advances the
-    plan's completed-session count and opens the next planned session if more remain."""
+    plan's completed-session count and opens the next planned session if more remain.
+
+    Core Oncology 4 Sections gap-fill, item 3.2 -- next_day_no is an optional real day_no for
+    the newly-opened session (e.g. Day 8 of a Day 1/Day 8 regimen), defaulting to 1 so every
+    existing caller (which never passes it) is unaffected."""
     plan = db.query(TreatmentPlan).filter(TreatmentPlan.id == treatment_plan_id).first()
     session = db.query(TreatmentSession).filter(TreatmentSession.id == treatment_session_id).first()
     if not plan or not session:
@@ -103,7 +134,8 @@ def _on_treatment_administered(db, patient_id=None, treatment_plan_id=None,
     if plan.completed_sessions < (plan.planned_sessions or 0):
         db.add(TreatmentSession(
             treatment_plan_id=plan.id, patient_id=patient_id,
-            session_no=session.session_no + 1, cycle_no=session.cycle_no + 1, day_no=1,
+            session_no=session.session_no + 1, cycle_no=session.cycle_no + 1,
+            day_no=next_day_no if next_day_no is not None else 1,
             planned_on=(datetime.utcnow() + timedelta(days=14)).date(),
             status="PLANNED",
         ))

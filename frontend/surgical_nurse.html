@@ -149,6 +149,10 @@
                         </div>
                         <button class="btn-outline btn-sm" onclick="submitOrMonitoring(${plan.id})">+ Add Observation</button>
 
+                        <div style="margin-top:16px;"><div class="wl-label">Intra-Operative Notes</div><div id="or-intraop-notes-${plan.id}"></div></div>
+                        <div class="form-group" style="margin-top:10px;"><label class="form-label">Note</label><textarea id="or-intraop-note-text-${plan.id}" class="form-textarea" rows="2" placeholder="Narrative intra-operative note, separate from the surgeon's operative note"></textarea></div>
+                        <button class="btn-outline btn-sm" onclick="submitOrIntraOpNote(${plan.id})">+ Add Note</button>
+
                         <div style="margin-top:16px;"><div class="wl-label">Specimens</div><div id="or-specimens-${plan.id}"></div></div>
                         <div class="form-grid-2" style="margin-top:10px;">
                             <div class="form-group"><label class="form-label">Specimen label</label><input type="text" id="or-spec-label-${plan.id}" class="form-input" /></div>
@@ -166,7 +170,7 @@
                         <button class="btn-outline btn-sm" onclick="submitOrBloodTransfusion(${plan.id})">+ Record Unit</button>
                     </div>
                 `).join('')).join('');
-                rows.forEach(({ plans }) => plans.forEach(plan => { loadOrMonitoring(plan.id); loadOrSpecimens(plan.id); loadOrBlood(plan.id); }));
+                rows.forEach(({ plans }) => plans.forEach(plan => { loadOrMonitoring(plan.id); loadOrIntraOpNotes(plan.id); loadOrSpecimens(plan.id); loadOrBlood(plan.id); }));
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
         }
 
@@ -189,6 +193,29 @@
                 });
                 toast('Observation recorded', 'success');
                 loadOrMonitoring(planId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // Core Oncology 4 Sections gap-fill, item 2.2 -- the Surgical Nurse's own
+        // intra-operative narrative log, distinct from the surgeon's operative note.
+        async function loadOrIntraOpNotes(planId) {
+            const el = document.getElementById(`or-intraop-notes-${planId}`);
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${planId}/intraop-notes`);
+                el.innerHTML = (data.results || []).map(n => `
+                    <div class="med-card-meta">${new Date(n.created_at).toLocaleTimeString()} — ${escapeHtml(n.note_text)} <span style="color:var(--ink-400);">(${escapeHtml(n.author || '')})</span></div>
+                `).join('') || '<p class="empty-hint">No intra-operative notes recorded yet.</p>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitOrIntraOpNote(planId) {
+            const text = document.getElementById(`or-intraop-note-text-${planId}`).value;
+            if (!text) { toast('Note text is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${planId}/intraop-notes`, { note_text: text });
+                document.getElementById(`or-intraop-note-text-${planId}`).value = '';
+                toast('Note added', 'success');
+                loadOrIntraOpNotes(planId);
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

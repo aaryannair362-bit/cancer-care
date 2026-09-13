@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aivana — Anaesthetist</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-page: #F1F5F9; --bg-sidebar: #EEF2F6; --bg-surface: #FFFFFF; --bg-card-subtle: #F8FAFC;
+            --ink-900: #0F172A; --ink-800: #1E293B; --ink-700: #334155; --ink-600: #475569; --ink-500: #64748B; --ink-400: #94A3B8; --ink-300: #CBD5E1;
+            --line: #E2E8F0; --line-subtle: #F1F5F9;
+            --brand-primary: #3B82F6; --brand-dark: #1E3A8A; --navy-action: #2A4365; --navy-action-hover: #1E3A8A;
+            --green-badge-bg: #DCFCE7; --green-badge-text: #166534;
+            --amber-badge-bg: #FEF3C7; --amber-badge-text: #92400E;
+            --rose-badge-bg: #FFE4E6; --rose-badge-text: #9F1239;
+            --blue-badge-bg: #E0E7FF; --blue-badge-text: #3730A3;
+            --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px; --radius-full: 9999px;
+            --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05); --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', -apple-system, sans-serif; background: var(--bg-page); color: var(--ink-800); height: 100vh; display: flex; flex-direction: column; overflow: hidden; -webkit-font-smoothing: antialiased; }
+        .topbar { height: 64px; background: var(--bg-surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; flex-shrink: 0; z-index: 20; }
+        .brand-logo { font-size: 20px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; display: flex; align-items: center; gap: 8px; text-decoration: none; }
+        .header-actions { display: flex; align-items: center; gap: 12px; }
+        .icon-circle-btn { width: 38px; height: 38px; border-radius: var(--radius-full); border: 1px solid var(--line); background: var(--bg-surface); display: flex; align-items: center; justify-content: center; color: var(--ink-600); cursor: pointer; }
+        .role-badge-pill { display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: #F8FAFC; border: 1px solid var(--line); border-radius: var(--radius-full); font-size: 13px; font-weight: 500; color: var(--ink-800); cursor: pointer; }
+        .avatar-pill { width: 38px; height: 38px; border-radius: var(--radius-full); background: #E2E8F0; color: var(--ink-800); display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; border: 1px solid var(--line); cursor: pointer; }
+        .app-body { flex: 1; display: flex; overflow: hidden; }
+        .sidebar { width: 240px; background: var(--bg-sidebar); border-right: 1px solid var(--line); padding: 20px 14px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; overflow-y: auto; }
+        .sidebar-section-title { font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: var(--ink-400); text-transform: uppercase; padding: 10px 12px 6px; }
+        .sidebar-nav-item { display: flex; align-items: center; justify-content: space-between; padding: 11px 14px; border-radius: var(--radius-md); font-size: 13.5px; font-weight: 500; color: var(--ink-700); text-decoration: none; cursor: pointer; }
+        .sidebar-nav-item:hover { background: rgba(255, 255, 255, 0.6); color: var(--ink-900); }
+        .sidebar-nav-item.active { background: #FFFFFF; color: var(--ink-900); font-weight: 600; box-shadow: var(--shadow-sm); border: 1px solid rgba(226, 232, 240, 0.8); }
+        .nav-item-left { display: flex; align-items: center; gap: 10px; }
+        .nav-chevron { color: var(--ink-400); font-size: 12px; }
+        .canvas { flex: 1; overflow-y: auto; padding: 28px 36px; }
+        .view-panel { display: none; }
+        .view-panel.active { display: block; }
+        .page-title { font-size: 26px; font-weight: 700; color: var(--ink-900); letter-spacing: -0.5px; margin-bottom: 4px; }
+        .page-subtitle { font-size: 13.5px; color: var(--ink-500); margin-bottom: 20px; }
+        .section-card { background: var(--bg-surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 20px; box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+        .section-title { font-size: 16px; font-weight: 700; color: var(--ink-900); }
+        .section-sub { font-size: 12px; color: var(--ink-500); margin-top: 2px; }
+        .badge { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: var(--radius-sm); display: inline-flex; align-items: center; }
+        .badge-green { background: var(--green-badge-bg); color: var(--green-badge-text); }
+        .badge-amber { background: var(--amber-badge-bg); color: var(--amber-badge-text); }
+        .badge-rose { background: var(--rose-badge-bg); color: var(--rose-badge-text); }
+        .badge-blue { background: var(--blue-badge-bg); color: var(--blue-badge-text); }
+        .btn-navy { background: var(--navy-action); color: #FFFFFF; font-size: 12.5px; font-weight: 600; padding: 9px 16px; border-radius: var(--radius-sm); border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-navy:hover { background: var(--navy-action-hover); }
+        .btn-outline { background: #FFFFFF; border: 1px solid var(--line); color: var(--ink-700); font-size: 12.5px; font-weight: 600; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-outline:hover { border-color: var(--ink-400); background: #F8FAFC; }
+        .form-checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-800); margin-bottom: 10px; }
+        .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+        .form-group { display: flex; flex-direction: column; gap: 6px; }
+        .form-label { font-size: 12px; font-weight: 600; color: var(--ink-700); }
+        .form-input, .form-select, .form-textarea { width: 100%; height: 38px; padding: 0 12px; background: #FFFFFF; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; color: var(--ink-900); outline: none; }
+        .form-textarea { height: auto; padding: 10px 12px; }
+        .hms-toast { position: fixed; bottom: 24px; right: 24px; background: var(--ink-900); color: #fff; padding: 12px 18px; border-radius: var(--radius-md); font-size: 13px; box-shadow: var(--shadow-md); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 999; max-width: 360px; }
+        .hms-toast--visible { opacity: 1; transform: translateY(0); }
+        .hms-toast--success { background: var(--green-badge-text); }
+        .hms-toast--error { background: var(--rose-badge-text); }
+        .hms-toast--info { background: var(--blue-badge-text); }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <a href="/anaesthetist.html" class="brand-logo">Aivana</a>
+        <div style="flex:1;"></div>
+        <div class="header-actions">
+            <button class="icon-circle-btn" title="Notifications">🔔</button>
+            <div class="role-badge-pill" onclick="location.href='/index.html'"><span>Anaesthetist</span><span>▾</span></div>
+            <div class="avatar-pill" title="Logged in">AN ▾</div>
+        </div>
+    </header>
+    <div class="app-body">
+        <aside class="sidebar">
+            <div class="sidebar-section-title">SURGICAL ANAESTHESIA</div>
+            <a class="sidebar-nav-item active" id="nav-worklist" onclick="showTab('worklist')"><div class="nav-item-left"><span>🩺</span><span>Worklist</span></div><span class="nav-chevron">›</span></a>
+        </aside>
+        <main class="canvas">
+
+            <div id="view-worklist" class="view-panel active">
+                <h1 class="page-title">Anaesthesia Worklist</h1>
+                <p class="page-subtitle">Surgical plans awaiting or with a pre-operative evaluation, across the whole caseload. Finalizing a Cleared / Cleared-with-conditions evaluation is required before Surgery can mark a plan pre-op ready.</p>
+                <div id="worklist-content"><!-- Populated via JS: loadAnaesthesiaWorklist() --></div>
+            </div>
+
+        </main>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script>
+        const ccaUser = Auth.requirePage(['CCAAnaesthetist', 'Admin']);
+        const CCA_API = '/cca';
+        const ASA_GRADES = ['I', 'II', 'III', 'IV', 'V', 'VI'];
+        const CLEARANCE_STATUSES = ['Pending', 'Cleared', 'ClearedWithConditions', 'NotCleared'];
+        const POST_OP_DESTINATIONS = ['Ward', 'HDU', 'ICU'];
+        const CLEARANCE_BADGE = { Pending: 'badge-amber', Cleared: 'badge-green', ClearedWithConditions: 'badge-blue', NotCleared: 'badge-rose' };
+
+        function showTab(tab) {
+            document.querySelectorAll('.view-panel').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.sidebar-nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(`view-${tab}`).classList.add('active');
+            document.getElementById(`nav-${tab}`).classList.add('active');
+            if (tab === 'worklist') loadAnaesthesiaWorklist();
+        }
+
+        // ---------------------------------------------------------------
+        // R10 Anaesthetist module (Core Oncology 4 Sections + 11 Additional Modules
+        // developer handoffs) -- pre-op evaluation/clearance, intra-op record, recovery.
+        // ---------------------------------------------------------------
+        async function loadAnaesthesiaWorklist() {
+            const container = document.getElementById('worklist-content');
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/worklist`);
+                const rows = data.worklist || [];
+                if (!rows.length) {
+                    container.innerHTML = '<div class="section-card"><p style="font-size:12.5px; color:var(--ink-500);">No surgical plans currently need anaesthesia review.</p></div>';
+                    return;
+                }
+                container.innerHTML = rows.map(renderPlanCard).join('');
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        function renderPlanCard(p) {
+            const evalu = p.pre_op_evaluation;
+            const isFinalized = evalu && evalu.status === 'Finalized';
+            return `
+                <div class="section-card">
+                    <div class="section-head">
+                        <div>
+                            <div class="section-title">${escapeHtml(p.patient_name)} <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(p.patient_mrn)}</span></div>
+                            <div class="section-sub">${escapeHtml(p.procedure)} · ${escapeHtml(p.anatomical_site || '')} · Plan status: ${escapeHtml(p.status)}</div>
+                        </div>
+                        ${evalu ? `<span class="badge ${CLEARANCE_BADGE[evalu.medical_clearance_status] || 'badge-amber'}">${escapeHtml(evalu.medical_clearance_status)}${isFinalized ? ' · Finalized' : ' · Draft'}</span>` : '<span class="badge badge-amber">No pre-op evaluation yet</span>'}
+                    </div>
+                    ${renderPreOpForm(p, evalu)}
+                    ${isFinalized ? renderIntraOpAndRecovery(p) : ''}
+                </div>
+            `;
+        }
+
+        function renderPreOpForm(p, evalu) {
+            const disabled = evalu && evalu.status === 'Finalized';
+            const v = (field, fallback) => (evalu && evalu[field] != null ? evalu[field] : (fallback || ''));
+            return `
+                <div class="section-card" style="background:var(--bg-card-subtle);">
+                    <div class="section-sub" style="margin-bottom:8px; font-weight:700; color:var(--ink-800);">Pre-Operative Evaluation ${disabled ? '<span class="badge badge-green">Finalized ✓</span>' : ''}</div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Diagnosis</label><input type="text" id="pre-diag-${p.id}" class="form-input" value="${escapeHtml(v('diagnosis'))}" ${disabled ? 'disabled' : ''} /></div>
+                        <div class="form-group"><label class="form-label">Proposed procedure</label><input type="text" id="pre-proc-${p.id}" class="form-input" value="${escapeHtml(v('proposed_procedure', p.procedure))}" ${disabled ? 'disabled' : ''} /></div>
+                    </div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">ASA grade</label>
+                            <select id="pre-asa-${p.id}" class="form-select" ${disabled ? 'disabled' : ''}>
+                                <option value="">— Select —</option>
+                                ${ASA_GRADES.map(g => `<option value="${g}" ${v('asa_grade') === g ? 'selected' : ''}>${g}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="form-group"><label class="form-label">Medical clearance status</label>
+                            <select id="pre-clearance-${p.id}" class="form-select" ${disabled ? 'disabled' : ''}>
+                                ${CLEARANCE_STATUSES.map(s => `<option value="${s}" ${v('medical_clearance_status', 'Pending') === s ? 'selected' : ''}>${s}</option>`).join('')}
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Relevant history</label><textarea id="pre-history-${p.id}" class="form-textarea" rows="2" ${disabled ? 'disabled' : ''}>${escapeHtml(v('relevant_history'))}</textarea></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Airway assessment</label><textarea id="pre-airway-${p.id}" class="form-textarea" rows="2" ${disabled ? 'disabled' : ''}>${escapeHtml(v('airway_assessment'))}</textarea></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Anaesthetic plan</label><textarea id="pre-plan-${p.id}" class="form-textarea" rows="2" ${disabled ? 'disabled' : ''}>${escapeHtml(v('anaesthetic_plan'))}</textarea></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Clearance conditions (if Cleared with Conditions)</label><input type="text" id="pre-conditions-${p.id}" class="form-input" value="${escapeHtml(v('clearance_conditions'))}" ${disabled ? 'disabled' : ''} /></div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="pre-consent-${p.id}" ${v('consent_obtained') ? 'checked' : ''} ${disabled ? 'disabled' : ''}/> <label for="pre-consent-${p.id}">Anaesthesia consent obtained</label></div>
+                    ${!disabled ? `
+                        <button class="btn-outline" onclick="savePreOp(${p.id}, ${evalu ? evalu.id : 'null'})">${evalu ? 'Save' : 'Create'}</button>
+                        ${evalu ? `<button class="btn-navy" style="margin-left:8px;" onclick="finalizePreOp(${evalu.id})">Finalize</button>` : ''}
+                    ` : `<button class="btn-outline" onclick="toggleAmendForm(${p.id}, ${evalu.id})">Amend</button><div id="amend-form-${evalu.id}"></div>`}
+                </div>
+            `;
+        }
+
+        function readPreOpFields(planId) {
+            return {
+                diagnosis: document.getElementById(`pre-diag-${planId}`).value || undefined,
+                proposed_procedure: document.getElementById(`pre-proc-${planId}`).value || undefined,
+                asa_grade: document.getElementById(`pre-asa-${planId}`).value || undefined,
+                medical_clearance_status: document.getElementById(`pre-clearance-${planId}`).value || undefined,
+                relevant_history: document.getElementById(`pre-history-${planId}`).value || undefined,
+                airway_assessment: document.getElementById(`pre-airway-${planId}`).value || undefined,
+                anaesthetic_plan: document.getElementById(`pre-plan-${planId}`).value || undefined,
+                clearance_conditions: document.getElementById(`pre-conditions-${planId}`).value || undefined,
+                consent_obtained: document.getElementById(`pre-consent-${planId}`).checked,
+            };
+        }
+
+        async function savePreOp(planId, evaluationId) {
+            try {
+                const body = readPreOpFields(planId);
+                if (evaluationId) {
+                    await Api.patch(`${CCA_API}/surgical-plans/${planId}/anaesthesia/pre-op`, body);
+                } else {
+                    await Api.post(`${CCA_API}/surgical-plans/${planId}/anaesthesia/pre-op`, body);
+                }
+                toast('Pre-operative evaluation saved', 'success');
+                loadAnaesthesiaWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function finalizePreOp(evaluationId) {
+            try {
+                await Api.post(`${CCA_API}/anaesthesia/pre-op/${evaluationId}/finalize`, {});
+                toast('Pre-operative evaluation finalized', 'success');
+                loadAnaesthesiaWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function toggleAmendForm(planId, evaluationId) {
+            const host = document.getElementById(`amend-form-${evaluationId}`);
+            if (!host) return;
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = `
+                <div style="margin-top:10px;">
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Amendment reason *</label><textarea id="amend-reason-${evaluationId}" class="form-textarea" rows="2"></textarea></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Updated anaesthetic plan / notes</label><textarea id="amend-notes-${evaluationId}" class="form-textarea" rows="2"></textarea></div>
+                    <button class="btn-navy" onclick="submitAmendment(${planId}, ${evaluationId})">Submit Amendment</button>
+                    <button class="btn-outline" style="margin-left:8px;" onclick="toggleAmendForm(${planId}, ${evaluationId})">Cancel</button>
+                </div>
+            `;
+        }
+
+        async function submitAmendment(planId, evaluationId) {
+            const reason = document.getElementById(`amend-reason-${evaluationId}`).value;
+            if (!reason) { toast('Amendment reason is required', 'error'); return; }
+            const notes = document.getElementById(`amend-notes-${evaluationId}`).value;
+            try {
+                await Api.patch(`${CCA_API}/surgical-plans/${planId}/anaesthesia/pre-op`, { amendment_reason: reason, anaesthetic_plan: notes || undefined });
+                toast('Amendment recorded', 'success');
+                loadAnaesthesiaWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        function renderIntraOpAndRecovery(p) {
+            return `
+                <div class="section-card" style="background:var(--bg-card-subtle);">
+                    <div class="section-sub" style="margin-bottom:8px; font-weight:700; color:var(--ink-800);">Intra-Operative Anaesthesia Record</div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Anaesthesia type</label>
+                            <select id="io-type-${p.id}" class="form-select">
+                                <option>General</option><option>Regional</option><option>Local</option><option>Sedation</option><option>Combined</option>
+                            </select>
+                        </div>
+                        <div class="form-group"><label class="form-label">Airway management</label><input type="text" id="io-airway-${p.id}" class="form-input" /></div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Monitoring notes</label><textarea id="io-notes-${p.id}" class="form-textarea" rows="2"></textarea></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Analgesia given</label><input type="text" id="io-analgesia-${p.id}" class="form-input" /></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Intra-op events</label><textarea id="io-events-${p.id}" class="form-textarea" rows="2"></textarea></div>
+                    <button class="btn-outline" onclick="submitIntraOp(${p.id})">Save Intra-Op Record</button>
+                </div>
+                <div class="section-card" style="background:var(--bg-card-subtle);">
+                    <div class="section-sub" style="margin-bottom:8px; font-weight:700; color:var(--ink-800);">Post-Anaesthesia Recovery</div>
+                    <div class="form-grid-2">
+                        <div class="form-group"><label class="form-label">Pain score (0-10)</label><input type="number" min="0" max="10" id="rec-pain-${p.id}" class="form-input" /></div>
+                        <div class="form-group"><label class="form-label">Post-op destination</label>
+                            <select id="rec-dest-${p.id}" class="form-select">${POST_OP_DESTINATIONS.map(d => `<option>${d}</option>`).join('')}</select>
+                        </div>
+                    </div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="rec-ready-${p.id}"/> <label for="rec-ready-${p.id}">Readiness for discharge confirmed</label></div>
+                    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Discharge criteria notes</label><textarea id="rec-notes-${p.id}" class="form-textarea" rows="2"></textarea></div>
+                    <button class="btn-outline" onclick="submitRecovery(${p.id})">Save Recovery Record</button>
+                </div>
+            `;
+        }
+
+        async function submitIntraOp(planId) {
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${planId}/anaesthesia/intra-op`, {
+                    anaesthesia_type: document.getElementById(`io-type-${planId}`).value,
+                    airway_management: document.getElementById(`io-airway-${planId}`).value || undefined,
+                    monitoring_notes: document.getElementById(`io-notes-${planId}`).value || undefined,
+                    analgesia_given: document.getElementById(`io-analgesia-${planId}`).value || undefined,
+                    intraop_events: document.getElementById(`io-events-${planId}`).value || undefined,
+                });
+                toast('Intra-operative record saved', 'success');
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitRecovery(planId) {
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${planId}/anaesthesia/recovery`, {
+                    pain_score: document.getElementById(`rec-pain-${planId}`).value ? Number(document.getElementById(`rec-pain-${planId}`).value) : undefined,
+                    post_op_destination: document.getElementById(`rec-dest-${planId}`).value,
+                    readiness_for_discharge_confirmed: document.getElementById(`rec-ready-${planId}`).checked,
+                    discharge_criteria_notes: document.getElementById(`rec-notes-${planId}`).value || undefined,
+                });
+                toast('Recovery record saved', 'success');
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => { loadAnaesthesiaWorklist(); });
+    </script>
+</body>
+</html>

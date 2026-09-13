@@ -55,6 +55,7 @@ from .routers import cca_diagnostics
 from .routers import cca_coordination
 from .routers import cca_oncology_ext
 from .routers import cca_inpatient
+from .routers import cca_anaesthesia
 from .routers import patient_portal
 from .cca_seed import seed_cca_database
 
@@ -105,6 +106,7 @@ app.include_router(cca_diagnostics.router)
 app.include_router(cca_coordination.router)
 app.include_router(cca_oncology_ext.router)
 app.include_router(cca_inpatient.router)
+app.include_router(cca_anaesthesia.router)
 app.include_router(patient_portal.router)
 
 @app.exception_handler(json.JSONDecodeError)
@@ -456,6 +458,14 @@ def seed_demo_logins(db: Session):
                 "portal_name": "CCA Oncology OS (Front Desk / Registration)",
                 "target_url": "/frontdesk.html",
                 "description": "Oncology intake, consent capture & appointment check-in",
+            },
+            {
+                "role": "CCAAnaesthetist",
+                "email": "anaesthetist@aivana.com",
+                "password": "Password@2026!",
+                "portal_name": "CCA Oncology OS (Anaesthetist)",
+                "target_url": "/anaesthetist.html",
+                "description": "Pre-op evaluation & clearance, intra-op anaesthesia record, recovery documentation",
             },
         ]
 

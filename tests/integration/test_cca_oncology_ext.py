@@ -53,6 +53,11 @@ def surg_onc(make_user, oncologist):
 
 
 @pytest.fixture
+def anaesthetist(make_user, oncologist):
+    return make_user(email="anaesthetist@oncext.hosp", role="CCAAnaesthetist", organization_id=oncologist.organization_id)
+
+
+@pytest.fixture
 def nurse(make_user, oncologist):
     return make_user(email="nurse@oncext.hosp", role="CCAInfusionNurse", organization_id=oncologist.organization_id)
 
@@ -128,6 +133,7 @@ def _create_phase(client, headers, prescription_id, number_of_fractions=25, **ov
 _FULL_PHYSICS_QA_CHECKLIST = {
     "prescription_plan_concordance": True, "dose_volume_constraint_review": True,
     "target_oar_coverage_review": True, "machine_deliverability_review": True,
+    "patient_specific_qa_review": True, "independent_dose_calc_verified": True,
 }
 
 
@@ -281,6 +287,20 @@ def _create_surgical_plan(client, headers, patient_id):
     }).json()["surgical_plan"]
 
 
+def _clear_pre_op(client, anaesthetist_headers, plan_id):
+    """R10 Anaesthetist cross-module requirement -- a Finalized, Cleared pre-op evaluation is
+    now required before a surgical plan can move to pre_op_ready (see
+    cca_oncology_ext.py's transition_surgical_plan)."""
+    created = client.post(f"/api/cca/surgical-plans/{plan_id}/anaesthesia/pre-op", headers=anaesthetist_headers, json={
+        "asa_grade": "II", "medical_clearance_status": "Cleared", "anaesthetic_plan": "General anaesthesia.",
+    })
+    assert created.status_code == 201, created.text
+    evaluation_id = created.json()["evaluation"]["id"]
+    finalized = client.post(f"/api/cca/anaesthesia/pre-op/{evaluation_id}/finalize", headers=anaesthetist_headers)
+    assert finalized.status_code == 200, finalized.text
+    return finalized.json()["evaluation"]
+
+
 def test_phase_can_be_interrupted_and_resumed(client, auth_headers, db_session, oncologist, rad_onc, physicist, rad_tech):
     patient_id = _patient_id(db_session, oncologist.organization_id)
     onc_headers = auth_headers(rad_onc)
@@ -334,13 +354,17 @@ def test_surgical_plan_transition_and_only_surgical_oncologist(client, auth_head
     assert ok.json()["surgical_plan"]["status"] == "surgeon_reviewed"
 
 
-def test_performed_procedure_recorded_separately_from_planned_and_feeds_back_to_mdt(client, auth_headers, db_session, oncologist, surg_onc):
+def test_performed_procedure_recorded_separately_from_planned_and_feeds_back_to_mdt(client, auth_headers, db_session, oncologist, surg_onc, anaesthetist):
     patient_id = _patient_id(db_session, oncologist.organization_id)
     onc_headers = auth_headers(oncologist)
     surg_headers = auth_headers(surg_onc)
     plan = _create_surgical_plan(client, onc_headers, patient_id)
-    for status_step in ["surgeon_reviewed", "planned", "pre_op_ready", "scheduled"]:
+    for status_step in ["surgeon_reviewed", "planned"]:
         client.patch(f"/api/cca/surgical-plans/{plan['id']}", headers=surg_headers, json={"status": status_step})
+    _clear_pre_op(client, auth_headers(anaesthetist), plan["id"])
+    for status_step in ["pre_op_ready", "scheduled"]:
+        step = client.patch(f"/api/cca/surgical-plans/{plan['id']}", headers=surg_headers, json={"status": status_step})
+        assert step.status_code == 200, step.text
 
     mdt_case = client.post("/api/cca/mdt/cases", headers=onc_headers, json={"patient_id": patient_id, "question": "Adjuvant planning after surgery"}).json()["mdt_case"]
 

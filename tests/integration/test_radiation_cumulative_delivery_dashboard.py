@@ -12,6 +12,7 @@ from app.models_cca import CCAPatient
 _FULL_PHYSICS_QA_CHECKLIST = {
     "prescription_plan_concordance": True, "dose_volume_constraint_review": True,
     "target_oar_coverage_review": True, "machine_deliverability_review": True,
+    "patient_specific_qa_review": True, "independent_dose_calc_verified": True,
 }
 
 
@@ -27,7 +28,9 @@ def physicist(make_user, oncologist):
 
 @pytest.fixture
 def radiologist(make_user, oncologist):
-    return make_user(email="rtt@cumdelivery-test.com", role="CCARadiologist", organization_id=oncologist.organization_id)
+    """7 Role/Module Updates developer handoff split Radiation Technologist into its own
+    CCARadiationTechnologist role -- fraction delivery is gated to it."""
+    return make_user(email="rtt@cumdelivery-test.com", role="CCARadiationTechnologist", organization_id=oncologist.organization_id)
 
 
 @pytest.fixture

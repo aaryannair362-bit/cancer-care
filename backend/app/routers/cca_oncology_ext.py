@@ -33,10 +33,11 @@ from ..models_cca_oncology_ext import (
     RadiationTreatmentUnit, RadiationEquipmentQARecord, RadiationEquipmentIssue,
     RadiationInVivoDosimetry, RadiationOncologyConsultation,
     Regimen, RegimenDrugLine, SurgicalPlan, TreatmentPlanPhase,
-    SurgicalIntraOpMonitoring, SurgicalOperativeNote, SurgicalSpecimen, SurgicalBloodTransfusion,
+    SurgicalIntraOpMonitoring, SurgicalIntraOpNote, SurgicalOperativeNote, SurgicalSpecimen, SurgicalBloodTransfusion,
     SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
     SurgicalStomaRecord, SurgicalComplicationRecord,
     ClinicalProcedureNote, PalliativeTreatmentOrder,
+    AnaesthesiaPreOpEvaluation,
 )
 from ..events import publish
 from .cca import (
@@ -70,6 +71,12 @@ _RT_PHASE_STEP_ROLE = {
 _PHYSICS_QA_CHECKLIST_KEYS = [
     "prescription_plan_concordance", "dose_volume_constraint_review",
     "target_oar_coverage_review", "machine_deliverability_review",
+    # Core Oncology 4 Sections gap-fill, Radiation items 4.1/4.2 -- patient-specific QA
+    # (e.g. IMRT/VMAT measurement/gamma-analysis attestation) and an independent dose/MU
+    # verification, distinct from the DVH/constraint review above. Same attestation
+    # mechanism as the original four -- automatically picked up by record_physics_qa's
+    # existing all-keys-confirmed-or-waived loop, no other code change needed.
+    "patient_specific_qa_review", "independent_dose_calc_verified",
 ]
 _PHYSICS_QA_DECISIONS = ("Approved", "Rejected / Replan Required")
 # Safety/dataflow-critical follow-up round (reference SCR-PHY-007/008).
@@ -189,10 +196,17 @@ def _rt_fraction_out(f: RadiationFraction) -> dict:
 
 
 def _rt_interruption_out(i: RadiationInterruption) -> dict:
+    # Core Oncology 4 Sections gap-fill, item 4.4 -- gap_hours is computed at read time from
+    # start_at/end_at, never stored (matching this repo's convention that a derived clinical
+    # duration is never persisted as if it were its own captured fact).
+    gap_hours = None
+    if i.start_at and i.end_at:
+        gap_hours = round((i.end_at - i.start_at).total_seconds() / 3600.0, 1)
     return {
         "id": i.id, "phase_id": i.phase_id, "reason": i.reason, "category": i.category,
         "start_at": i.start_at.isoformat() if i.start_at else None,
         "end_at": i.end_at.isoformat() if i.end_at else None,
+        "gap_hours": gap_hours,
         "compensation_plan": i.compensation_plan,
         "recorded_by": i.recorded_by, "recorded_at": i.recorded_at.isoformat() if i.recorded_at else None,
     }
@@ -232,6 +246,7 @@ def _regimen_out(r: Regimen, lines: list[RegimenDrugLine]) -> dict:
         "intent_setting": r.intent_setting, "schedule": r.schedule, "number_of_cycles": r.number_of_cycles,
         "premedications": r.premedications, "hydration": r.hydration, "supportive_therapy": r.supportive_therapy,
         "hold_parameters": r.hold_parameters, "reference_notes": r.reference_notes, "version": r.version,
+        "emergency_standby_instructions": r.emergency_standby_instructions,
         "effective_date": r.effective_date.isoformat() if r.effective_date else None,
         "approved_by": r.approved_by, "created_by": r.created_by,
         "drug_lines": [
@@ -979,6 +994,20 @@ async def transition_surgical_plan(plan_id: int, request: Request, db: Session =
     target_index = SURGICAL_STATUS_ORDER.index(target)
     if target_index != current_index + 1:
         raise HTTPException(409, f"Cannot move from {plan.status} directly to {target}")
+    if target == "pre_op_ready":
+        # R10 Anaesthetist cross-module requirement (5.4): the anaesthetic pre-op evaluation
+        # and plan must link to the surgery before it can be marked pre-op ready -- the literal
+        # implementation of "Anaesthetist pre-operative evaluation must link to the surgery".
+        cleared_evaluation = db.query(AnaesthesiaPreOpEvaluation).filter(
+            AnaesthesiaPreOpEvaluation.surgical_plan_id == plan.id,
+            AnaesthesiaPreOpEvaluation.status == "Finalized",
+            AnaesthesiaPreOpEvaluation.medical_clearance_status.in_(["Cleared", "ClearedWithConditions"]),
+        ).first()
+        if not cleared_evaluation:
+            raise HTTPException(
+                409,
+                "A finalized Anaesthetist pre-operative evaluation with medical clearance is required before this surgical plan can be marked pre-op ready",
+            )
     plan.status = target
     if target == "planned":
         plan.signer_email = current_user.get("email")
@@ -1071,6 +1100,44 @@ async def record_intraop_monitoring(plan_id: int, request: Request, db: Session 
     db.commit()
     db.refresh(record)
     return {"status": "success", "observation": _intraop_monitoring_out(record)}
+
+
+def _intraop_note_out(n: SurgicalIntraOpNote) -> dict:
+    return {
+        "id": n.id, "patient_id": n.patient_id, "surgical_plan_id": n.surgical_plan_id,
+        "note_text": n.note_text, "author": n.author,
+        "created_at": n.created_at.isoformat() if n.created_at else None,
+    }
+
+
+@router.get("/surgical-plans/{plan_id}/intraop-notes")
+def list_intraop_notes(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Core Oncology 4 Sections gap-fill, Surgery item 2.2 -- the Surgical Nurse's own
+    intra-operative narrative log, distinct from the surgeon's SurgicalOperativeNote."""
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    rows = db.query(SurgicalIntraOpNote).filter(
+        SurgicalIntraOpNote.surgical_plan_id == plan.id
+    ).order_by(SurgicalIntraOpNote.created_at.asc()).all()
+    return {"results": [_intraop_note_out(n) for n in rows]}
+
+
+@router.post("/surgical-plans/{plan_id}/intraop-notes", status_code=201)
+async def record_intraop_note(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    note_text = (body.get("note_text") or "").strip()
+    if not note_text:
+        raise HTTPException(422, "note_text is required")
+    note = SurgicalIntraOpNote(
+        patient_id=plan.patient_id, surgical_plan_id=plan.id, note_text=note_text,
+        author=_actor(current_user),
+    )
+    db.add(note)
+    db.commit()
+    db.refresh(note)
+    return {"status": "success", "note": _intraop_note_out(note)}
 
 
 def _operative_note_out(n: SurgicalOperativeNote) -> dict:
@@ -1712,6 +1779,7 @@ async def create_regimen(request: Request, db: Session = Depends(get_cca_db), cu
         number_of_cycles=body.get("number_of_cycles"), premedications=body.get("premedications"),
         hydration=body.get("hydration"), supportive_therapy=body.get("supportive_therapy"),
         hold_parameters=body.get("hold_parameters"), reference_notes=body.get("reference_notes"),
+        emergency_standby_instructions=body.get("emergency_standby_instructions"),
         version=body.get("version", "1.0"), effective_date=body.get("effective_date"),
         approved_by=body.get("approved_by") or _actor(current_user), created_by=_actor(current_user),
     )

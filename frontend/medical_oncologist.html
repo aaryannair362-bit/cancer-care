@@ -299,6 +299,19 @@
                     <select class="filter-select"><option>All priorities</option></select>
                     <select class="filter-select"><option>All clinical states</option></select>
                 </div>
+                <div class="section-card" style="margin-bottom:14px;">
+                    <div class="section-head">
+                        <div class="section-title">Worklist</div>
+                    </div>
+                    <p style="font-size:12px; color:var(--ink-500); margin:-6px 0 10px;">Patients needing attention today — new/unfinalised encounters, follow-ups in progress, or results awaiting review.</p>
+                    <div id="onc-worklist-pills" style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <div class="pill-toggle selected" onclick="setWorklistFilter('all', this)">All (<span id="wl-count-all">0</span>)</div>
+                        <div class="pill-toggle" onclick="setWorklistFilter('new', this)">New (<span id="wl-count-new">0</span>)</div>
+                        <div class="pill-toggle" onclick="setWorklistFilter('follow_up', this)">Follow-up (<span id="wl-count-follow_up">0</span>)</div>
+                        <div class="pill-toggle" onclick="setWorklistFilter('urgent', this)">Urgent (<span id="wl-count-urgent">0</span>)</div>
+                        <div class="pill-toggle" onclick="setWorklistFilter('results_pending', this)">Results Pending (<span id="wl-count-results_pending">0</span>)</div>
+                    </div>
+                </div>
                 <div class="section-card">
                     <div class="section-head">
                         <div class="section-title">Medical Oncology Queue</div>
@@ -346,6 +359,29 @@
                             <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Toxicity since last visit</label><textarea id="consult-interval-toxicity" class="form-textarea" rows="2"></textarea></div>
                             <div class="form-group"><label class="form-label">Response/investigations reviewed today</label><textarea id="consult-interval-response" class="form-textarea" rows="2"></textarea></div>
                         </div>
+                    </div>
+
+                    <div class="section-card">
+                        <div class="section-head">
+                            <div>
+                                <div class="section-title">Diagnosis</div>
+                                <div class="section-sub">Core Oncology 4 Sections gap-fill, item 1.6 -- structured cancer diagnosis, separate from the free-text consultation note.</div>
+                            </div>
+                        </div>
+                        <div id="diagnosis-list" style="margin-bottom:12px;"><!-- Populated via JS: loadDiagnosisSection() --></div>
+                        <div class="grid-2" style="gap:10px;">
+                            <div class="form-group"><label class="form-label">Primary site *</label><input type="text" id="diag-primary-site" class="form-input" placeholder="e.g. Left breast" /></div>
+                            <div class="form-group"><label class="form-label">Laterality</label><input type="text" id="diag-laterality" class="form-input" placeholder="Left / Right / Bilateral / N/A" /></div>
+                            <div class="form-group"><label class="form-label">Histology</label><input type="text" id="diag-histology" class="form-input" placeholder="e.g. Invasive ductal carcinoma" /></div>
+                            <div class="form-group"><label class="form-label">Grade</label><input type="text" id="diag-grade" class="form-input" placeholder="e.g. Grade 2" /></div>
+                            <div class="form-group"><label class="form-label">Status</label>
+                                <select id="diag-status" class="form-select">
+                                    <option value="SUSPECTED">Suspected</option>
+                                    <option value="CONFIRMED">Confirmed</option>
+                                </select>
+                            </div>
+                        </div>
+                        <button class="btn-navy" style="margin-top:10px;" onclick="submitCancerDiagnosis()">Add Diagnosis</button>
                     </div>
 
                     <div class="section-card">
@@ -735,12 +771,56 @@
         // ---------------------------------------------------------------
         // Patients queue
         // ---------------------------------------------------------------
-        async function loadPatientQueue() {
-            const listEl = document.getElementById('onc-patient-list');
+        let oncWorklistFlagsByPatient = {};
+        let oncWorklistFilter = 'all';
+        let oncQueuePatients = [];
+
+        // Core Oncology 4 Sections gap-fill, item 3.10 -- read-only pharmacy-readiness badge
+        // colors next to the clearance decision.
+        const PHARMACY_READINESS_BADGE = {
+            Released: 'badge-green', Preparing: 'badge-amber', Verified: 'badge-blue',
+            Query: 'badge-rose', NotStarted: 'badge-amber',
+        };
+
+        const WORKLIST_FLAG_BADGE = {
+            new: { label: 'New', cls: 'badge-blue' },
+            follow_up: { label: 'Follow-up', cls: 'badge-blue' },
+            urgent: { label: 'Urgent', cls: 'badge-rose' },
+            results_pending: { label: 'Results Pending', cls: 'badge-amber' },
+        };
+
+        async function loadWorklistCounts() {
             try {
-                const data = await Api.get(`${CCA_API}/patients`);
-                document.getElementById('onc-patient-count').textContent = `${data.results.length} patients`;
-                listEl.innerHTML = data.results.map(p => `
+                const data = await Api.get(`${CCA_API}/consultation-worklist`);
+                oncWorklistFlagsByPatient = {};
+                (data.results || []).forEach(r => { oncWorklistFlagsByPatient[r.id] = r.flags; });
+                const counts = data.counts || { new: 0, follow_up: 0, results_pending: 0, urgent: 0 };
+                document.getElementById('wl-count-all').textContent = String(data.total || 0);
+                document.getElementById('wl-count-new').textContent = String(counts.new || 0);
+                document.getElementById('wl-count-follow_up').textContent = String(counts.follow_up || 0);
+                document.getElementById('wl-count-urgent').textContent = String(counts.urgent || 0);
+                document.getElementById('wl-count-results_pending').textContent = String(counts.results_pending || 0);
+            } catch (err) { /* worklist counts are supplementary -- the main queue still loads without them */ }
+        }
+
+        function setWorklistFilter(filter, el) {
+            oncWorklistFilter = filter;
+            document.querySelectorAll('#onc-worklist-pills .pill-toggle').forEach(p => p.classList.remove('selected'));
+            if (el) el.classList.add('selected');
+            renderPatientQueueList();
+        }
+
+        function renderPatientQueueList() {
+            const listEl = document.getElementById('onc-patient-list');
+            const filtered = oncWorklistFilter === 'all'
+                ? oncQueuePatients
+                : oncQueuePatients.filter(p => (oncWorklistFlagsByPatient[p.id] || {})[oncWorklistFilter]);
+            document.getElementById('onc-patient-count').textContent = `${filtered.length} patients`;
+            listEl.innerHTML = filtered.map(p => {
+                const flags = oncWorklistFlagsByPatient[p.id] || {};
+                const flagBadges = Object.keys(flags).filter(k => flags[k] && WORKLIST_FLAG_BADGE[k])
+                    .map(k => `<span class="badge ${WORKLIST_FLAG_BADGE[k].cls}" style="font-size:10px;">${WORKLIST_FLAG_BADGE[k].label}</span>`).join(' ');
+                return `
                     <div class="onc-patient-card">
                         <div class="onc-card-top">
                             <div>
@@ -753,11 +833,22 @@
                             <div><div class="onc-col-label">Journey State</div><div class="onc-col-value">${escapeHtml(p.journey_state)}</div></div>
                             <div><div class="onc-col-label">Primary Team</div><div class="onc-col-value" style="font-size:12.5px;">${escapeHtml(p.primary_oncologist || 'Oncology Care Team')}</div></div>
                         </div>
-                        <div style="display:flex; justify-content:flex-end;">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <div style="display:flex; gap:4px; flex-wrap:wrap;">${flagBadges}</div>
                             <button class="btn-navy" onclick="openPatientFromQueue(${Number(p.id)})">Open Patient →</button>
                         </div>
                     </div>
-                `).join('') || '<p style="color:var(--ink-500); font-size:13px;">No patients in this queue.</p>';
+                `;
+            }).join('') || '<p style="color:var(--ink-500); font-size:13px;">No patients in this queue.</p>';
+        }
+
+        async function loadPatientQueue() {
+            const listEl = document.getElementById('onc-patient-list');
+            try {
+                const data = await Api.get(`${CCA_API}/patients`);
+                oncQueuePatients = data.results;
+                await loadWorklistCounts();
+                renderPatientQueueList();
             } catch (err) {
                 listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`;
             }
@@ -803,9 +894,49 @@
                 document.getElementById('consult-hdr-onc').textContent = p.primary_oncologist || 'Unassigned';
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
             loadOrderSetOptions();
+            loadDiagnosisSection();
 
             renderPillRow('intent-pills', ['Curative', 'Adjuvant', 'Neoadjuvant', 'Palliative', 'Supportive'], { value: selectedIntent });
             renderPillRow('modality-pills', ['Surgery', 'Systemic therapy', 'Radiation', 'Combined modality', 'Other'], { value: selectedModality });
+        }
+
+        // Core Oncology 4 Sections gap-fill, item 1.6 -- structured diagnosis capture.
+        async function loadDiagnosisSection() {
+            const listEl = document.getElementById('diagnosis-list');
+            if (!currentPatientId) { listEl.innerHTML = ''; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/cancer-diagnosis`);
+                const rows = data.diagnoses || [];
+                listEl.innerHTML = rows.length ? rows.map(d => `
+                    <div class="checklist-row" style="display:flex; justify-content:space-between; align-items:center;">
+                        <div>
+                            <strong>${escapeHtml(d.primary_site)}</strong>${d.laterality ? ' (' + escapeHtml(d.laterality) + ')' : ''}
+                            <div style="font-size:12px; color:var(--ink-500);">${escapeHtml(d.histology || 'Histology pending')} · ${escapeHtml(d.grade || 'Grade pending')}</div>
+                        </div>
+                        <span class="badge ${d.status === 'CONFIRMED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(d.status)}</span>
+                    </div>
+                `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No structured diagnosis recorded yet.</p>';
+            } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:12.5px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function submitCancerDiagnosis() {
+            const primarySite = document.getElementById('diag-primary-site').value.trim();
+            if (!primarySite) { toast('Primary site is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/cancer-diagnosis`, {
+                    primary_site: primarySite,
+                    laterality: document.getElementById('diag-laterality').value.trim() || null,
+                    histology: document.getElementById('diag-histology').value.trim() || null,
+                    grade: document.getElementById('diag-grade').value.trim() || null,
+                    status: document.getElementById('diag-status').value,
+                });
+                document.getElementById('diag-primary-site').value = '';
+                document.getElementById('diag-laterality').value = '';
+                document.getElementById('diag-histology').value = '';
+                document.getElementById('diag-grade').value = '';
+                toast('Diagnosis recorded', 'success');
+                loadDiagnosisSection();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
         async function ensureEncounterId() {
@@ -1537,6 +1668,14 @@
                 <div class="section-card">
                     <div class="section-title">Decide Treatment Clearance</div>
                     <div class="section-sub" style="margin-bottom:10px;">${escapeHtml(assessment.lab_parameters_note || '')}</div>
+                    ${(assessment.pharmacy_readiness || []).length ? `
+                        <div style="margin-bottom:12px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg-card-subtle);">
+                            <div style="font-size:11px; color:var(--ink-500); text-transform:uppercase; letter-spacing:0.3px; margin-bottom:6px;">Pharmacy Readiness (informational only — does not gate this decision)</div>
+                            <div style="display:flex; flex-wrap:wrap; gap:6px;">
+                                ${assessment.pharmacy_readiness.map(p => `<span class="badge ${PHARMACY_READINESS_BADGE[p.status] || 'badge-blue'}" style="font-size:10.5px;" title="${escapeHtml(p.generic_name)}">${escapeHtml(p.generic_name)}: ${escapeHtml(p.status)}</span>`).join('')}
+                            </div>
+                        </div>
+                    ` : ''}
                     <div class="form-group"><label class="form-label">Decision</label>
                         <select id="clearance-decision-onc" class="form-select">${(assessment.clearance_exits || []).map(c => `<option value="${escapeHtml(c.code)}">${escapeHtml(c.label)}</option>`).join('')}</select>
                     </div>
@@ -3344,7 +3483,7 @@
             const container = document.getElementById('results-inbox-content');
             try {
                 const data = await Api.get(`${CCA_API}/results`);
-                const rows = (data.results || []).filter(r => resultsInboxFilter === 'all' || r.status !== 'ACKNOWLEDGED');
+                const rows = (data.results || []).filter(r => resultsInboxFilter === 'all' || (r.status !== 'ACKNOWLEDGED' && r.status !== 'ACTIONED'));
                 container.innerHTML = `
                     <div class="section-card">
                         <div class="section-head">
@@ -3358,9 +3497,10 @@
                             <div class="checklist-row" style="display:flex; justify-content:space-between; align-items:center;">
                                 <div>
                                     <strong>${escapeHtml(r.title)}</strong> ${r.is_critical ? '<span class="badge badge-rose">Critical</span>' : ''}
-                                    <div style="font-size:12px; color:var(--ink-500);">${escapeHtml(r.result_type)} · ${r.resulted_at ? new Date(r.resulted_at).toLocaleString() : ''} · <span class="badge ${r.status === 'ACKNOWLEDGED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(r.status)}</span></div>
+                                    <div style="font-size:12px; color:var(--ink-500);">${escapeHtml(r.result_type)} · ${r.resulted_at ? new Date(r.resulted_at).toLocaleString() : ''} · <span class="badge ${r.status === 'ACKNOWLEDGED' ? 'badge-blue' : r.status === 'ACTIONED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(r.status)}</span></div>
                                 </div>
-                                ${r.status !== 'ACKNOWLEDGED' ? `<button class="btn-outline" onclick="submitAcknowledgeResult(${r.id})">Acknowledge</button>` : ''}
+                                ${r.status !== 'ACKNOWLEDGED' && r.status !== 'ACTIONED' ? `<button class="btn-outline" onclick="submitAcknowledgeResult(${r.id})">Acknowledge</button>` : ''}
+                                ${r.status === 'ACKNOWLEDGED' ? `<button class="btn-navy" onclick="submitActionCompleteResult(${r.id})">Mark Actioned</button>` : ''}
                             </div>
                         `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">Nothing in the inbox.</p>'}
                     </div>
@@ -3372,6 +3512,14 @@
             try {
                 await Api.post(`${CCA_API}/results/${resultId}/acknowledge`, {});
                 toast('Result acknowledged', 'success');
+                loadResultsInbox();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitActionCompleteResult(resultId) {
+            try {
+                await Api.post(`${CCA_API}/results/${resultId}/action-complete`, {});
+                toast('Result marked actioned', 'success');
                 loadResultsInbox();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }

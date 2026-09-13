@@ -118,6 +118,9 @@
             ['dose_volume_constraint_review', 'Dose-volume constraints reviewed against organs at risk'],
             ['target_oar_coverage_review', 'Target coverage and OAR sparing reviewed'],
             ['machine_deliverability_review', 'Plan is deliverable on the treatment machine'],
+            // Core Oncology 4 Sections gap-fill, items 4.1/4.2.
+            ['patient_specific_qa_review', 'Patient-specific QA (measurement/gamma-analysis) reviewed'],
+            ['independent_dose_calc_verified', 'Independent dose/MU calculation verified'],
         ];
 
         function showTab(tab) {
@@ -146,6 +149,10 @@
                             <div><div class="wl-label">Dose / Fractions</div><div class="wl-value" style="font-size:13px;">${p.total_prescribed_dose_gy} Gy / ${p.number_of_fractions}#</div></div>
                             <div><span class="badge badge-amber">${escapeHtml(p.rt_sub_status.replace(/_/g, ' '))}</span>${isPhysicsQa && p.physics_qa_decision ? `<div style="margin-top:4px;"><span class="badge ${p.physics_qa_decision === 'Approved' ? 'badge-green' : 'badge-rose'}" style="font-size:10px;">${escapeHtml(p.physics_qa_decision)}</span></div>` : ''}</div>
                             <div>${isPhysicsQa ? physicsQaFormHtml(p) : `<button class="btn-navy" onclick="advancePhase(${p.id}, '${nextStatus}')">Advance to ${escapeHtml((nextStatus || '').replace(/_/g, ' '))}</button>`}</div>
+                        </div>
+                        <div style="padding:0 0 12px 0; border-bottom:1px solid var(--line-subtle); margin-bottom:8px;">
+                            <button class="btn-outline" style="font-size:11px; padding:5px 10px;" onclick="toggleDiscrepancyPanel(${p.id})">⚠ Discrepancies</button>
+                            <div id="discrepancy-panel-${p.id}"></div>
                         </div>
                     `; }).join('') : '<p style="font-size:12.5px; color:var(--ink-500); padding:8px 0;">No phases currently need physics/planning action.</p>') + `</div>`;
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
@@ -178,6 +185,70 @@
                 await Api.post(`${CCA_API}/radiation-phases/${phaseId}/physics-qa`, { decision, checklist, note });
                 toast(`Physics QA recorded: ${decision}`, 'success');
                 loadPhysicistWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // Core Oncology 4 Sections gap-fill, item 4.3 -- frontend for the already-complete
+        // RadiationDiscrepancyRecord backend (no backend change here, pure UI gap).
+        const DISCREPANCY_CATEGORIES = ['Contouring', 'Dose Calculation', 'Plan Approval', 'Machine Data', 'Other'];
+
+        async function toggleDiscrepancyPanel(phaseId) {
+            const host = document.getElementById(`discrepancy-panel-${phaseId}`);
+            if (!host) return;
+            if (host.dataset.open) { host.innerHTML = ''; host.dataset.open = ''; return; }
+            host.dataset.open = '1';
+            host.innerHTML = '<p style="font-size:11.5px; color:var(--ink-500);">Loading…</p>';
+            await loadDiscrepancies(phaseId);
+        }
+
+        async function loadDiscrepancies(phaseId) {
+            const host = document.getElementById(`discrepancy-panel-${phaseId}`);
+            if (!host) return;
+            try {
+                const data = await Api.get(`${CCA_API}/radiation-phases/${phaseId}/discrepancies`);
+                const rows = data.discrepancies || [];
+                host.innerHTML = `
+                    <div style="margin-top:8px;">
+                        ${rows.map(d => `
+                            <div style="font-size:11.5px; padding:6px 0; border-bottom:1px solid var(--line-subtle);">
+                                <span class="badge ${d.status === 'OPEN' ? 'badge-rose' : 'badge-green'}" style="font-size:10px;">${escapeHtml(d.status)}</span>
+                                <strong>${escapeHtml(d.category)}</strong> (${escapeHtml(d.severity)}) — ${escapeHtml(d.description)}
+                                ${d.resolution ? `<div style="color:var(--ink-500); margin-top:2px;">Resolution: ${escapeHtml(d.resolution)}</div>` : ''}
+                                ${d.status === 'OPEN' ? `<div style="margin-top:4px;"><input type="text" id="disc-resolution-${d.id}" placeholder="Resolution (required to close)" style="font-size:11px; padding:4px 6px; width:60%; border:1px solid var(--line); border-radius:6px;"/> <button class="btn-outline" style="font-size:10px; padding:4px 8px;" onclick="closeDiscrepancy(${d.id}, ${phaseId})">Close</button></div>` : ''}
+                            </div>
+                        `).join('') || '<p style="font-size:11.5px; color:var(--ink-500);">No discrepancies raised for this phase.</p>'}
+                        <div style="margin-top:8px;">
+                            <select id="disc-category-${phaseId}" style="font-size:11.5px; padding:5px; margin-right:4px;">${DISCREPANCY_CATEGORIES.map(c => `<option>${c}</option>`).join('')}</select>
+                            <select id="disc-severity-${phaseId}" style="font-size:11.5px; padding:5px; margin-right:4px;"><option>Minor</option><option>Major</option><option>Critical</option></select>
+                            <input type="text" id="disc-description-${phaseId}" placeholder="Description *" style="font-size:11.5px; padding:5px; width:40%;"/>
+                            <button class="btn-outline" style="font-size:11px; padding:5px 10px;" onclick="raiseDiscrepancy(${phaseId})">Raise Discrepancy</button>
+                        </div>
+                    </div>
+                `;
+            } catch (err) { host.innerHTML = `<p style="color:var(--rose-badge-text); font-size:11.5px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        async function raiseDiscrepancy(phaseId) {
+            const description = document.getElementById(`disc-description-${phaseId}`).value;
+            if (!description) { toast('Description is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/radiation-phases/${phaseId}/discrepancies`, {
+                    category: document.getElementById(`disc-category-${phaseId}`).value,
+                    severity: document.getElementById(`disc-severity-${phaseId}`).value,
+                    description,
+                });
+                toast('Discrepancy raised', 'success');
+                loadDiscrepancies(phaseId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function closeDiscrepancy(discrepancyId, phaseId) {
+            const resolution = document.getElementById(`disc-resolution-${discrepancyId}`).value;
+            if (!resolution) { toast('Resolution is required to close', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/radiation-discrepancies/${discrepancyId}/close`, { resolution });
+                toast('Discrepancy closed', 'success');
+                loadDiscrepancies(phaseId);
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

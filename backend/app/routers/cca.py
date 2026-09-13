@@ -34,7 +34,7 @@ from ..models_cca_oncology_ext import (
     Regimen, RegimenDrugLine, TreatmentOrderDrugLine, SurgicalPlan,
 )
 from ..models_cca import (
-    CCAPatient, CCAConsent, CCAQueueEvent, CCAEncounter, CCAIntakeAssessment,
+    CCAPatient, CCAConsent, CCAQueueEvent, CCAEncounter, CCAEncounterVersion, CCAIntakeAssessment,
     MedicationReconciliationEntry, AdverseReactionHistoryEntry,
     CCADocument, CCADocumentPage, ClinicalFact, CCAContradiction, CCACancerDiagnosis,
     CCABiomarkerResult, CCAOrder, CCAResult, StagingRecord, StagingEvidence,
@@ -277,6 +277,80 @@ def list_patients(
             "created_at": p.created_at.isoformat() if p.created_at else None
         })
     return {"results": results, "total": len(results)}
+
+
+@router.get("/consultation-worklist")
+def consultation_worklist(
+    db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    """Core Oncology 4 Sections gap-fill, item 1.2 -- an actionable, org-wide worklist for the
+    Consultation module. Previously the Patients tab was a flat, unfiltered list with no way to
+    see who actually needs attention today; this reuses the existing CCAEncounter/CCAResult
+    queries (no new models) to flag each patient into one or more of: New (an open,
+    not-yet-finalised OPD_CONSULTATION encounter), Follow-up (an open, not-yet-finalised
+    FOLLOW_UP_VISIT encounter), Results Pending (a CCAResult still NEW/PENDING_REVIEW), and
+    Urgent (a critical result not yet acknowledged)."""
+    org_id = _org_id(current_user)
+    patients = db.query(CCAPatient).filter(CCAPatient.organization_id == org_id).all()
+    patient_ids = [p.id for p in patients]
+    if not patient_ids:
+        return {"results": [], "total": 0}
+
+    open_encounters = db.query(CCAEncounter).filter(
+        CCAEncounter.patient_id.in_(patient_ids),
+        CCAEncounter.note_status.notin_(["FINAL", "AMENDED"]),
+    ).all()
+    pending_results = db.query(CCAResult).filter(
+        CCAResult.patient_id.in_(patient_ids),
+        CCAResult.status.in_(["NEW", "PENDING_REVIEW"]),
+    ).all()
+
+    new_by_patient = set()
+    follow_up_by_patient = set()
+    for e in open_encounters:
+        if e.encounter_type == "FOLLOW_UP_VISIT":
+            follow_up_by_patient.add(e.patient_id)
+        else:
+            new_by_patient.add(e.patient_id)
+
+    results_pending_by_patient = set()
+    urgent_by_patient = set()
+    for r in pending_results:
+        results_pending_by_patient.add(r.patient_id)
+        if r.is_critical:
+            urgent_by_patient.add(r.patient_id)
+
+    flagged_patient_ids = new_by_patient | follow_up_by_patient | results_pending_by_patient | urgent_by_patient
+    out = []
+    for p in patients:
+        if p.id not in flagged_patient_ids:
+            continue
+        out.append({
+            "id": p.id,
+            "mrn": p.mrn,
+            "name": p.name,
+            "age": p.age,
+            "sex": p.sex,
+            "photo_url": p.photo_url,
+            "journey_state": p.journey_state,
+            "primary_oncologist": p.primary_oncologist,
+            "flags": {
+                "new": p.id in new_by_patient,
+                "follow_up": p.id in follow_up_by_patient,
+                "results_pending": p.id in results_pending_by_patient,
+                "urgent": p.id in urgent_by_patient,
+            },
+        })
+    return {
+        "results": out,
+        "total": len(out),
+        "counts": {
+            "new": len(new_by_patient),
+            "follow_up": len(follow_up_by_patient),
+            "results_pending": len(results_pending_by_patient),
+            "urgent": len(urgent_by_patient),
+        },
+    }
 
 
 @router.post("/patients", status_code=201)
@@ -1087,6 +1161,7 @@ def get_case_summary(
             {
                 "id": e.id, "started_at": e.started_at.isoformat() if e.started_at else None,
                 "specialty": e.specialty, "clinician": e.clinician, "note_status": e.note_status,
+                "visit_type": e.visit_type,
                 "chief_complaint": _note_field(e.note_content, "chief_complaint"),
                 "diagnosis": _note_field(e.note_content, "primary_diagnosis"),
                 "advice": _note_field(e.note_content, "advice"),
@@ -2010,7 +2085,13 @@ async def finalise_encounter_note(
 ):
     """Finalizing turns an AI_DRAFT note into the clinical record of the consultation --
     the explicit clinician acceptance step the architecture doc requires before an
-    AI-originated draft can stand as authored clinical content."""
+    AI-originated draft can stand as authored clinical content.
+
+    Core Oncology 4 Sections gap-fill, item 1.5: the first finalise call behaves exactly as
+    before (unchanged path -- no existing test breaks). Calling this a second time on an
+    already-FINAL/AMENDED encounter used to silently overwrite note_content; it now requires
+    an `amendment_reason` and snapshots the pre-amendment content into CCAEncounterVersion,
+    mirroring TreatmentPlan's own amendment pattern."""
     _require_clinician(current_user)
     encounter = db.query(CCAEncounter).filter(CCAEncounter.id == id).first()
     if not encounter:
@@ -2019,8 +2100,48 @@ async def finalise_encounter_note(
 
     body = await request.json()
     actor = _actor(current_user)
+
+    if encounter.note_status in ("FINAL", "AMENDED"):
+        amendment_reason = (body or {}).get("amendment_reason")
+        if not amendment_reason or not str(amendment_reason).strip():
+            raise HTTPException(400, "amendment_reason is required to amend an already-finalized note")
+        db.add(CCAEncounterVersion(
+            encounter_id=encounter.id,
+            note_content=encounter.note_content,
+            amendment_reason=amendment_reason,
+            amended_by=actor,
+            amended_at=datetime.utcnow(),
+        ))
+        if body:
+            encounter.note_content = body
+        if body.get("visit_type"):
+            encounter.visit_type = body.get("visit_type")
+        encounter.note_status = "AMENDED"
+
+        j_ev = CCAJourneyEvent(
+            patient_id=encounter.patient_id,
+            event_type="NOTE_AMENDED",
+            event_title="Doctor Consultation Note Amended",
+            event_category="CONSULTATION",
+            description=f"{actor} amended the finalized clinical consultation note. Reason: {amendment_reason}",
+            actor_name=actor,
+            actor_role=current_user.get("role")
+        )
+        db.add(j_ev)
+        db.commit()
+        return {
+            "status": "success",
+            "encounter": {
+                "id": encounter.id,
+                "status": encounter.status,
+                "note_status": encounter.note_status
+            }
+        }
+
     if body:
         encounter.note_content = body
+        if body.get("visit_type"):
+            encounter.visit_type = body.get("visit_type")
     encounter.note_status = "FINAL"
     encounter.status = "CLOSED"
     encounter.ended_at = datetime.utcnow()
@@ -2170,6 +2291,7 @@ def list_results(
                 "status": r.status,
                 "is_critical": r.is_critical,
                 "acknowledged_by": r.acknowledged_by,
+                "actioned_by": r.actioned_by,
                 "resulted_at": r.resulted_at.isoformat() if r.resulted_at else None
             }
             for r in results
@@ -2219,6 +2341,48 @@ def acknowledge_result(
             "status": result.status,
             "title": result.title,
             "acknowledged_by": result.acknowledged_by
+        }
+    }
+
+
+@router.post("/results/{id}/action-complete")
+def action_complete_result(
+    id: int, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Core Oncology 4 Sections gap-fill, item 1.3 -- closes the result-acknowledgement
+    lifecycle. CCAResult.status already declared ACTIONED as a terminal state but no endpoint
+    ever set it; the only existing transition was NEW/PENDING_REVIEW -> ACKNOWLEDGED. This is
+    the second, final step: the clinician has actually acted on the acknowledged result (e.g.
+    ordered a follow-up, adjusted the plan), distinct from merely having reviewed it."""
+    result = db.query(CCAResult).filter(CCAResult.id == id).first()
+    if not result:
+        raise HTTPException(404, "Result not found")
+    _check_patient_in_org(db, result.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+
+    if result.status != "ACKNOWLEDGED":
+        raise HTTPException(400, "Result must be ACKNOWLEDGED before it can be marked ACTIONED")
+
+    actor = _actor(current_user)
+    result.status = "ACTIONED"
+    result.actioned_by = actor
+    result.actioned_at = datetime.utcnow()
+
+    publish(
+        db, "RESULT_ACTIONED", patient_id=result.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Result Actioned: {result.title}", category="INVESTIGATION",
+        description=f"{actor} completed the required action on this result.",
+        result_id=result.id,
+    )
+    db.commit()
+    return {
+        "status": "success",
+        "result": {
+            "id": result.id,
+            "status": result.status,
+            "title": result.title,
+            "actioned_by": result.actioned_by
         }
     }
 
@@ -3021,6 +3185,109 @@ def _apply_treatment_plan_discontinuation(db: Session, plan: TreatmentPlan, reas
     )
 
 
+def _cancer_diagnosis_dict(d: CCACancerDiagnosis) -> dict:
+    return {
+        "id": d.id, "patient_id": d.patient_id, "primary_site": d.primary_site,
+        "laterality": d.laterality, "histology": d.histology, "icd_o_3": d.icd_o_3,
+        "icd_10": d.icd_10, "grade": d.grade,
+        "diagnosed_on": d.diagnosed_on.isoformat() if d.diagnosed_on else None,
+        "basis": d.basis, "clinical_setting": d.clinical_setting, "status": d.status,
+        "confirmed_by": d.confirmed_by,
+        "confirmed_at": d.confirmed_at.isoformat() if d.confirmed_at else None,
+    }
+
+
+@router.post("/patients/{patient_id}/cancer-diagnosis", status_code=201)
+async def create_cancer_diagnosis(
+    patient_id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Core Oncology 4 Sections gap-fill, item 1.6 -- CCACancerDiagnosis was declared on the
+    model but only ever populated by cca_seed.py's demo data (confirmed dead in live code);
+    there was no real write path for a clinician to record structured diagnosis (primary
+    site/histology/grade) from the Consultation module. Each call creates a new diagnosis row
+    (a patient can legitimately have more than one, e.g. a second primary), matching
+    CCABiomarkerResult's own create-only pattern for structured per-patient clinical data."""
+    org_id = _org_id(current_user)
+    _get_org_patient(db, patient_id, org_id)
+    _require_clinician(current_user)
+    body = await request.json()
+    primary_site = (body.get("primary_site") or "").strip()
+    if not primary_site:
+        raise HTTPException(422, "primary_site is required")
+
+    actor = _actor(current_user)
+    status = body.get("status") or "SUSPECTED"
+    diagnosis = CCACancerDiagnosis(
+        patient_id=patient_id,
+        primary_site=primary_site,
+        laterality=body.get("laterality"),
+        histology=body.get("histology"),
+        icd_o_3=body.get("icd_o_3"),
+        icd_10=body.get("icd_10"),
+        grade=body.get("grade"),
+        basis=body.get("basis"),
+        clinical_setting=body.get("clinical_setting") or "Curative Intent / Early Stage",
+        status=status,
+    )
+    if status == "CONFIRMED":
+        diagnosis.confirmed_by = actor
+        diagnosis.confirmed_at = datetime.utcnow()
+    db.add(diagnosis)
+    db.flush()
+    publish(
+        db, "CANCER_DIAGNOSIS_RECORDED", patient_id=patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Cancer diagnosis recorded: {diagnosis.primary_site}", category="DIAGNOSIS",
+        description=f"{actor} recorded a {diagnosis.status.lower()} cancer diagnosis ({diagnosis.primary_site}).",
+    )
+    db.commit()
+    db.refresh(diagnosis)
+    return {"status": "success", "diagnosis": _cancer_diagnosis_dict(diagnosis)}
+
+
+@router.get("/patients/{patient_id}/cancer-diagnosis")
+def list_cancer_diagnoses(
+    patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
+):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(CCACancerDiagnosis).filter(
+        CCACancerDiagnosis.patient_id == patient_id
+    ).order_by(CCACancerDiagnosis.created_at.desc()).all()
+    return {"diagnoses": [_cancer_diagnosis_dict(d) for d in rows]}
+
+
+@router.patch("/cancer-diagnosis/{id}")
+async def update_cancer_diagnosis(
+    id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Update path for item 1.6 -- most commonly used to move a SUSPECTED diagnosis to
+    CONFIRMED once histology/biomarker evidence is in, without losing the original entry (this
+    mutates the same row rather than versioning, matching CCACancerDiagnosis's own existing
+    AMENDED status value being reachable by further edits after CONFIRMED)."""
+    diagnosis = db.query(CCACancerDiagnosis).filter(CCACancerDiagnosis.id == id).first()
+    if not diagnosis:
+        raise HTTPException(404, "Diagnosis not found")
+    _check_patient_in_org(db, diagnosis.patient_id, _org_id(current_user))
+    _require_clinician(current_user)
+    body = await request.json()
+
+    for field in ("primary_site", "laterality", "histology", "icd_o_3", "icd_10", "grade", "basis", "clinical_setting"):
+        if field in body:
+            setattr(diagnosis, field, body[field])
+
+    new_status = body.get("status")
+    if new_status:
+        diagnosis.status = new_status
+        if new_status == "CONFIRMED" and not diagnosis.confirmed_by:
+            diagnosis.confirmed_by = _actor(current_user)
+            diagnosis.confirmed_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(diagnosis)
+    return {"status": "success", "diagnosis": _cancer_diagnosis_dict(diagnosis)}
+
+
 # ---------------------------------------------------------
 # Cancer Episode + Line of Therapy (Product 1 vs Product 2 gap report item 5, CRITICAL
 # priority) -- see models_cca.py's CancerEpisode/LineOfTherapy docstrings for the design
@@ -3646,7 +3913,9 @@ async def sign_treatment_plan(
         patient_id=plan.patient_id,
         session_no=1,
         cycle_no=1,
-        day_no=1,
+        # Core Oncology 4 Sections gap-fill, item 3.2 -- optional real day_no capture (e.g. a
+        # Day 8 start within cycle 1), defaulting to 1 so every existing caller is unaffected.
+        day_no=body.get("day_no", 1),
         planned_on=datetime.utcnow().date(),
         status="PLANNED",
     ))
@@ -4400,6 +4669,12 @@ def _drug_line_out(line: TreatmentOrderDrugLine) -> dict:
         "generic_name": line.generic_name, "category": line.category, "dose_basis": line.dose_basis,
         "standard_protocol_dose": line.standard_protocol_dose, "planned_dose": line.planned_dose,
         "route": line.route, "notes": line.notes,
+        # Core Oncology 4 Sections gap-fill (Chemotherapy items 3.1/3.3/3.4/3.9).
+        "protocol_version": line.protocol_version,
+        "patient_calculated_dose": line.patient_calculated_dose,
+        "diluent": line.diluent, "volume": line.volume, "concentration": line.concentration,
+        "infusion_rate_duration": line.infusion_rate_duration, "special_instructions": line.special_instructions,
+        "dose_rounding_note": line.dose_rounding_note,
     }
 
 
@@ -4414,6 +4689,7 @@ def _treatment_order_dict(order: TreatmentOrder, db: Session = None) -> dict:
                 supportive_care = {
                     "premedications": regimen.premedications, "hydration": regimen.hydration,
                     "supportive_therapy": regimen.supportive_therapy,
+                    "emergency_standby_instructions": regimen.emergency_standby_instructions,
                 }
         drug_lines = [_drug_line_out(l) for l in db.query(TreatmentOrderDrugLine).filter(
             TreatmentOrderDrugLine.treatment_order_id == order.id
@@ -4520,6 +4796,10 @@ async def create_treatment_order(
     # blob. standard_protocol_dose is copied reference text only; planned_dose starts blank for
     # the clinician to type in themselves (never pre-filled with a computed value).
     if plan.regimen_id:
+        # Core Oncology 4 Sections gap-fill, item 3.1 -- snapshot the regimen version in effect
+        # right now onto every seeded drug line, so a historical order records which version was
+        # actually used even if the library regimen is edited/re-versioned later.
+        regimen = db.query(Regimen).filter(Regimen.id == plan.regimen_id).first()
         regimen_lines = db.query(RegimenDrugLine).filter(
             RegimenDrugLine.regimen_id == plan.regimen_id
         ).order_by(RegimenDrugLine.sequence_number.asc(), RegimenDrugLine.id.asc()).all()
@@ -4527,6 +4807,7 @@ async def create_treatment_order(
             db.add(TreatmentOrderDrugLine(
                 treatment_order_id=order.id, sequence_number=rl.sequence_number, generic_name=rl.generic_name,
                 dose_basis=rl.dose_basis, standard_protocol_dose=rl.standard_protocol_dose, route=rl.route,
+                protocol_version=regimen.version if regimen else None,
                 created_by=actor,
             ))
 
@@ -4580,6 +4861,10 @@ async def add_treatment_order_drug_line(id: int, request: Request, db: Session =
         generic_name=generic_name, category=body.get("category", "Antineoplastic"), dose_basis=body.get("dose_basis"),
         standard_protocol_dose=body.get("standard_protocol_dose"), planned_dose=body.get("planned_dose"),
         route=body.get("route"), notes=body.get("notes"), created_by=_actor(current_user),
+        patient_calculated_dose=body.get("patient_calculated_dose"),
+        diluent=body.get("diluent"), volume=body.get("volume"), concentration=body.get("concentration"),
+        infusion_rate_duration=body.get("infusion_rate_duration"), special_instructions=body.get("special_instructions"),
+        dose_rounding_note=body.get("dose_rounding_note"),
     )
     db.add(line)
     db.commit()
@@ -4599,7 +4884,11 @@ async def update_treatment_order_drug_line(id: int, line_id: int, request: Reque
     if not line:
         raise HTTPException(404, "Drug line not found on this order")
     body = await request.json()
-    for field in ("generic_name", "category", "dose_basis", "standard_protocol_dose", "planned_dose", "route", "notes", "sequence_number"):
+    for field in (
+        "generic_name", "category", "dose_basis", "standard_protocol_dose", "planned_dose", "route", "notes",
+        "sequence_number", "patient_calculated_dose", "diluent", "volume", "concentration",
+        "infusion_rate_duration", "special_instructions", "dose_rounding_note",
+    ):
         if field in body:
             setattr(line, field, body[field])
     db.commit()
@@ -4722,6 +5011,52 @@ async def cancel_treatment_order(
 # 10. Treatment-Day Assessment & 5 Clearance Exits (SCR-24)
 # ---------------------------------------------------------
 
+def _pharmacy_readiness_for_order(db: Session, order) -> list:
+    """Core Oncology 4 Sections gap-fill, item 3.10 -- a read-only, computed-at-read-time
+    summary of each drug line's pharmacy state (never stored, never gates anything: the
+    user's explicit decision was to keep record_clearance_decision's CLEARED ->
+    EXECUTED/ADMINISTERED semantics exactly as they are today). Statuses:
+    Released (PharmacyRelease exists) > Preparing (PharmacyPreparation exists, no release yet)
+    > Verified/Query (from the order-level PharmacyVerification's latest decision) >
+    NotStarted (nothing recorded yet)."""
+    if not order:
+        return []
+    drug_lines = db.query(TreatmentOrderDrugLine).filter(
+        TreatmentOrderDrugLine.treatment_order_id == order.id
+    ).order_by(TreatmentOrderDrugLine.sequence_number.asc(), TreatmentOrderDrugLine.id.asc()).all()
+    if not drug_lines:
+        return []
+
+    latest_verification = db.query(PharmacyVerification).filter(
+        PharmacyVerification.treatment_order_id == order.id
+    ).order_by(PharmacyVerification.verified_at.desc(), PharmacyVerification.id.desc()).first()
+    order_level_status = "NotStarted"
+    if latest_verification:
+        if latest_verification.decision == "Verified":
+            order_level_status = "Verified"
+        elif latest_verification.decision in ("Query", "Reject") and not latest_verification.resolved:
+            order_level_status = "Query"
+        elif latest_verification.decision in ("Query", "Reject") and latest_verification.resolved:
+            order_level_status = "Verified"
+
+    out = []
+    for line in drug_lines:
+        release = db.query(PharmacyRelease).filter(
+            PharmacyRelease.treatment_order_drug_line_id == line.id
+        ).order_by(PharmacyRelease.id.desc()).first()
+        preparation = db.query(PharmacyPreparation).filter(
+            PharmacyPreparation.treatment_order_drug_line_id == line.id
+        ).order_by(PharmacyPreparation.id.desc()).first()
+        if release:
+            status = "Released"
+        elif preparation:
+            status = "Preparing"
+        else:
+            status = order_level_status
+        out.append({"drug_line_id": line.id, "generic_name": line.generic_name, "status": status})
+    return out
+
+
 @router.get("/treatment/day-assessment")
 def get_treatment_day_assessment(
     patient_id: int, db: Session = Depends(get_cca_db),
@@ -4748,6 +5083,9 @@ def get_treatment_day_assessment(
         # normal workflow-sequencing wait: the treating oncologist hasn't written/signed the
         # next cycle's order yet. Never a real access denial -- this endpoint has no role gate.
         "order_note": None if order else "Waiting on the treating oncologist to write and sign the next Treatment Order -- Day-Care cannot proceed until then.",
+        # Item 3.10 -- informational only; the doctor can still choose any clearance_exit
+        # below regardless of what this shows.
+        "pharmacy_readiness": _pharmacy_readiness_for_order(db, order),
         "lab_parameters": [],
         "lab_parameters_note": "Live laboratory integration is not yet connected -- treatment-day lab values must be reviewed directly in the lab system before clearance.",
         "toxicity_history": [
@@ -4802,8 +5140,20 @@ async def record_toxicity(
     patient_id = _require_patient_id(body)
     _get_org_patient(db, patient_id, org_id)
 
+    # Core Oncology 4 Sections gap-fill, item 3.8 -- populate the already-declared session_id
+    # link from the patient's currently-open (most recent) TreatmentSession when one exists;
+    # an explicit session_id in the body always wins. Optional context only -- when neither is
+    # available, session_id stays None exactly as it always has.
+    session_id = body.get("session_id")
+    if session_id is None:
+        current_session = db.query(TreatmentSession).filter(
+            TreatmentSession.patient_id == patient_id
+        ).order_by(TreatmentSession.id.desc()).first()
+        session_id = current_session.id if current_session else None
+
     tox = ToxicityEvent(
         patient_id=patient_id,
+        session_id=session_id,
         term=term,
         grade=_coerce_int(body, "grade", 0),
         baseline_value=str(baseline),
@@ -4819,7 +5169,8 @@ async def record_toxicity(
             "id": tox.id,
             "term": tox.term,
             "grade": tox.grade,
-            "baseline_value": tox.baseline_value
+            "baseline_value": tox.baseline_value,
+            "session_id": tox.session_id,
         }
     }
 
@@ -5046,6 +5397,10 @@ async def record_clearance_decision(
             description=f"Decision by {actor}: {decision}. Reason: {reason}",
             treatment_plan_id=plan.id if plan else None, treatment_order_id=order.id,
             treatment_session_id=session.id,
+            # Core Oncology 4 Sections gap-fill, item 3.2 -- optional real day_no for the next
+            # cycle's session (e.g. Day 8 of a Day 1/Day 8 regimen), defaulting to None so
+            # _on_treatment_administered's own default (1) is unchanged for every existing caller.
+            next_day_no=body.get("day_no"),
         )
 
     elif decision == "DISCONTINUED":
@@ -6400,6 +6755,7 @@ def get_reaction_precautions(patient_id: int, db: Session = Depends(get_cca_db),
 def _extravasation_out(e: ExtravasationEvent) -> dict:
     return {
         "id": e.id, "patient_id": e.patient_id, "treatment_order_id": e.treatment_order_id,
+        "administration_id": e.administration_id,
         "agent": e.agent, "site": e.site, "symptoms": e.symptoms,
         "approx_exposure_volume": e.approx_exposure_volume, "line_status": e.line_status,
         "immediate_actions": e.immediate_actions, "escalation_notes": e.escalation_notes,
@@ -6441,8 +6797,20 @@ async def record_extravasation(
         _get_order_for_workspace(db, order_id, patient_id, _org_id(current_user))
     actor = _actor(current_user)
 
+    # Core Oncology 4 Sections gap-fill, item 3.6 -- per-drug attribution, mirroring
+    # record_reaction's own administration_id validation above.
+    administration_id = body.get("administration_id")
+    if administration_id:
+        admin_row = db.query(InfusionMedicationAdministration).filter(
+            InfusionMedicationAdministration.id == administration_id,
+            InfusionMedicationAdministration.patient_id == patient_id,
+        ).first()
+        if not admin_row or (order_id and admin_row.treatment_order_id != order_id):
+            raise HTTPException(422, "administration_id does not belong to this treatment order")
+
     event = ExtravasationEvent(
-        patient_id=patient_id, treatment_order_id=order_id, agent=agent, site=body.get("site"),
+        patient_id=patient_id, treatment_order_id=order_id, administration_id=administration_id,
+        agent=agent, site=body.get("site"),
         symptoms=symptoms, approx_exposure_volume=body.get("approx_exposure_volume"),
         line_status=body.get("line_status"), immediate_actions=body.get("immediate_actions"),
         escalation_notes=body.get("escalation_notes"), follow_up_notes=body.get("follow_up_notes"),
@@ -6465,6 +6833,7 @@ def _completion_out(c: TreatmentDayCompletion) -> dict:
     return {
         "id": c.id, "patient_id": c.patient_id, "treatment_order_id": c.treatment_order_id,
         "final_vitals": c.final_vitals, "final_symptoms": c.final_symptoms, "disposition": c.disposition,
+        "disposition_reason": c.disposition_reason,
         "tolerance": c.tolerance,
         "access_status": c.access_status, "patient_education_notes": c.patient_education_notes,
         "red_flags_given": c.red_flags_given,
@@ -6517,6 +6886,13 @@ async def record_completion(
     tolerance = body.get("tolerance")
     if tolerance and tolerance not in _COMPLETION_TOLERANCES:
         raise HTTPException(422, f"tolerance must be one of {', '.join(_COMPLETION_TOLERANCES)}")
+    # Core Oncology 4 Sections gap-fill, item 3.7 -- a reason is now required whenever the
+    # treatment day was not fully Completed as planned (Partially Completed/Not
+    # Completed/Discontinued); no existing test exercises a non-Completed disposition, so this
+    # is a genuinely new but safe validation.
+    disposition_reason = body.get("disposition_reason")
+    if disposition and disposition != "Completed" and not (disposition_reason and disposition_reason.strip()):
+        raise HTTPException(422, "disposition_reason is required when disposition is not 'Completed'")
 
     if db.query(TreatmentDayCompletion).filter(TreatmentDayCompletion.treatment_order_id == order_id).first():
         raise HTTPException(409, "This treatment order's nursing record is already completed and locked")
@@ -6535,6 +6911,7 @@ async def record_completion(
     completion = TreatmentDayCompletion(
         patient_id=patient_id, treatment_order_id=order_id, final_vitals=body.get("final_vitals"),
         final_symptoms=body.get("final_symptoms"), disposition=disposition, tolerance=tolerance,
+        disposition_reason=disposition_reason,
         access_status=body.get("access_status"), patient_education_notes=body.get("patient_education_notes"),
         red_flags_given=bool(body.get("red_flags_given", False)),
         next_treatment_date=datetime.strptime(next_date, "%Y-%m-%d").date() if next_date else None,
@@ -6823,8 +7200,19 @@ async def record_response_assessment(
     _get_org_patient(db, patient_id, org_id)
     actor = _actor(current_user)
 
+    # Core Oncology 4 Sections gap-fill, item 3.8 -- same optional cycle-link pattern as
+    # record_toxicity above: an explicit treatment_session_id in the body wins, otherwise the
+    # patient's currently-open (most recent) TreatmentSession is used when one exists.
+    treatment_session_id = body.get("treatment_session_id")
+    if treatment_session_id is None:
+        current_session = db.query(TreatmentSession).filter(
+            TreatmentSession.patient_id == patient_id
+        ).order_by(TreatmentSession.id.desc()).first()
+        treatment_session_id = current_session.id if current_session else None
+
     resp = ResponseAssessment(
         patient_id=patient_id,
+        treatment_session_id=treatment_session_id,
         framework="RECIST",
         framework_version="1.1",
         response_category=category,
@@ -6854,7 +7242,8 @@ async def record_response_assessment(
             "id": resp.id,
             "response_category": resp.response_category,
             "framework": resp.framework,
-            "confirmed": resp.confirmed
+            "confirmed": resp.confirmed,
+            "treatment_session_id": resp.treatment_session_id,
         }
     }
 

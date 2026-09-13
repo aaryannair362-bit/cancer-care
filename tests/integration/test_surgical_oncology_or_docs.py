@@ -25,6 +25,11 @@ def infusion_nurse(make_user, surgeon):
 
 
 @pytest.fixture
+def anaesthetist(make_user, surgeon):
+    return make_user(email="anaesthetist@surgical-or-docs-test.com", role="CCAAnaesthetist", organization_id=surgeon.organization_id)
+
+
+@pytest.fixture
 def surgeon_headers(auth_headers, surgeon):
     return auth_headers(surgeon)
 
@@ -40,6 +45,11 @@ def infusion_nurse_headers(auth_headers, infusion_nurse):
 
 
 @pytest.fixture
+def anaesthetist_headers(auth_headers, anaesthetist):
+    return auth_headers(anaesthetist)
+
+
+@pytest.fixture
 def patient(db_session, surgeon):
     p = CCAPatient(
         mrn="SURG-OR-0001", name="Surgical OR Docs Test Patient", age=57, sex="Male",
@@ -51,9 +61,12 @@ def patient(db_session, surgeon):
     return p
 
 
-def _create_and_schedule_plan(client, surgeon_headers, patient_id):
+def _create_and_schedule_plan(client, surgeon_headers, patient_id, anaesthetist_headers):
     """Drives the surgeon's own unmodified /api/cca/surgical-plans endpoints (already existed,
-    but previously had zero frontend/test coverage) from recommended through scheduled."""
+    but previously had zero frontend/test coverage) from recommended through scheduled.
+
+    R10 Anaesthetist cross-module requirement (Core Oncology 4 Sections gap-fill) -- a
+    Finalized, Cleared anaesthesia pre-op evaluation is now required before pre_op_ready."""
     created = client.post("/api/cca/surgical-plans", headers=surgeon_headers, json={
         "patient_id": patient_id, "procedure": "Modified radical mastectomy", "intent": "Curative",
         "anatomical_site": "Left breast",
@@ -61,16 +74,27 @@ def _create_and_schedule_plan(client, surgeon_headers, patient_id):
     assert created.status_code == 201, created.text
     plan_id = created.json()["surgical_plan"]["id"]
 
-    for target in ("surgeon_reviewed", "planned", "pre_op_ready", "scheduled"):
+    for target in ("surgeon_reviewed", "planned"):
+        moved = client.patch(f"/api/cca/surgical-plans/{plan_id}", headers=surgeon_headers, json={"status": target})
+        assert moved.status_code == 200, moved.text
+
+    pre_op = client.post(f"/api/cca/surgical-plans/{plan_id}/anaesthesia/pre-op", headers=anaesthetist_headers, json={
+        "asa_grade": "II", "medical_clearance_status": "Cleared", "anaesthetic_plan": "General anaesthesia.",
+    })
+    assert pre_op.status_code == 201, pre_op.text
+    finalized = client.post(f"/api/cca/anaesthesia/pre-op/{pre_op.json()['evaluation']['id']}/finalize", headers=anaesthetist_headers)
+    assert finalized.status_code == 200, finalized.text
+
+    for target in ("pre_op_ready", "scheduled"):
         moved = client.patch(f"/api/cca/surgical-plans/{plan_id}", headers=surgeon_headers, json={"status": target})
         assert moved.status_code == 200, moved.text
     return plan_id
 
 
-def test_surgical_plan_lifecycle_smoke(client, surgeon_headers, patient):
+def test_surgical_plan_lifecycle_smoke(client, surgeon_headers, patient, anaesthetist_headers):
     """The SurgicalPlan backend existed with zero test coverage before this phase -- a basic
     smoke test that the pre-existing lifecycle still works end-to-end."""
-    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id)
+    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id, anaesthetist_headers)
     listed = client.get(f"/api/cca/patients/{patient.id}/surgical-plans", headers=surgeon_headers)
     assert listed.status_code == 200
     assert listed.json()["surgical_plans"][0]["id"] == plan_id
@@ -81,8 +105,8 @@ def test_surgical_plan_lifecycle_smoke(client, surgeon_headers, patient):
 # Item 24: Intra-operative Monitoring
 # ---------------------------------------------------------------------------
 
-def test_intraop_monitoring_recorded_by_surgeon_and_or_nurse(client, surgeon_headers, or_nurse_headers, patient):
-    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id)
+def test_intraop_monitoring_recorded_by_surgeon_and_or_nurse(client, surgeon_headers, or_nurse_headers, patient, anaesthetist_headers):
+    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id, anaesthetist_headers)
 
     by_surgeon = client.post(f"/api/cca/surgical-plans/{plan_id}/intraop-monitoring", headers=surgeon_headers, json={
         "vitals": {"bp": "118/76", "pulse": "78", "spo2": "98%"}, "anaesthesia_status": "General, stable",
@@ -98,10 +122,10 @@ def test_intraop_monitoring_recorded_by_surgeon_and_or_nurse(client, surgeon_hea
     assert len(listed.json()["results"]) == 2
 
 
-def test_infusion_nurse_cannot_write_or_documentation(client, surgeon_headers, infusion_nurse_headers, patient):
+def test_infusion_nurse_cannot_write_or_documentation(client, surgeon_headers, infusion_nurse_headers, patient, anaesthetist_headers):
     """The Day Care Infusion Nurse is a different care setting -- must not be able to write OR
     documentation (see _require_surgical_team's docstring)."""
-    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id)
+    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id, anaesthetist_headers)
     denied = client.post(f"/api/cca/surgical-plans/{plan_id}/intraop-monitoring", headers=infusion_nurse_headers, json={
         "vitals": {"bp": "118/76"},
     })
@@ -112,8 +136,8 @@ def test_infusion_nurse_cannot_write_or_documentation(client, surgeon_headers, i
 # Item 25: Intra-operative Notes
 # ---------------------------------------------------------------------------
 
-def test_operative_note_requires_procedure_performed_and_never_overwrites_plan_field(client, surgeon_headers, patient):
-    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id)
+def test_operative_note_requires_procedure_performed_and_never_overwrites_plan_field(client, surgeon_headers, patient, anaesthetist_headers):
+    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id, anaesthetist_headers)
 
     missing = client.post(f"/api/cca/surgical-plans/{plan_id}/operative-notes", headers=surgeon_headers, json={
         "findings": "Tumour excised with clear margins.",
@@ -136,8 +160,8 @@ def test_operative_note_requires_procedure_performed_and_never_overwrites_plan_f
 # Item 26: Specimen Labelling and Lab Handoff
 # ---------------------------------------------------------------------------
 
-def test_specimen_chain_of_custody_progression(client, surgeon_headers, or_nurse_headers, patient):
-    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id)
+def test_specimen_chain_of_custody_progression(client, surgeon_headers, or_nurse_headers, patient, anaesthetist_headers):
+    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id, anaesthetist_headers)
 
     added = client.post(f"/api/cca/surgical-plans/{plan_id}/specimens", headers=or_nurse_headers, json={
         "specimen_label": "Left breast mass", "specimen_type": "Excisional biopsy", "container_type": "Formalin jar",
@@ -169,8 +193,8 @@ def test_specimen_chain_of_custody_progression(client, surgeon_headers, or_nurse
     assert received.json()["specimen"]["lab_accession_number"] == "PATH-2026-0042"
 
 
-def test_specimen_requires_label(client, surgeon_headers, patient):
-    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id)
+def test_specimen_requires_label(client, surgeon_headers, patient, anaesthetist_headers):
+    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id, anaesthetist_headers)
     missing = client.post(f"/api/cca/surgical-plans/{plan_id}/specimens", headers=surgeon_headers, json={})
     assert missing.status_code == 422
 
@@ -179,14 +203,14 @@ def test_specimen_requires_label(client, surgeon_headers, patient):
 # Item 27: Surgical Blood Transfusion Record
 # ---------------------------------------------------------------------------
 
-def test_surgical_blood_transfusion_requires_product_type_and_unit_id(client, surgeon_headers, patient):
-    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id)
+def test_surgical_blood_transfusion_requires_product_type_and_unit_id(client, surgeon_headers, patient, anaesthetist_headers):
+    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id, anaesthetist_headers)
     missing = client.post(f"/api/cca/surgical-plans/{plan_id}/blood-transfusions", headers=surgeon_headers, json={})
     assert missing.status_code == 422
 
 
-def test_surgical_blood_transfusion_records_and_lists(client, or_nurse_headers, surgeon_headers, patient):
-    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id)
+def test_surgical_blood_transfusion_records_and_lists(client, or_nurse_headers, surgeon_headers, patient, anaesthetist_headers):
+    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id, anaesthetist_headers)
 
     recorded = client.post(f"/api/cca/surgical-plans/{plan_id}/blood-transfusions", headers=or_nurse_headers, json={
         "product_type": "PRBC", "unit_id": "UNIT-OR-0001", "blood_group": "A+",
@@ -201,8 +225,8 @@ def test_surgical_blood_transfusion_records_and_lists(client, or_nurse_headers, 
     assert listed.json()["results"][0]["reaction_occurred"] is False
 
 
-def test_cross_org_surgical_plan_is_not_found(client, surgeon_headers, patient, make_user, auth_headers):
-    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id)
+def test_cross_org_surgical_plan_is_not_found(client, surgeon_headers, patient, make_user, auth_headers, anaesthetist_headers):
+    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id, anaesthetist_headers)
     other_org_nurse = make_user(email="other-org-ornurse@surgical-or-docs-test.com", role="CCASurgicalNurse")
     other_headers = auth_headers(other_org_nurse)
 

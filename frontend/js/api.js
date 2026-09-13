@@ -40,6 +40,7 @@ const ROLE_HOME = {
   CCAFinancialCounsellor: '/patient_financial_services.html',
   CCABiller: '/biller.html',
   CCAExternalMDTSpecialist: '/external_mdt_specialist.html',
+  CCAAnaesthetist: '/anaesthetist.html',
 };
 
 const NAV_ITEMS = [
@@ -63,6 +64,7 @@ const NAV_ITEMS = [
   { key: 'patient_financial_services', label: 'Finance / Billing', href: '/patient_financial_services.html', roles: ['Admin', 'CCAFinancialCounsellor'] },
   { key: 'biller', label: 'Biller', href: '/biller.html', roles: ['Admin', 'CCABiller'] },
   { key: 'external_mdt_specialist', label: 'External MDT Specialist', href: '/external_mdt_specialist.html', roles: ['Admin', 'CCAExternalMDTSpecialist'] },
+  { key: 'anaesthetist', label: 'Anaesthetist', href: '/anaesthetist.html', roles: ['Admin', 'CCAAnaesthetist'] },
   { key: 'ipd', label: 'Ward', href: '/ipd.html', roles: ['Doctor', 'Nurse', 'NursingStation', 'HeadNurse'] },
   { key: 'headnurse', label: 'Ward Oversight', href: '/headnurse.html', roles: ['HeadNurse'] },
   { key: 'pharmacy', label: 'Pharmacy', href: '/pharmacy.html', roles: ['Pharmacist', 'Admin'] },

@@ -143,6 +143,10 @@ CCA_ROLES = (
     # for what each one actually gates.
     "CCARadiationTechnologist", "CCARadiologyTechnician", "CCABiller",
     "CCAPatientRelationsExecutive", "CCAInpatientOncologyNurse",
+    # Core Oncology 4 Sections + 11 Additional Modules developer handoffs: R10 Anaesthetist
+    # (the only role from the 11-modules PDF in scope for this pass) -- see
+    # is_cca_anaesthetist below for what it gates.
+    "CCAAnaesthetist",
 )
 
 
@@ -286,6 +290,16 @@ def is_cca_inpatient_oncology_nurse(user: dict) -> bool:
     the general Nurse/HeadNurse/CCAInfusionNurse roles that stood in for this before, so
     existing access keeps working."""
     return user.get("role") == "CCAInpatientOncologyNurse"
+
+
+def is_cca_anaesthetist(user: dict) -> bool:
+    """R10 Anaesthetist (11 Additional Modules Detailed Developer Handoff, page 11) --
+    pre-operative evaluation/clearance, intra-operative anaesthesia record, and post-
+    anaesthesia recovery documentation (routers/cca_anaesthesia.py). Deliberately narrower
+    than is_cca_surgical_oncologist/is_cca_surgical_nurse: an Anaesthetist never writes
+    SurgicalPlan.procedure or SurgicalOperativeNote content (cross-module requirement: do not
+    alter surgeon-owned diagnosis/operative findings)."""
+    return user.get("role") == "CCAAnaesthetist"
 
 
 def can_sign_treatment_plan(user: dict) -> bool:

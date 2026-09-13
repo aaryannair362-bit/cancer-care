@@ -1714,10 +1714,12 @@
                                     ${['on_treatment','interrupted'].includes(p.rt_sub_status) ? `<button class="btn-outline" style="font-size:11px; padding:6px 10px;" onclick="completeRadiationPhase(${p.id})">Complete Phase</button>` : ''}
                                     <button class="btn-outline" style="font-size:11px; padding:6px 10px;" onclick="viewRadiationPhaseFractions(${p.id})">Fractions</button>
                                     ${['on_treatment','interrupted','completed'].includes(p.rt_sub_status) ? `<button class="btn-outline" style="font-size:11px; padding:6px 10px;" onclick="viewRadiationPhaseOtv(${p.id})">On-Treatment Visits</button>` : ''}
+                                    ${['on_treatment','interrupted','completed'].includes(p.rt_sub_status) ? `<button class="btn-outline" style="font-size:11px; padding:6px 10px;" onclick="viewRadiationPhaseInterruptions(${p.id})">Interruptions</button>` : ''}
                                 </div>
                             </div>
                             ${p.rt_sub_status === 'physics_qa' && p.physics_qa_note ? `<div style="font-size:11.5px; color:var(--ink-500); margin:-4px 0 10px; padding:0 4px;">Physics QA note: ${escapeHtml(p.physics_qa_note)}</div>` : ''}
                             <div id="rt-otv-${p.id}" style="display:none; margin:-4px 0 10px; padding:10px 14px; background:var(--bg-card-subtle); border-radius:var(--radius-md);"></div>
+                            <div id="rt-interruptions-${p.id}" style="display:none; margin:-4px 0 10px; padding:10px 14px; background:var(--bg-card-subtle); border-radius:var(--radius-md);"></div>
                             <div id="rt-fractions-${p.id}" style="display:none; margin:-4px 0 10px; padding:10px 14px; background:var(--bg-card-subtle); border-radius:var(--radius-md);"></div>
                         `).join('') : '<p style="font-size:12.5px; color:var(--ink-500);">No phases prescribed yet.</p>'}
                     </div>
@@ -1830,6 +1832,23 @@
                     : `${fractions.filter(f => f.status === 'delivered').length} of ${fractions.length} fractions delivered`;
                 el.innerHTML = `<div style="font-size:12px; font-weight:700; margin-bottom:6px;">${summaryLine}</div>` +
                     fractions.map(f => `<div style="font-size:12px; color:var(--ink-700); padding:3px 0;">#${f.fraction_number} — ${escapeHtml(f.status)}${f.delivered_dose_gy ? ' · ' + f.delivered_dose_gy + ' Gy' : ''}${f.variance_or_toxicity ? ' · ⚠ ' + escapeHtml(f.variance_or_toxicity) : ''}</div>`).join('');
+            } catch (err) { el.innerHTML = `<p style="color:var(--rose-badge-text); font-size:12px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        // Core Oncology 4 Sections gap-fill, item 4.4 -- surfaces gap_hours (computed at read
+        // time by the backend, never stored) alongside each interruption.
+        async function viewRadiationPhaseInterruptions(phaseId) {
+            const el = document.getElementById(`rt-interruptions-${phaseId}`);
+            if (el.style.display !== 'none') { el.style.display = 'none'; return; }
+            el.style.display = 'block';
+            el.innerHTML = 'Loading…';
+            try {
+                const data = await Api.get(`${CCA_API}/radiation-phases/${phaseId}/interruptions`);
+                const rows = data.interruptions || [];
+                el.innerHTML = `
+                    <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Interruptions (${rows.length})</div>
+                    ${rows.map(i => `<div style="font-size:12px; color:var(--ink-700); padding:4px 0; border-bottom:1px solid var(--line-subtle);">${escapeHtml(i.category || '')} — ${escapeHtml(i.reason)} ${i.gap_hours != null ? `<span class="badge badge-amber" style="font-size:10px;">${i.gap_hours}h gap</span>` : (i.end_at ? '' : '<span class="badge badge-rose" style="font-size:10px;">Ongoing</span>')}${i.compensation_plan ? `<div style="color:var(--ink-500); margin-top:2px;">Compensation: ${escapeHtml(i.compensation_plan)}</div>` : ''}</div>`).join('') || '<p style="font-size:12px; color:var(--ink-500);">None recorded.</p>'}
+                `;
             } catch (err) { el.innerHTML = `<p style="color:var(--rose-badge-text); font-size:12px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
         }
 

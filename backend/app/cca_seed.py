@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from .models_cca import (
-    CCAPatient, CCAConsent, CCAQueueEvent, CCAEncounter, CCAIntakeAssessment,
+    CCAPatient, CCAConsent, CCAQueueEvent, CCAEncounter, CCAEncounterVersion, CCAIntakeAssessment,
     MedicationReconciliationEntry, AdverseReactionHistoryEntry,
     CCADocument, ClinicalFact, CCAContradiction, CCACancerDiagnosis,
     CCABiomarkerResult, CCAOrder, CCAResult, StagingRecord, StagingEvidence,
@@ -44,7 +44,9 @@ from .models_cca_oncology_ext import (
     RadiationDiscrepancyRecord, RadiationPreTreatmentVerification,
     RadiationInVivoDosimetry, RadiationOncologyConsultation,
     SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
-    SurgicalStomaRecord, SurgicalComplicationRecord,
+    SurgicalStomaRecord, SurgicalComplicationRecord, SurgicalIntraOpNote,
+    AnaesthesiaPreOpEvaluation, AnaesthesiaPreOpEvaluationVersion,
+    AnaesthesiaIntraOpRecord, AnaesthesiaRecoveryRecord,
 )
 from .models_cca_inpatient import (
     InpatientAdmission, InpatientHistoryAndPhysical, InpatientProblemListItem,
@@ -134,7 +136,12 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # SurgicalSpecimen/SurgicalBloodTransfusion convention), even though SurgicalPlan
             # itself is a pre-existing omission from this reset (not introduced here).
             SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
-            SurgicalStomaRecord, SurgicalComplicationRecord,
+            SurgicalStomaRecord, SurgicalComplicationRecord, SurgicalIntraOpNote,
+            # R10 Anaesthetist module (Core Oncology 4 Sections + 11 Additional Modules
+            # developer handoffs) -- all three have their own patient_id.
+            # AnaesthesiaPreOpEvaluationVersion (no patient_id of its own) is deleted above via
+            # evaluation_ids lookup, before AnaesthesiaPreOpEvaluation itself here.
+            AnaesthesiaIntraOpRecord, AnaesthesiaRecoveryRecord, AnaesthesiaPreOpEvaluation,
             # All have their own patient_id (matching CCAFinancialCase, its parent, just below
             # -- previously CCAFinancialCase itself was a pre-existing omission from this
             # reset, leaving stale cases to re-attach to freshly recreated patients).
@@ -307,6 +314,30 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
                     db.query(CCARadiationPhase).filter(
                         CCARadiationPhase.id.in_(phase_ids)
                     ).delete(synchronize_session=False)
+            # CCAEncounterVersion has no patient_id of its own -- delete it via its parent
+            # encounter ids before CCAEncounter itself is deleted below (Core Oncology 4
+            # Sections gap-fill, item 1.5).
+            encounter_ids = [
+                row.id for row in db.query(CCAEncounter.id).filter(
+                    CCAEncounter.patient_id.in_(org_patient_ids)
+                ).all()
+            ]
+            if encounter_ids:
+                db.query(CCAEncounterVersion).filter(
+                    CCAEncounterVersion.encounter_id.in_(encounter_ids)
+                ).delete(synchronize_session=False)
+            # AnaesthesiaPreOpEvaluationVersion has no patient_id of its own -- delete it via
+            # its parent evaluation ids before AnaesthesiaPreOpEvaluation itself is deleted
+            # below (R10 Anaesthetist module).
+            anaesthesia_evaluation_ids = [
+                row.id for row in db.query(AnaesthesiaPreOpEvaluation.id).filter(
+                    AnaesthesiaPreOpEvaluation.patient_id.in_(org_patient_ids)
+                ).all()
+            ]
+            if anaesthesia_evaluation_ids:
+                db.query(AnaesthesiaPreOpEvaluationVersion).filter(
+                    AnaesthesiaPreOpEvaluationVersion.evaluation_id.in_(anaesthesia_evaluation_ids)
+                ).delete(synchronize_session=False)
             for model in child_models_by_patient:
                 db.query(model).filter(model.patient_id.in_(org_patient_ids)).delete(synchronize_session=False)
             # Cancer Episode + Line of Therapy (final gap-closing round) -- LineOfTherapy has

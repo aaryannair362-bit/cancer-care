@@ -634,11 +634,19 @@ async function renderNexusBrief(containerId, patientId) {
         container.innerHTML = keys.map((key) => {
             const sec = sections[key];
             const num = (key.match(/^\d+/) || ['?'])[0];
+            // Core Oncology 4 Sections gap-fill, item 1.4 -- the Must-Not-Miss section is
+            // synthesized from unverified_facts/contradictions (AI-suggested, not yet
+            // clinician-verified), unlike every other NEXUS section which is built strictly
+            // from VERIFIED facts (see cca_engine.py's synthesize_nexus_brief). Previously both
+            // rendered identically, giving no visual cue that this one section carries a
+            // different evidentiary weight.
+            const isUnverified = key === '14_must_not_miss';
             return `
-                <div class="section-card" style="margin-bottom:10px;">
-                    <div class="section-title" style="font-size:13px; display:flex; gap:8px; align-items:baseline;">
+                <div class="section-card" style="margin-bottom:10px; ${isUnverified ? 'border-left:3px solid var(--amber-badge-text, #b45309); background:var(--amber-badge-bg, #fffbeb);' : ''}">
+                    <div class="section-title" style="font-size:13px; display:flex; gap:8px; align-items:baseline; flex-wrap:wrap;">
                         <span style="font-family:monospace; color:var(--ink-500); font-size:11px;">${escapeHtml(num)}</span>
                         ${escapeHtml(sec.title || key)}
+                        ${isUnverified ? '<span class="badge badge-amber" style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.3px;" title="Synthesized from AI-extracted facts not yet clinician-verified">AI-suggested · Unverified</span>' : ''}
                     </div>
                     <p style="font-size:12.5px; color:var(--ink-700); line-height:1.6; margin-top:6px;">${escapeHtml(sec.content || '')}</p>
                 </div>
