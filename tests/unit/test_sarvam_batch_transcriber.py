@@ -83,7 +83,7 @@ def _install_fake_sdk(monkeypatch, job):
 
 @pytest.fixture(autouse=True)
 def _api_key(monkeypatch):
-    monkeypatch.setattr(batch.settings, "SARVAM_API_KEY", "test-key")
+    monkeypatch.setattr(batch.settings, "SARVAM_STT_API_KEY", "test-key")
 
 
 def test_transcribe_long_audio_returns_transcript_on_success(monkeypatch):
@@ -110,7 +110,7 @@ def test_transcribe_long_audio_uses_saaras_v3_translate_mode(monkeypatch):
 
 
 def test_transcribe_long_audio_raises_without_api_key(monkeypatch):
-    monkeypatch.setattr(batch.settings, "SARVAM_API_KEY", "")
+    monkeypatch.setattr(batch.settings, "SARVAM_STT_API_KEY", "")
     with pytest.raises(ValueError):
         batch.transcribe_long_audio(b"x", "audio/webm", "recording.webm")
 

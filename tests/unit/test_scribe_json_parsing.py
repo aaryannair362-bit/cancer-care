@@ -69,13 +69,59 @@ def test_generate_json_extracts_json_embedded_in_prose(engine):
     assert result == payload
 
 
-def test_generate_json_falls_back_on_malformed_json(engine):
+def test_generate_json_returns_empty_dict_on_malformed_json_with_no_fallback(engine):
+    """Regression: _generate_json used to hand EVERY caller the scribe-note-shaped
+    _fallback_extract dict on a parse failure, regardless of what shape that caller actually
+    expected -- classify_and_extract_page (page_type/confidence/facts),
+    extract_clinical_facts ({"facts": [...]}) and generate_discharge_summary
+    (admissionSummary/hospitalCourse/...) would silently get a dict with none of their keys
+    and treat it as "the model said nothing", instead of the caller's own, correct empty-dict
+    handling. `fallback` must now be opt-in per call site; with none supplied, a malformed
+    response degrades to {} instead of a wrong-shaped dict."""
     _stub_call(engine, raw_return="This is not JSON at all { broken")
     result = engine._generate_json("prompt")
-    # fallback path must still return a usable dict with every expected key
+    assert result == {}
+
+
+def test_generate_json_uses_supplied_fallback_on_malformed_json(engine):
+    """The scribe-note callers (_extract_note_fields, translate_prescription) explicitly pass
+    fallback=self._fallback_extract and must still get the regex-recovered dict back."""
+    _stub_call(engine, raw_return="This is not JSON at all { broken")
+    result = engine._generate_json("prompt", fallback=engine._fallback_extract)
     assert DEFAULT_KEYS.issubset(result.keys())
     assert isinstance(result["medications"], list)
     assert isinstance(result["labTests"], list)
+
+
+def test_generate_json_retries_once_on_parse_failure_before_falling_back(engine):
+    """A JSON parse failure gets one same-prompt retry before giving up -- verified live, a
+    reasoning-capable model occasionally emits almost-valid JSON with a stray formatting slip
+    that a retry often just doesn't repeat."""
+    calls = []
+
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000):
+        calls.append(1)
+        if len(calls) == 1:
+            return "not json { broken"
+        return json.dumps({"page_type": "LAB", "confidence": 0.9, "facts": []})
+
+    engine._call_groq_api = _fake
+    result = engine._generate_json("prompt")
+    assert len(calls) == 2
+    assert result == {"page_type": "LAB", "confidence": 0.9, "facts": []}
+
+
+def test_generate_json_gives_up_after_one_retry(engine):
+    calls = []
+
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000):
+        calls.append(1)
+        return "still not json { broken"
+
+    engine._call_groq_api = _fake
+    result = engine._generate_json("prompt")
+    assert len(calls) == 2  # original attempt + exactly one retry, then gives up
+    assert result == {}
 
 
 def test_generate_json_returns_empty_dict_when_groq_call_raises(engine):

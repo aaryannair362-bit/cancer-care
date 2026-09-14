@@ -88,7 +88,7 @@ def _install_fake_sdk(monkeypatch, jobs):
 
 @pytest.fixture(autouse=True)
 def _api_key(monkeypatch):
-    monkeypatch.setattr(ocr_service.settings, "SARVAM_API_KEY", "test-key")
+    monkeypatch.setattr(ocr_service.settings, "SARVAM_OCR_API_KEY", "test-key")
 
 
 @pytest.fixture(autouse=True)

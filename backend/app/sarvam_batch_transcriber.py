@@ -70,10 +70,10 @@ def transcribe_long_audio(audio_bytes: bytes, content_type: str, filename: str) 
     audio_bytes or the returned transcript above DEBUG (same PHI convention as scribe.py and
     the retired sarvam_transcriber.py).
     """
-    if not settings.SARVAM_API_KEY:
-        raise ValueError("Sarvam API key not configured. Set SARVAM_API_KEY in environment.")
+    if not settings.SARVAM_STT_API_KEY:
+        raise ValueError("Sarvam API key not configured. Set SARVAM_STT_API_KEY (or SARVAM_API_KEY) in environment.")
 
-    client = SarvamAI(api_subscription_key=settings.SARVAM_API_KEY)
+    client = SarvamAI(api_subscription_key=settings.SARVAM_STT_API_KEY)
     # get_upload_links()/upload_file() key off the file's basename+extension (both to name the
     # blob and, client-side, to guess a Content-Type for the PUT) -- keep whatever extension the
     # browser's recording actually produced (webm/mp4) rather than inventing one.

@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import time
+from typing import Callable, Optional
 import requests
 from .config import settings
 from . import drug_matcher
@@ -212,7 +213,29 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
         # parses. Easy to get wrong by habit; there is no shared precedent in this file.
         return (result.get("text") or "").strip()
 
-    def _generate_json(self, prompt: str, system: str = None, temperature: float = 0.3, max_tokens: int = 3000) -> dict:
+    def _generate_json(
+        self, prompt: str, system: str = None, temperature: float = 0.3, max_tokens: int = 3000,
+        fallback: Optional[Callable[[str], dict]] = None, _retry: int = 0,
+    ) -> dict:
+        """
+        Calls Groq expecting a JSON object back. `fallback` is caller-specific: pass
+        self._fallback_extract only from the scribe-note callers (_extract_note_fields,
+        translate_prescription) whose schema it actually knows how to regex-recover
+        (chiefComplaint/hpi/...). Every OTHER caller (classify_and_extract_page,
+        extract_clinical_facts, generate_discharge_summary, _merge_chunk_drafts -- each with
+        its own, different JSON shape) must leave this unset and get {} on failure instead --
+        passing them the scribe-note fallback used to silently hand back a wrong-shaped dict
+        with none of their expected keys, which every caller's own result.get(...) defaulting
+        then swallowed as "the model had nothing to say" instead of a real, loggable failure.
+        Confirmed live: this is exactly what made classify_and_extract_page collapse a page to
+        UNCLASSIFIED/no facts on a single malformed response instead of surfacing it.
+
+        Retries the call once (not more -- a second identical failure is unlikely to be
+        transient) on a JSON parse failure before giving up to `fallback`/{} -- verified live,
+        a reasoning-capable model occasionally emits almost-valid JSON with a stray formatting
+        slip; a same-prompt retry often just gets a clean response the second time, which is
+        cheaper than losing that call's entire result.
+        """
         try:
             raw = self._call_groq_api(prompt, system, temperature, max_tokens)
             logger.debug("RAW RESPONSE: %s...", raw[:500])
@@ -239,7 +262,7 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
                 logger.warning("Groq returned valid JSON of the wrong shape (%s, expected dict)",
                                type(result).__name__)
                 logger.debug("Wrong-shape content: %s", cleaned[:200])
-                return self._fallback_extract(raw)
+                return fallback(raw) if fallback else {}
             return result
         except json.JSONDecodeError as e:
             logger.error("JSON parsing error: %s", e)
@@ -258,7 +281,10 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
                         return result
                 except json.JSONDecodeError:
                     pass
-            return self._fallback_extract(raw)
+            if _retry < 1:
+                logger.warning("Retrying Groq call once after JSON parse failure")
+                return self._generate_json(prompt, system, temperature, max_tokens, fallback=fallback, _retry=_retry + 1)
+            return fallback(raw) if fallback else {}
         except Exception as e:
             logger.error("Unexpected error in _generate_json: %s", e)
             return {}
@@ -377,7 +403,7 @@ Return a JSON object with the following structure:
     "advice": "Clinical advice, warnings and instructions -- INCLUDING generic home-care instructions with no named product (gargling with salt water, hydration, rest, ice/warm compress, steam inhalation, follow-up timing). These never belong in medications -- see system prompt rule 8",
     "labTests": ["list of recommended tests"]
 }}"""
-        result = self._generate_json(prompt, temperature=0.3)
+        result = self._generate_json(prompt, temperature=0.3, fallback=self._fallback_extract)
         for key, default_value in self._NOTE_DEFAULT_FIELDS.items():
             if key not in result or result[key] is None:
                 result[key] = default_value
@@ -532,7 +558,7 @@ Prescription:
 {json.dumps(draft, indent=2)}
 
 Keep drug names in English. Translate descriptions, instructions, and test names. Return pure JSON."""
-        result = self._generate_json(prompt, temperature=0.3)
+        result = self._generate_json(prompt, temperature=0.3, fallback=self._fallback_extract)
         default = {
             "chiefComplaint": "", "hpi": "", "physicalExam": "", "primaryDiagnosis": "",
             "differentialDiagnosis": "", "medications": [], "advice": "", "labTests": []

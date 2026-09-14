@@ -677,12 +677,13 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
     info) can need more than 3000 tokens to enumerate every fact as JSON with a verbatim quote
     each -- verified live, the exact same real document intermittently (not always -- a
     generation-to-generation, non-deterministic truncation) had its response cut off mid-JSON at
-    the 3000-token default, which _generate_json's malformed-JSON fallback cannot recover into
-    this function's {"facts": [...]} shape (that fallback only ever produces the unrelated
-    scribe_transcript() shape), silently yielding zero facts despite real, extractable content
-    in the document. Also asking for SHORTER verbatim spans reduces the same pressure further
-    without asking the model to extract less -- both changes address the actual overflow, not
-    just its symptom."""
+    the 3000-token default. Also asking for SHORTER verbatim spans reduces the same pressure
+    further without asking the model to extract less -- both changes address the actual
+    overflow, not just its symptom. (_generate_json now also retries once and never hands this
+    call a scribe-shaped fallback it can't use -- see that function's docstring -- so a
+    malformed response degrades to {} instead of a silently wrong-shaped dict, but the token
+    headroom here still matters: fewer malformed responses in the first place beats recovering
+    from them.)"""
     if not document_text or not document_text.strip():
         return []
 

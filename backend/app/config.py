@@ -24,9 +24,18 @@ class Settings(BaseSettings):
     # working value removes that trap regardless of the env var.
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
     # Sarvam AI's Saaras v3 (sarvam_batch_transcriber.py) -- audio transcription engine
-    # purpose-built for Hindi/English medical speech and code-switching. Also used, same key,
-    # for OCR (see OCR_PROVIDER below and ocr_service.py) -- one vendor credential, two features.
+    # purpose-built for Hindi/English medical speech and code-switching. Legacy shared
+    # credential, kept only as the fallback SARVAM_OCR_API_KEY/SARVAM_STT_API_KEY use below when
+    # a deployment hasn't been given their own dedicated keys.
     SARVAM_API_KEY: str = os.getenv("SARVAM_API_KEY", "")
+    # Split, feature-specific Sarvam credentials: Document AI (OCR) and Batch Speech-to-Text
+    # (Scribe's audio transcription) are billed and rate-limited independently on Sarvam's side
+    # per key, so a burst on one feature can no longer exhaust the other's quota by sharing one
+    # account. Each falls back to the shared SARVAM_API_KEY above (resolved post-construction
+    # below, same reason GROQ_API_KEY_Prod is) when its own dedicated key isn't set, so a
+    # deployment that hasn't been given split keys yet keeps working unchanged.
+    SARVAM_OCR_API_KEY: str = os.getenv("SARVAM_OCR_API_KEY", "")
+    SARVAM_STT_API_KEY: str = os.getenv("SARVAM_STT_API_KEY", "")
     TRANSCRIPTION_PROVIDER: str = os.getenv("TRANSCRIPTION_PROVIDER", "sarvam")
     # The finalized, tested model as of this writing (verified live against the real Batch
     # Speech-to-Text API) -- see sarvam_batch_transcriber.py. Not every model Sarvam offers
@@ -79,12 +88,19 @@ settings = Settings()
 if settings.GROQ_API_KEY_Prod:
     settings.GROQ_API_KEY = settings.GROQ_API_KEY_Prod
 
-# No explicit OCR_PROVIDER override: default to Sarvam Document AI only when a Sarvam key is
-# actually configured, so a deployment/test run with no SARVAM_API_KEY keeps working exactly as
-# it always did (local RapidOCR only) rather than silently trying an external call with no
+# Each dedicated Sarvam key falls back to the shared SARVAM_API_KEY when not explicitly set --
+# see the SARVAM_OCR_API_KEY/SARVAM_STT_API_KEY declarations above for why they're split.
+if not settings.SARVAM_OCR_API_KEY:
+    settings.SARVAM_OCR_API_KEY = settings.SARVAM_API_KEY
+if not settings.SARVAM_STT_API_KEY:
+    settings.SARVAM_STT_API_KEY = settings.SARVAM_API_KEY
+
+# No explicit OCR_PROVIDER override: default to Sarvam Document AI only when a Sarvam OCR key is
+# actually configured, so a deployment/test run with no Sarvam key keeps working exactly as it
+# always did (local RapidOCR only) rather than silently trying an external call with no
 # credential for it.
 if not settings.OCR_PROVIDER:
-    settings.OCR_PROVIDER = "sarvam" if settings.SARVAM_API_KEY else "local"
+    settings.OCR_PROVIDER = "sarvam" if settings.SARVAM_OCR_API_KEY else "local"
 
 _INSECURE_DEFAULT_SECRET_KEY = "your-super-secret-key-change-this-in-production"
 if settings.SECRET_KEY == _INSECURE_DEFAULT_SECRET_KEY:

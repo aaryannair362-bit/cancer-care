@@ -25,7 +25,7 @@ Language: RapidOCR's bundled models target Latin-script text; documents in non-L
 (e.g. Devanagari) are out of scope, same limitation docTR had. No per-page or per-request timeout
 is actually enforced in code -- see OCR_BENCHMARK.md's Production behavior section.
 
-OCR_PROVIDER="sarvam" (config.py; the default whenever SARVAM_API_KEY is configured) offloads
+OCR_PROVIDER="sarvam" (config.py; the default whenever SARVAM_OCR_API_KEY is configured) offloads
 OCR to Sarvam's Document AI (Sarvam Vision 1.5) instead of running RapidOCR in this process at
 all -- see _extract_via_sarvam() below. This addresses the two production failure modes RapidOCR
 can't: it moves the compute off Render's free-tier process entirely (no more competing with
@@ -442,12 +442,12 @@ def _run_sarvam_job_and_read_zip(client, file_bytes: bytes, ext: str) -> tuple[s
 
 
 def _extract_via_sarvam(content: bytes, content_type: str) -> dict[str, Any]:
-    if not settings.SARVAM_API_KEY:
+    if not settings.SARVAM_OCR_API_KEY:
         raise ValueError("Sarvam API key not configured.")
     if content_type not in _SARVAM_DOC_AI_CONTENT_TYPES:
         raise ValueError(f"Sarvam Document AI does not support {content_type!r}")
 
-    client = SarvamAI(api_subscription_key=settings.SARVAM_API_KEY)
+    client = SarvamAI(api_subscription_key=settings.SARVAM_OCR_API_KEY)
 
     if content_type == "application/pdf":
         from pypdf import PdfReader
@@ -503,7 +503,7 @@ def _extract_via_sarvam(content: bytes, content_type: str) -> dict[str, Any]:
 def extract_document(content: bytes, content_type: str) -> dict[str, Any]:
     """
     Extracts text (+ derived clinical signals) from a PDF or image. Tries Sarvam Document AI
-    first when OCR_PROVIDER="sarvam" (config.py's default whenever SARVAM_API_KEY is set) --
+    first when OCR_PROVIDER="sarvam" (config.py's default whenever SARVAM_OCR_API_KEY is set) --
     see this module's docstring for why. On ANY failure from that path (network error, quota,
     unsupported file type, an unexpected response shape), falls back to the local RapidOCR path
     (_extract_local) automatically, so Sarvam being briefly unavailable can never take document

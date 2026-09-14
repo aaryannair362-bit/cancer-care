@@ -34,7 +34,8 @@ os.environ["GROQ_MODEL"] = "test-model"
 # sarvam_provider fixture) rather than relying on this global ever changing.
 os.environ["TRANSCRIPTION_PROVIDER"] = "whisper"
 # Same reasoning as TRANSCRIPTION_PROVIDER above: config.py's OCR_PROVIDER defaults to "sarvam"
-# whenever a SARVAM_API_KEY is configured (see backend/.env in a real dev checkout), but the
+# whenever a SARVAM_OCR_API_KEY (or the shared SARVAM_API_KEY) is configured (see backend/.env
+# in a real dev checkout), but the
 # existing OCR test suite (test_patient_document_ocr.py's direct extract_document() calls) was
 # written against the local RapidOCR engine and must stay deterministic/offline. Tests that
 # specifically exercise the Sarvam OCR path override this per-test via monkeypatch.
