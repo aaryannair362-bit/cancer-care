@@ -665,12 +665,33 @@ FACT_TYPES = (
     "COMORBIDITY", "MEDICATION", "ALLERGY",
 )
 
+# Shared by extract_clinical_facts (below) and classify_and_extract_page (further down) -- both
+# walk their input text in slices of this size, one LLM call per slice, rather than truncating
+# to a single call's worth of text. No count ceiling on either: a real document is walked in
+# full however many calls that takes, however large it is -- see both functions' docstrings for
+# the real documents (data_insurance/) that motivated removing the truncation/ceiling this
+# constant used to have paired with it.
+_PAGE_EXTRACTION_SLICE_CHARS = 6000
+
 
 def extract_clinical_facts(document_text: str) -> List[Dict]:
     """AI-drafts candidate (fact_type, value, verbatim, confidence) tuples from a document's
     OCR'd text. Never raises: an extraction failure (Groq error, malformed response, wrong
-    shape) yields an empty list -- the document still gets ingested with its raw OCR text, it
-    just has zero PROPOSED facts for the clinician to review, rather than the request failing.
+    shape) on any one slice just contributes nothing from that slice -- the document still gets
+    ingested with its raw OCR text, it just has fewer PROPOSED facts for the clinician to
+    review, rather than the request failing.
+
+    Walks the ENTIRE document in bounded _PAGE_EXTRACTION_SLICE_CHARS-sized slices (one
+    extraction call per slice, merged and deduped by (fact_type, value)) rather than truncating
+    to a single call's worth of text -- this used to cap at the first 8000 characters, silently
+    making every later page of a multi-page document invisible to this pass. Verified live: a
+    single embedded page image alone (Sarvam Document AI's markdown output embeds full-res page
+    images inline as base64 -- see ocr_service._BASE64_IMAGE_PATTERN) could consume the entire
+    8000-character budget before any real page content was ever reached, on documents far short
+    of what a real multi-page hospital record (see data_insurance/) actually contains. No slice
+    count ceiling either, for the same reason -- a large real document is walked in full, however
+    many calls that takes; classify_and_extract_page's per-page/per-chunk pass already does the
+    same for the same reason (see that function's docstring point 4).
 
     max_tokens is raised above _call_groq_api's 3000-token default deliberately: a document
     with genuinely rich content (e.g. a full metabolic panel plus imaging findings plus staging
@@ -696,33 +717,43 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
         'roughly 15 words>", "confidence": <0.0-1.0>}]}. If nothing relevant is found, return '
         '{"facts": []}. Never include markdown or commentary outside the JSON object.'
     )
-    prompt = f"Extract clinical facts from this document:\n\n{document_text[:8000]}"
 
-    try:
-        result = scribe._generate_json(prompt, system=system, max_tokens=6000)
-    except Exception:
-        return []
+    slices = [
+        document_text[offset:offset + _PAGE_EXTRACTION_SLICE_CHARS]
+        for offset in range(0, len(document_text), _PAGE_EXTRACTION_SLICE_CHARS)
+    ]
 
-    facts = result.get("facts") if isinstance(result, dict) else None
-    if not isinstance(facts, list):
-        return []
-
-    cleaned: List[Dict] = []
-    for f in facts:
-        if not isinstance(f, dict):
+    facts: List[Dict] = []
+    seen_facts: set = set()
+    for slice_text in slices:
+        prompt = f"Extract clinical facts from this document:\n\n{slice_text}"
+        try:
+            result = scribe._generate_json(prompt, system=system, max_tokens=6000)
+        except Exception:
             continue
-        fact_type = f.get("fact_type")
-        value = f.get("value")
-        if fact_type not in FACT_TYPES or not value:
+        raw_facts = result.get("facts") if isinstance(result, dict) else None
+        if not isinstance(raw_facts, list):
             continue
-        confidence = f.get("confidence")
-        cleaned.append({
-            "fact_type": fact_type,
-            "value": str(value)[:500],
-            "verbatim": str(f.get("verbatim") or "")[:1000],
-            "confidence": confidence if isinstance(confidence, (int, float)) and 0 <= confidence <= 1 else 0.75,
-        })
-    return cleaned
+        for f in raw_facts:
+            if not isinstance(f, dict):
+                continue
+            fact_type = f.get("fact_type")
+            value = f.get("value")
+            if fact_type not in FACT_TYPES or not value:
+                continue
+            value = str(value)[:500]
+            key = (fact_type, value)
+            if key in seen_facts:
+                continue
+            seen_facts.add(key)
+            confidence = f.get("confidence")
+            facts.append({
+                "fact_type": fact_type,
+                "value": value,
+                "verbatim": str(f.get("verbatim") or "")[:1000],
+                "confidence": confidence if isinstance(confidence, (int, float)) and 0 <= confidence <= 1 else 0.75,
+            })
+    return facts
 
 
 def extract_deterministic_lab_facts(signals: Optional[Dict]) -> List[Dict]:
@@ -734,8 +765,8 @@ def extract_deterministic_lab_facts(signals: Optional[Dict]) -> List[Dict]:
     path instead of a second bespoke one.
 
     A supplement, not a replacement: it never misses a recognisable lab line purely because a
-    document is long (extract_clinical_facts truncates at 8000 characters; classify_and_extract_
-    page now slices a large page/chunk into multiple bounded LLM calls instead of truncating),
+    document is long (extract_clinical_facts and classify_and_extract_page both walk their whole
+    input in bounded slices rather than truncating -- see extract_clinical_facts's docstring),
     but it also can't read messy/unstructured phrasing the way the LLM passes can -- both keep
     running independently.
 
@@ -813,17 +844,6 @@ _DOC_CLASS_TO_PAGE_TYPE = {
     "UNCLASSIFIED": "UNCLASSIFIED",
 }
 
-# See classify_and_extract_page point 4: a page/chunk's text is walked in slices this size
-# rather than truncated, so a Sarvam chunk (up to 10 bundled pages of markdown) gets full
-# coverage instead of only its first ~6000 characters.
-_PAGE_EXTRACTION_SLICE_CHARS = 6000
-# Resource guard, not a real-document limit: 30 slices * 6000 chars = 180,000 characters, well
-# past any real single page/chunk's dense report content (Sarvam already caps a chunk at 10
-# pages; local OCR's "chunk" is a single physical page). Only binds on pathologically large/
-# garbled OCR text, and degrades to "later slices dropped" rather than raising.
-_MAX_PAGE_EXTRACTION_SLICES = 30
-
-
 def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
     """
     Per-page classifier: the LLM is authoritative for page type, with a free deterministic
@@ -855,8 +875,12 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
        one slice -- previously only the first slice's worth of a dense multi-page chunk ever
        reached the LLM and every page after it in that chunk silently contributed zero AI-drafted
        facts (the deterministic lab-value scanner still caught lab lines there, but nothing else
-       fact-type-wise). Facts from every slice are merged and deduped by (fact_type, value); the
-       page_type/confidence used is from the first slice that returned a usable one.
+       fact-type-wise). No cap on how many slices a chunk is walked into either (an earlier
+       30-slice/180,000-character ceiling here silently dropped anything past it, on the same
+       reasoning that removed extract_clinical_facts's own truncation -- see that function's
+       docstring): a large real chunk is walked in full, however many calls that takes. Facts
+       from every slice are merged and deduped by (fact_type, value); the page_type/confidence
+       used is from the first slice that returned a usable one.
 
     Returns {"page_type": <one of PAGE_TYPES>, "confidence": float, "facts": List[Dict]}. Never
     raises -- degrades to the deterministic fallback page_type (or UNCLASSIFIED/0.0 if that also
@@ -896,7 +920,7 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
     slices = [
         text[offset:offset + _PAGE_EXTRACTION_SLICE_CHARS]
         for offset in range(0, len(text), _PAGE_EXTRACTION_SLICE_CHARS)
-    ][:_MAX_PAGE_EXTRACTION_SLICES]
+    ]
 
     facts: List[Dict] = []
     seen_facts: set = set()

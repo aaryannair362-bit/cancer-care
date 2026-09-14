@@ -303,11 +303,12 @@ def _split_pdf_into_chunks(content: bytes, max_pages: int) -> list[tuple[int, by
 # `![...](data:image/...;base64,<data>)` -- NOT documented in advance, found by running a real
 # scanned multi-page document through the live API: on one real 10-page report this was 20
 # embedded images consuming 95% of the returned "text" (623,713 of 625,492 characters). Left
-# in place, this defeated clinical fact extraction two ways: extract_clinical_facts() only
-# sends the first 8000 characters to Groq, so a document's actual content past the first
-# embedded image (often within the first page) never reached the model at all; and even
-# without that cap, feeding a fact-extraction prompt 95% base64 noise wastes tokens and risks
-# hitting context limits. Strip these blocks -- they're never useful as "text" in any
+# in place, this defeated clinical fact extraction: extract_clinical_facts()/
+# classify_and_extract_page() both walk their input in bounded slices (see the former's
+# docstring), and feeding those slices 95% base64 noise instead of real page content wastes
+# tokens, risks hitting context limits, and pushes a slice's real text later into a call that
+# only reaches it after burning most of that slice's budget on the image. Strip these blocks --
+# they're never useful as "text" in any
 # downstream consumer (_clinical_signals()'s regex, extract_clinical_facts(), the stored
 # excerpt) -- while leaving Sarvam's own AI-generated alt-text captions for figures (e.g. "The
 # image displays a circular blue ink stamp...") in place, since those already occasionally

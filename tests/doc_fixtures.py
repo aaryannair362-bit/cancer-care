@@ -51,12 +51,11 @@ def _render_pdf(story: list) -> bytes:
 
 
 def huge_lab_report_pdf(pages: int = 90, lines_per_page: int = 30) -> bytes:
-    """A synthetic multi-page (default 90) lab/pathology report -- far past
-    extract_clinical_facts's 8000-character whole-document truncation and past Sarvam's
-    10-page-per-job chunk boundary (9 chunks at the default page count), so this exercises
-    classify_and_extract_page's per-chunk fact extraction (Tier 2) across the FULL document,
-    and ocr_service._clinical_signals's lab-value scanner (Tier 3) on lines far beyond what any
-    single truncated LLM call would ever see."""
+    """A synthetic multi-page (default 90) lab/pathology report -- far past a single LLM call's
+    worth of text and past Sarvam's 10-page-per-job chunk boundary (9 chunks at the default page
+    count), so this exercises classify_and_extract_page's per-chunk fact extraction (Tier 2)
+    across the FULL document, and ocr_service._clinical_signals's lab-value scanner (Tier 3) on
+    lines far beyond what any single LLM call would ever see in one prompt."""
     story = [Paragraph(f"Synthetic Lab & Pathology Report -- Page batch 1 of {pages}", _HEADING_STYLE)]
     for page_num in range(pages):
         if page_num > 0:

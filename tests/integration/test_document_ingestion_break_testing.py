@@ -154,11 +154,12 @@ def test_dense_lab_report_yields_many_deterministic_lab_facts_with_no_llm(client
 def test_huge_90_page_document_extracts_lab_facts_from_pages_the_llm_pass_never_truncated_reach(
     client, headers, patient_id, db_session,
 ):
-    """extract_clinical_facts (the whole-document LLM pass) truncates at its own first 8000
-    characters -- far short of a 90-page report. The deterministic scanner has no such
-    truncation (it runs over the full raw OCR'd text), so it must still find lab values placed
-    deep in the document. Blocking Groq entirely (the default in this suite) makes this an
-    unambiguous test of the deterministic path alone."""
+    """extract_clinical_facts (the whole-document LLM pass) is blocked entirely in this suite
+    (real Groq calls are blocked by default -- see this file's module docstring), so it
+    contributes nothing here regardless of document length. The deterministic scanner has no
+    such dependency (it runs over the full raw OCR'd text, no LLM involved), so it must still
+    find lab values placed deep in a 90-page document. This makes the test an unambiguous check
+    of the deterministic path alone."""
     res = _upload(client, headers, patient_id, "huge_labs.pdf", df.build("huge_lab_report"), "application/pdf")
     assert res.status_code == 201, res.text
     assert res.json()["document"]["page_count"] == 90

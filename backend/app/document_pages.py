@@ -46,16 +46,16 @@ def process_document_pages(document_id: int, content: bytes, content_type: str, 
             return  # document was deleted/never committed -- nothing to attach pages to
 
         # upload_document already ran extract_clinical_facts() over the WHOLE document's text
-        # (truncated to its own first 8000 chars) plus extract_deterministic_lab_facts()'s
-        # full-text lab-value scan, before scheduling this background task, and committed those
-        # as ClinicalFact rows. classify_and_extract_page() now ALWAYS runs its own LLM fact
-        # extraction per page/chunk (not just when the page isn't confidently keyword-classified
-        # -- see that function's docstring for why), so for a short document a page's text can
-        # fully overlap what the whole-document pass already saw and (re-)draft the identical
-        # fact a second time, with no de-dup between the two passes. Tracking what already exists
-        # for this document up front keeps the genuinely useful case (a long document's later
-        # pages/chunks, past that 8000-char truncation, contributing facts the whole-document pass
-        # never saw) while dropping true repeats.
+        # (sliced, not truncated -- see that function's docstring) plus
+        # extract_deterministic_lab_facts()'s full-text lab-value scan, before scheduling this
+        # background task, and committed those as ClinicalFact rows. classify_and_extract_page()
+        # now ALWAYS runs its own LLM fact extraction per page/chunk (not just when the page isn't
+        # confidently keyword-classified -- see that function's docstring for why), so a page's
+        # text substantially overlaps what the whole-document pass already saw and (re-)drafts the
+        # same facts a second time, with no de-dup between the two passes. Tracking what already
+        # exists for this document up front keeps the genuinely useful case (a page/chunk boundary
+        # the whole-document pass sliced differently, contributing a fact phrased/rounded slightly
+        # differently) while dropping true repeats.
         existing_facts = {
             (f.fact_type, f.value)
             for f in db.query(ClinicalFact.fact_type, ClinicalFact.value)
