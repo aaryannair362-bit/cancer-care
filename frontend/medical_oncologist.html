@@ -1018,8 +1018,23 @@
                 lastScribeMedications = note.medications || [];
                 renderDetectedMedications(lastScribeMedications);
                 renderDetectedLabTests(note.labTests || [], note.primaryDiagnosis || note.chiefComplaint || '');
-                statusEl.textContent = '✅ AI draft generated — review and edit every field before finalising.';
-                toast('AI draft generated', 'success');
+                if (note.noteExtractionFailed) {
+                    // scribe_transcript() never raises -- a genuine Groq API failure (retries
+                    // exhausted on a transient 429/5xx/timeout) comes back as this flag on an
+                    // otherwise-empty note_content, previously indistinguishable from "the
+                    // model looked at a real transcript and legitimately found nothing to
+                    // report" (see scribe.py's noteExtractionFailed docstring) -- a doctor
+                    // would see the same "AI draft generated" success message either way, with
+                    // no signal that the fields below are blank because the call failed, not
+                    // because nothing was said. Confirmed live: a real ~20-min consultation
+                    // transcript that had produced a full draft moments earlier on a re-run
+                    // came back completely empty this way.
+                    statusEl.textContent = '⚠️ AI draft generation failed (the underlying model call did not succeed) — the fields below may be blank. Click Generate AI Draft again, or fill the note in manually.';
+                    toast('AI draft generation failed — retry or fill in manually', 'error');
+                } else {
+                    statusEl.textContent = '✅ AI draft generated — review and edit every field before finalising.';
+                    toast('AI draft generated', 'success');
+                }
             } catch (err) { statusEl.textContent = ''; toast(apiErrorMessage(err), 'error'); }
         }
 

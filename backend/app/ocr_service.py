@@ -480,6 +480,30 @@ def _run_sarvam_job_and_read_zip(client, file_bytes: bytes, ext: str) -> tuple[s
         return combined, image
 
 
+# Confirmed live: page COUNT alone doesn't predict this deployment's 512MB ceiling being hit --
+# a real 30-page, 36MB fully-scanned document (large, high-resolution pages) OOM-crashed the
+# instance at the full 10-pages-per-job chunk size even after _extract_and_strip_embedded_images's
+# single-pass fix, while a real 50-page, 9MB document (more pages, but each individually much
+# smaller/lower-resolution) sailed through fine at that same chunk size moments later. The driver
+# is each chunk job's accumulated embedded-image payload (Sarvam re-embeds a full-resolution
+# image per page in its response, see _BASE64_IMAGE_CAPTURE_PATTERN's docstring) -- 10 large pages
+# in one job's response is a much bigger peak than 10 small ones, independent of total page count.
+# Scale the chunk size down for documents whose average page is large (using the SOURCE PDF's own
+# average page size as a proxy -- Sarvam's re-embedded image size isn't known until after the
+# call, too late to size the request that produces it), so a genuinely large scan gets finer-
+# grained (slower, more jobs, more rate-limiter waiting) but safe chunking, while a normal-sized
+# document keeps the faster, full-size chunking unchanged.
+def _sarvam_pages_per_job(content: bytes, total_pages: int) -> int:
+    if total_pages <= 0:
+        return _SARVAM_DOC_AI_MAX_PAGES_PER_JOB
+    avg_page_bytes = len(content) / total_pages
+    if avg_page_bytes > 1.5 * 1024 * 1024:  # >1.5MB/page average
+        return 3
+    if avg_page_bytes > 700 * 1024:  # >700KB/page average
+        return 6
+    return _SARVAM_DOC_AI_MAX_PAGES_PER_JOB
+
+
 def _extract_via_sarvam(content: bytes, content_type: str) -> dict[str, Any]:
     if not settings.SARVAM_OCR_API_KEY:
         raise ValueError("Sarvam API key not configured.")
@@ -490,8 +514,9 @@ def _extract_via_sarvam(content: bytes, content_type: str) -> dict[str, Any]:
 
     if content_type == "application/pdf":
         from pypdf import PdfReader
-        chunks = _split_pdf_into_chunks(content, _SARVAM_DOC_AI_MAX_PAGES_PER_JOB)
         page_count = len(PdfReader(io.BytesIO(content)).pages)
+        pages_per_job = _sarvam_pages_per_job(content, page_count)
+        chunks = _split_pdf_into_chunks(content, pages_per_job)
         ext = ".pdf"
     else:
         chunks = [(1, content)]

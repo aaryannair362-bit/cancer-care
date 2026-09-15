@@ -793,8 +793,17 @@
                 lastScribeMedications = note.medications || [];
                 renderDetectedMedications(lastScribeMedications);
                 renderDetectedLabTests(note.labTests || [], note.primaryDiagnosis || note.chiefComplaint || '');
-                statusEl.textContent = '✅ AI draft generated — review and edit every field before finalising.';
-                toast('AI draft generated', 'success');
+                if (note.noteExtractionFailed) {
+                    // See medical_oncologist.html's generateAiDraft() for the full incident
+                    // writeup -- a genuine Groq API failure (retries exhausted) comes back as
+                    // this flag on an otherwise-empty note_content, previously indistinguishable
+                    // from a real empty draft.
+                    statusEl.textContent = '⚠️ AI draft generation failed (the underlying model call did not succeed) — the fields below may be blank. Click Generate AI Draft again, or fill the note in manually.';
+                    toast('AI draft generation failed — retry or fill in manually', 'error');
+                } else {
+                    statusEl.textContent = '✅ AI draft generated — review and edit every field before finalising.';
+                    toast('AI draft generated', 'success');
+                }
             } catch (err) { statusEl.textContent = ''; toast(apiErrorMessage(err), 'error'); }
         }
 
