@@ -110,11 +110,13 @@ def test_strip_embedded_base64_images_removes_image_data_keeps_captions():
         "*The image displays a circular blue ink stamp.*\n\n"
         "Medications: Tamoxifen 20mg OD"
     )
-    cleaned = ocr_service._strip_embedded_base64_images(text)
+    cleaned, image = ocr_service._extract_and_strip_embedded_images(text)
     assert "base64" not in cleaned
     assert "Breast carcinoma" in cleaned
     assert "Medications: Tamoxifen 20mg OD" in cleaned
     assert "circular blue ink stamp" in cleaned
+    assert image is not None
+    assert image[0] == "image/jpeg"
 
 
 def test_extract_document_strips_embedded_base64_images_from_sarvam_output(monkeypatch):

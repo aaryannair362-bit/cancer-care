@@ -166,6 +166,25 @@ def _clinical_signals(text: str) -> dict[str, Any]:
     return result
 
 
+# Hard cap on how many scanned (needs-OCR) pages _extract_local will actually rasterize+RapidOCR
+# in a single request. Confirmed live in production (Render's own message: "Ran out of memory
+# (used over 512MB)") that a real 30-page fully-scanned document crashed the whole single-worker
+# process when it reached this path -- RapidOCR's own measured footprint (154MB peak RSS on this
+# repo's small benchmark corpus, see module docstring) isn't representative of 30 sequential
+# full-page rasterize+OCR cycles in one process; this codebase's own git history already shows
+# RSS ratcheting up across work within a process (the glibc malloc-arena fix) rather than shrinking
+# back down between pages, so peak memory grows with page count, not just with the biggest single
+# page. This path only ever runs when OCR_PROVIDER="local" or as Sarvam Document AI's fallback
+# (ocr_service.extract_document) -- Sarvam itself has no such limit here since it chunks and
+# processes off this process entirely. Refusing outright (raising, which the router already turns
+# into a saved document with status=OCR_FAILED -- see cca.py's upload_document, "never hard-fail a
+# document") is strictly better than a crash that takes the single worker (and every other
+# concurrent request) down with it. 10 matches Sarvam Document AI's own per-job page cap
+# (_SARVAM_DOC_AI_MAX_PAGES_PER_JOB) -- not a memory measurement, just a natural, already-
+# established number in this file to anchor to.
+_MAX_LOCAL_OCR_PAGES = 10
+
+
 def _extract_local(content: bytes, content_type: str) -> dict[str, Any]:
     page_text: list[dict[str, Any]] = []
     engines: list[str] = []
@@ -188,6 +207,13 @@ def _extract_local(content: bytes, content_type: str) -> dict[str, Any]:
                 raise ValueError("Password-protected PDFs are not supported")
         native = [(page.extract_text() or "").strip() for page in reader.pages]
         needs_ocr = [i for i, text in enumerate(native) if len(text) < 40]
+        if len(needs_ocr) > _MAX_LOCAL_OCR_PAGES:
+            raise RuntimeError(
+                f"This document has {len(needs_ocr)} scanned page(s) needing OCR, over the "
+                f"{_MAX_LOCAL_OCR_PAGES}-page limit for local processing on this deployment. "
+                "Sarvam Document AI should normally handle a document this size -- this local "
+                "fallback path refuses rather than risk crashing the server."
+            )
         ocr_by_page: dict[int, str] = {}
         if needs_ocr:
             doc = None
@@ -308,22 +334,14 @@ def _split_pdf_into_chunks(content: bytes, max_pages: int) -> list[tuple[int, by
 # docstring), and feeding those slices 95% base64 noise instead of real page content wastes
 # tokens, risks hitting context limits, and pushes a slice's real text later into a call that
 # only reaches it after burning most of that slice's budget on the image. Strip these blocks --
-# they're never useful as "text" in any
-# downstream consumer (_clinical_signals()'s regex, extract_clinical_facts(), the stored
-# excerpt) -- while leaving Sarvam's own AI-generated alt-text captions for figures (e.g. "The
-# image displays a circular blue ink stamp...") in place, since those already occasionally
-# carry real information (a hospital name/seal) and cost only a sentence, not tens of
-# thousands of characters.
-_BASE64_IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\(data:image/[^;]+;base64,[^)]*\)")
-# Same directive shape as _BASE64_IMAGE_PATTERN, but with the mime subtype and base64 payload
-# captured separately -- used only by _extract_embedded_image_bytes() below to recover an actual
-# viewable image for a scan/imaging page, never for the plain-text extraction path (which only
-# ever strips, via _strip_embedded_base64_images()).
+# they're never useful as "text" in any downstream consumer (_clinical_signals()'s regex,
+# extract_clinical_facts(), the stored excerpt) -- while leaving Sarvam's own AI-generated
+# alt-text captions for figures (e.g. "The image displays a circular blue ink stamp...") in
+# place, since those already occasionally carry real information (a hospital name/seal) and cost
+# only a sentence, not tens of thousands of characters. Mime subtype and base64 payload are
+# captured separately (not just matched) so _extract_and_strip_embedded_images() below can also
+# recover an actual viewable image for a scan/imaging page in the SAME pass it strips with.
 _BASE64_IMAGE_CAPTURE_PATTERN = re.compile(r"!\[[^\]]*\]\(data:image/([^;]+);base64,([^)]*)\)")
-
-
-def _strip_embedded_base64_images(text: str) -> str:
-    return _BASE64_IMAGE_PATTERN.sub("", text).strip()
 
 
 _HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
@@ -348,24 +366,45 @@ def strip_markup_for_display(text: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
-def _extract_embedded_image_bytes(text: str) -> tuple[str, bytes] | None:
+def _extract_and_strip_embedded_images(text: str) -> tuple[str, tuple[str, bytes] | None]:
     """
-    Returns (mime_type, raw_bytes) for the largest inline base64 image embedded in Sarvam's
-    markdown output (see _BASE64_IMAGE_PATTERN's docstring for why these are embedded at all),
-    or None if the page has none. "Largest" is a proxy for "the actual scanned page image"
-    rather than a small embedded logo/stamp. Used only by extract_document_pages() to give
-    doctors something to actually view for an image-heavy (X-ray/MRI/scan) page -- never used by
-    the plain-text extraction path, which is unaffected by this function's existence.
+    Returns (text_with_images_stripped, representative_image_or_None). representative_image is
+    (mime_type, raw_bytes) for the LARGEST inline base64 image embedded in Sarvam's markdown
+    output (see _BASE64_IMAGE_CAPTURE_PATTERN's docstring for why these are embedded at all) --
+    "largest" is a proxy for "the actual scanned page image" rather than a small embedded
+    logo/stamp, kept so extract_document_pages() has something to actually show a doctor for an
+    image-heavy (X-ray/MRI/scan) page.
+
+    Single regex pass over `text` (re.sub with a callback), not the two-pass find-largest-then-
+    strip this replaced: verified live that Sarvam's response for a real scanned document is
+    overwhelmingly embedded image data (one real 10-page report: 623,713 of 625,492 characters,
+    see _BASE64_IMAGE_CAPTURE_PATTERN's docstring) -- .findall() first materializing every embedded image
+    match simultaneously, THEN a second full .sub() pass over the same multi-megabyte string,
+    meant duplicating that string's memory footprint several times over for every chunk of a
+    multi-chunk document. This app's own 512MB Render ceiling has already been hit once by exactly
+    this kind of accumulation (see _MAX_LOCAL_OCR_PAGES's docstring for the incident) -- one pass
+    that discards each match's bytes as soon as a larger one is seen, and builds the stripped
+    text as it goes, needs only one extra copy of the string (the stripped result), not several.
     """
-    matches = _BASE64_IMAGE_CAPTURE_PATTERN.findall(text or "")
-    if not matches:
-        return None
-    mime, b64_data = max(matches, key=lambda m: len(m[1]))
-    try:
-        import base64
-        return f"image/{mime}", base64.b64decode(b64_data)
-    except Exception:
-        return None
+    largest: list = [None, -1]
+
+    def _sub(m: re.Match) -> str:
+        mime, b64_data = m.group(1), m.group(2)
+        if len(b64_data) > largest[1]:
+            largest[0] = (mime, b64_data)
+            largest[1] = len(b64_data)
+        return ""
+
+    stripped = _BASE64_IMAGE_CAPTURE_PATTERN.sub(_sub, text or "").strip()
+    image = None
+    if largest[0] is not None:
+        try:
+            import base64
+            mime, b64_data = largest[0]
+            image = (f"image/{mime}", base64.b64decode(b64_data))
+        except Exception:
+            image = None
+    return stripped, image
 
 
 def _run_sarvam_job_and_read_zip(client, file_bytes: bytes, ext: str) -> tuple[str, tuple[str, bytes] | None]:
@@ -435,8 +474,7 @@ def _run_sarvam_job_and_read_zip(client, file_bytes: bytes, ext: str) -> tuple[s
                 if raw.strip():
                     texts.append(raw)
         combined = "\n\n".join(texts).strip()
-        image = _extract_embedded_image_bytes(combined)
-        combined = _strip_embedded_base64_images(combined)
+        combined, image = _extract_and_strip_embedded_images(combined)
         if not combined:
             raise RuntimeError("Sarvam Document AI returned an empty result")
         return combined, image
