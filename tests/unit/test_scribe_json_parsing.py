@@ -124,17 +124,24 @@ def test_generate_json_gives_up_after_one_retry(engine):
     assert result == {}
 
 
-def test_generate_json_returns_empty_dict_when_groq_call_raises(engine):
+def test_generate_json_returns_failure_sentinel_when_groq_call_raises(engine):
     """
-    A Groq/network failure inside _call_groq_api degrades to an empty dict rather than
-    propagating -- scribe_transcript then backfills this to an all-empty draft. This is a
-    deliberate-looking safety behavior (never 500 the OPD user), but note it means the doctor
-    receives an empty draft with no visible error signal that the AI call actually failed
-    (see ARCHITECTURE_NOTES.md / TEST_NOTES.md).
+    A Groq/network failure inside _call_groq_api degrades to {"__ai_call_failed__": True}
+    rather than propagating -- never a bare 500 to the OPD user. Previously this was a bare {},
+    indistinguishable from "the model looked at the transcript and legitimately found nothing" --
+    verified live via a real duration-scaling test run (5-60 min synthetic consultations against
+    the live Groq API) that this is not a theoretical concern: a transcript well under
+    _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING's single-call threshold still sometimes exhausted
+    MAX_RATE_LIMIT_RETRIES on a spurious 413, and a long (50-60 min) consultation's own burst of
+    sequential chunk calls sometimes exhausted retries on real 429s -- both landed the doctor a
+    blank draft with zero indication anything failed. The sentinel is popped and turned into an
+    explicit flag by every caller that reaches a doctor/patient-facing result (scribe_transcript's
+    noteExtractionFailed, translate_prescription's translationFailed,
+    generate_discharge_summary's dischargeSummaryFailed) -- see their own tests.
     """
     _stub_call(engine, raise_exc=RuntimeError("simulated network failure"))
     result = engine._generate_json("prompt")
-    assert result == {}
+    assert result == {"__ai_call_failed__": True}
 
 
 def test_fallback_extract_never_raises_on_arbitrary_text(engine):
@@ -292,6 +299,73 @@ def test_translate_prescription_non_english_calls_llm_and_backfills(engine):
     result = engine.translate_prescription(draft, "Hindi")
     assert result["chiefComplaint"] == "बुखार"
     assert "medications" in result  # backfilled to [] since translated response omitted it
+    assert result["translationFailed"] is False
+
+
+def test_scribe_transcript_flags_note_extraction_failed_on_real_api_failure(engine):
+    """A real API failure (see test_generate_json_returns_failure_sentinel_when_groq_call_raises)
+    must be distinguishable from the model legitimately finding nothing -- both used to produce
+    the exact same all-blank draft with zero signal to the doctor that anything went wrong.
+    Fields still backfill to blank either way (never raise/500 the OPD user); only the new flag
+    tells the two cases apart."""
+    _stub_call(engine, raise_exc=RuntimeError("simulated network failure"))
+    result = engine.scribe_transcript("some transcript text long enough")
+    assert result["noteExtractionFailed"] is True
+    assert result["chiefComplaint"] == ""
+    assert result["medications"] == []
+
+
+def test_scribe_transcript_does_not_flag_extraction_failed_on_legitimate_empty_result(engine):
+    """The model successfully returning a real (if sparse) response -- e.g. a very short
+    consultation with genuinely little to extract -- must NOT be flagged as a failure."""
+    _stub_call(engine, raw_return=json.dumps({"chiefComplaint": "", "medications": []}))
+    result = engine.scribe_transcript("Doctor: anything else? Patient: no, that's all.")
+    assert result["noteExtractionFailed"] is False
+
+
+def test_scribe_transcript_flags_note_extraction_failed_if_any_chunk_fails(engine):
+    """Chunked (long) transcripts: if even ONE chunk's own Groq call genuinely fails, the merged
+    draft is missing whatever that chunk actually contained -- the whole consultation's draft
+    must be flagged, not just silently merged as if every chunk succeeded."""
+    calls = {"n": 0}
+
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("simulated network failure on the second chunk")
+        return json.dumps({"chiefComplaint": "fever"})
+
+    engine._call_groq_api = _fake
+    long_transcript = "Doctor: how are you feeling today. Patient: not well. " * 1000
+    result = engine.scribe_transcript(long_transcript)
+    assert result["transcriptChunked"] is True
+    assert result["noteExtractionFailed"] is True
+
+
+def test_translate_prescription_flags_translation_failed_and_preserves_original_draft(engine):
+    """A real translation-API failure must never discard the already-correct English draft in
+    favor of an all-blank one -- the doctor still has a usable (untranslated) prescription,
+    with an explicit flag so the UI can show it wasn't actually translated."""
+    _stub_call(engine, raise_exc=RuntimeError("simulated network failure"))
+    draft = {"chiefComplaint": "fever", "medications": [{"drugName": "Paracetamol"}]}
+    result = engine.translate_prescription(draft, "Hindi")
+    assert result["translationFailed"] is True
+    assert result["chiefComplaint"] == "fever"  # original English content preserved, not blanked
+    assert result["medications"] == [{"drugName": "Paracetamol"}]
+
+
+def test_generate_discharge_summary_flags_failure_on_real_api_failure(engine):
+    _stub_call(engine, raise_exc=RuntimeError("simulated network failure"))
+    result = engine.generate_discharge_summary({"patient_name": "Test"})
+    assert result["dischargeSummaryFailed"] is True
+    assert result["admissionSummary"] == ""
+
+
+def test_generate_discharge_summary_does_not_flag_failure_on_success(engine):
+    _stub_call(engine, raw_return=json.dumps({"admissionSummary": "Admitted for observation"}))
+    result = engine.generate_discharge_summary({"patient_name": "Test"})
+    assert result["dischargeSummaryFailed"] is False
+    assert result["admissionSummary"] == "Admitted for observation"
 
 
 def test_call_groq_api_retries_on_429_and_succeeds(monkeypatch, engine):

@@ -136,10 +136,11 @@ def zero_byte_file() -> bytes:
     return b""
 
 
-def oversized_pdf(target_mb: int = 65) -> bytes:
-    """Exceeds MAX_PATIENT_DOCUMENT_MB (60) purely by size -- both upload_document endpoints
-    reject on `len(content) > max_bytes` before ever attempting to parse the file, so the PDF
-    content itself doesn't need to be valid for this case."""
+def oversized_pdf(target_mb: int = 205) -> bytes:
+    """Exceeds MAX_PATIENT_DOCUMENT_MB (200, matched to Sarvam Document AI's own accepted
+    upload size) purely by size -- both upload_document endpoints reject on
+    `len(content) > max_bytes` before ever attempting to parse the file, so the PDF content
+    itself doesn't need to be valid for this case."""
     return b"%PDF-1.4\n" + os.urandom(target_mb * 1024 * 1024)
 
 

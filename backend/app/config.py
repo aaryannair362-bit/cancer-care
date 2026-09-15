@@ -61,10 +61,18 @@ class Settings(BaseSettings):
     # A real multi-page scanned hospital record (every page a full-resolution photo, no
     # compression applied by the scanning hospital) legitimately exceeds a low cap -- confirmed
     # against real files in data_insurance/: a 30-page fully-scanned case file measured 36.4MB.
-    # Sarvam Document AI's own accepted upload size is 200MB (docs.sarvam.ai), so raising this is
-    # not shifting the failure to the OCR vendor; 60MB gives headroom above the largest real file
-    # seen so far without approaching that ceiling.
-    MAX_PATIENT_DOCUMENT_MB: int = 60
+    # Matched exactly to Sarvam Document AI's own accepted upload size (200MB, docs.sarvam.ai)
+    # rather than picking an arbitrary number above it -- raising this doesn't shift the failure
+    # to the OCR vendor, since nothing this app could ever accept would exceed what Sarvam itself
+    # already refuses. Deliberate trade-off, not an oversight: this Render instance runs with a
+    # 512MB RAM ceiling (see ocr_service.py's module docstring for the docTR-vs-RapidOCR memory
+    # incident that ceiling already caused once) -- a 200MB upload read fully into memory
+    # (routers/cca.py's upload_document) leaves materially less headroom than the old 60MB cap
+    # did. Accepted here because Sarvam's own limit is the more meaningful ceiling for what a
+    # legitimate hospital record ever looks like; if a real 100MB+ upload ever OOMs this process,
+    # that's the signal to move upload_document to a streamed/chunked read instead of lowering
+    # this back down.
+    MAX_PATIENT_DOCUMENT_MB: int = 200
     # Read by main.py's create_default_user() to auto-seed the first Admin account on a fresh
     # deploy (empty DB). Declared here so settings.ADMIN_EMAIL doesn't raise AttributeError --
     # it previously did on every single startup (caught by that function's broad except, so the

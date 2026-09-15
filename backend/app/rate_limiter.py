@@ -168,10 +168,41 @@ sarvam_doc_ai_request_bucket = TokenBucket(
 def estimate_tokens(prompt: str, max_tokens: int) -> float:
     """
     Cheap, tokenizer-free estimate of a call's total token cost, used to pace the token
-    bucket BEFORE the real usage is known. ~4 characters/token for prompt, plus realistic
-    completion estimate (capped at 800 for standard structured JSON responses) rather than
-    assuming worst-case max_tokens every call.
+    bucket BEFORE the real usage is known. ~4 characters/token for prompt, plus a completion
+    estimate capped well above what a plain structured-JSON response's visible text would need,
+    because the configured model (GROQ_MODEL, a reasoning model) spends hidden "reasoning
+    tokens" that never appear in the completion text but count fully against the real
+    tokens-per-minute budget (see token_bucket.true_up's docstring).
+
+    The cap here was previously 800 -- calibrated for the visible JSON alone, before this
+    hidden-reasoning-token cost was known to matter. Verified live via tests/scale/runner.py's
+    own measured calibration (a real, comparable extraction call: ~1945 completion tokens,
+    1733 of it hidden reasoning) AND a real duration-scaling test run (audio_duration_runner.py,
+    5-60 min synthetic consultations against the live API): a long consultation's own burst of
+    several rapid sequential chunk-extraction calls repeatedly exhausted MAX_RATE_LIMIT_RETRIES
+    on real 429s. Undercounting each call's real cost by ~1100+ tokens means the proactive
+    pacer lets a burst through faster than the account's real budget allows, every time, and
+    true_up() only corrects the bucket AFTER a call completes -- too late to protect the very
+    next call in the same burst, which is exactly the failure pattern observed.
+
+    The TOTAL estimate (not just the completion term) is capped below token_bucket's own
+    capacity, not just raised outright -- found necessary by the same live test run, the hard
+    way: naively adding a flat 2000-token completion estimate on top of a large prompt (a
+    scribe chunk near _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING's ~26,000-char ceiling estimates to
+    ~6500+ prompt tokens alone) pushed the total estimate PAST _TOKEN_BURST_CAPACITY (8000,
+    Groq's own real per-minute ceiling for this account -- verified live via response headers).
+    TokenBucket.consume() deliberately raises rather than block forever on an amount it can
+    never satisfy -- correct for a call that truly cannot fit, but that comment's own citation
+    (a real 25,382-character transcript worked untruncated) proves calls at this size DO
+    complete successfully in practice, so a raw additive estimate exceeding the account's own
+    ceiling is the estimate being too pessimistic for a large prompt, not evidence the call is
+    infeasible -- a large prompt's real completion (reasoning included) evidently isn't also
+    maximal just because the prompt is long. Capping the total leaves every large, real, working
+    call estimatable (paced at the account's practical max instead of failing before ever being
+    attempted) while a genuinely small prompt still gets the full, realistic completion
+    allowance above.
     """
     estimated_prompt_tokens = len(prompt) / 4.0
-    estimated_completion_tokens = min(float(max_tokens), 800.0)
-    return estimated_prompt_tokens + estimated_completion_tokens
+    estimated_completion_tokens = min(float(max_tokens), 2000.0)
+    total = estimated_prompt_tokens + estimated_completion_tokens
+    return min(total, _TOKEN_BURST_CAPACITY - 500.0)

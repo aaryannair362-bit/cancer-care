@@ -135,8 +135,27 @@ frontend_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__fi
 # the conditional request FileResponse's own ETag/Last-Modified headers support -- just never
 # silently, without asking the server first.
 NO_CACHE_HEADERS = {"Cache-Control": "no-cache, must-revalidate"}
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """StaticFiles serves js/css/etc. with NO Cache-Control header at all by default, which
+    means the browser applies its own heuristic caching (commonly ~10% of the file's age since
+    Last-Modified) instead of ever asking the server whether it's still current. Verified live:
+    frontend/js/voice-capture.js's Sep-11 audio-bitrate fix (the actual cause of a real
+    duration-based transcription failure -- see that file's own comment) shipped correctly to
+    the server, but a browser tab/session that had already cached the pre-fix file under this
+    same no-Cache-Control behavior had no reason to ever re-fetch it. Same fix as NO_CACHE_HEADERS
+    already applies to .html pages above (see that constant's comment for the original incident
+    this pattern was built for) -- just never extended to the /static mount, which is every JS/
+    CSS file this app serves, including the one that actually drives the recording."""
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = NO_CACHE_HEADERS["Cache-Control"]
+        return response
+
+
 if os.path.exists(frontend_dir):
-    app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
+    app.mount("/static", _NoCacheStaticFiles(directory=frontend_dir), name="static")
     @app.get("/")
     async def serve_index():
         index_path = os.path.join(frontend_dir, "index.html")

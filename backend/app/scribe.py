@@ -9,7 +9,18 @@ from . import drug_matcher
 from . import lab_test_matcher
 from . import rate_limiter
 
-MAX_RATE_LIMIT_RETRIES = 3
+# Raised from 3 to 5 (2026-09-15) -- verified live via a real duration-scaling test run
+# (audio_duration_runner.py, 5-60 min synthetic consultations against the live API): both 413
+# (already known transient, see _TRANSIENT_ERROR_STATUS_CODES's comment) and 429 repeatedly
+# exhausted 3 retries in a row and fell through to _generate_json's failure sentinel, even
+# though the underlying condition genuinely is transient on Groq's side (a real, reasoning-model
+# rate limit that clears within seconds -- see rate_limiter.estimate_tokens's docstring for the
+# other half of this fix, which reduces how often this path is hit at all by pacing more
+# realistically; this raises the ceiling for whatever still gets through). Worst-case added
+# latency is bounded by the same 20s-per-attempt cap either way (2 extra attempts, ~40s worst
+# case) -- an acceptable trade for a genuinely transient error not silently blanking a real
+# consultation's draft.
+MAX_RATE_LIMIT_RETRIES = 5
 # Status codes retried the same way as 429 (see _post_with_retry) -- 413 included after finding
 # it live: a genuinely small (~27KB) request got one back from Groq, and replaying the identical
 # payload seconds later succeeded, confirming it was transient, not a real payload-size problem.
@@ -18,12 +29,12 @@ _TRANSIENT_ERROR_STATUS_CODES = {413, 502, 503, 504}
 # See scribe_transcript()'s own comment for the full reasoning -- this is the largest transcript
 # size verified live to fit inside Groq's real 8000-token/minute account limit for a single
 # request (system prompt + wrapped transcript + completion). Verified live: 25,382 chars worked
-# untruncated, 37,039 chars silently failed; estimate_tokens()'s own formula (chars/4 + a fixed
-# 800-token completion allowance) puts the real breaking point at roughly 27,450 chars given
-# this prompt template's fixed overhead. 26,000 sits with margin below both the calculated
-# breaking point and leaves headroom for token-estimation error, while being less needlessly
-# conservative than an earlier 24,000 cap that was truncating (and flagging) consultations,
-# like a real proven-working 25,382-character one, that didn't actually need it.
+# untruncated, 37,039 chars silently failed. 26,000 sits with margin below that empirically-found
+# breaking point, while being less needlessly conservative than an earlier 24,000 cap that was
+# truncating (and flagging) consultations, like a real proven-working 25,382-character one, that
+# didn't actually need it. (This is about a single call's own prompt+completion size, a
+# different concern from rate_limiter.estimate_tokens's completion-token PACING estimate --
+# raising that estimate's cap doesn't change where this ceiling should sit.)
 #
 # A transcript longer than this used to simply be truncated at this point, silently dropping
 # everything past it before the LLM ever saw it -- verified live to actually happen on real,
@@ -287,7 +298,23 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
             return fallback(raw) if fallback else {}
         except Exception as e:
             logger.error("Unexpected error in _generate_json: %s", e)
-            return {}
+            # Distinct from the json.JSONDecodeError branch above: this is a real API failure
+            # (retries exhausted on 413/429/5xx inside _call_groq_api, or any other exception) --
+            # there is no `raw` response text here for `fallback` to regex-scrape, so it's never
+            # called. Verified live via a real duration-scaling test run (5-60 min synthetic
+            # consultations against the live Groq API): a transcript well under
+            # _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING's single-call threshold still sometimes
+            # exhausted MAX_RATE_LIMIT_RETRIES on a spurious 413 (already known transient --
+            # see _TRANSIENT_ERROR_STATUS_CODES's comment -- but transient does not mean it
+            # cannot exhaust 3 retries in practice; it did, repeatedly, in that run). Every
+            # caller's existing `result.get(...)` handling is unaffected by this extra key (see
+            # this function's own docstring on why {} is safe for every caller that doesn't
+            # know to look for it) -- only _extract_note_fields/translate_prescription
+            # (scribe.py's own two fallback-passing callers) check for it, to turn "the model
+            # said nothing" (a real, legitimate result) and "the API call never actually
+            # succeeded" (this) into two different, distinguishable outcomes instead of the
+            # same indistinguishable blank draft reaching the doctor with no warning either way.
+            return {"__ai_call_failed__": True}
 
     def _fallback_extract(self, text: str) -> dict:
         """Try to extract structured data from raw text using regex if JSON fails."""
@@ -404,10 +431,18 @@ Return a JSON object with the following structure:
     "labTests": ["list of recommended tests"]
 }}"""
         result = self._generate_json(prompt, temperature=0.3, fallback=self._fallback_extract)
+        # See _generate_json's own comment on this sentinel: distinguishes "the API call itself
+        # never succeeded" from "the model looked at the transcript and legitimately found
+        # nothing" -- both would otherwise reach the doctor as the exact same blank draft with
+        # no indication anything went wrong. Popped here (not left in `result`) so it never
+        # leaks into the JSON actually returned to the frontend/DB as a fake extracted field.
+        extraction_failed = result.pop("__ai_call_failed__", False)
         for key, default_value in self._NOTE_DEFAULT_FIELDS.items():
             if key not in result or result[key] is None:
                 result[key] = default_value
-        return self._coerce_string_fields(result, self._NOTE_NARRATIVE_FIELDS)
+        result = self._coerce_string_fields(result, self._NOTE_NARRATIVE_FIELDS)
+        result["_extractionFailed"] = extraction_failed
+        return result
 
     def _split_transcript_into_chunks(self, transcript: str) -> list:
         """Splits a transcript longer than _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING into ordered,
@@ -522,9 +557,17 @@ Return a JSON object with the following structure:
         chunked = len(chunks) > 1
         if chunked:
             partials = [self._extract_note_fields(c) for c in chunks]
+            # Any one chunk's Groq call genuinely failing (see _extract_note_fields/
+            # _generate_json's "__ai_call_failed__" comments) means the merged draft is missing
+            # whatever that chunk actually contained -- flag the whole consultation's draft, not
+            # just silently merge in that chunk's now-blank fields alongside the others' real
+            # content, which would read as a complete note that's actually missing a slice of
+            # the conversation with no indication which part.
+            extraction_failed = any(p.get("_extractionFailed") for p in partials)
             result = self._merge_chunk_drafts(partials)
         else:
             result = self._extract_note_fields(chunks[0] if chunks else transcript)
+            extraction_failed = result.pop("_extractionFailed", False)
 
         # Corrects each medication's drugName against the canonical medicines dataset before
         # the draft ever reaches the doctor -- see drug_matcher.py for why (ASR/LLM-introduced
@@ -536,6 +579,14 @@ Return a JSON object with the following structure:
         # normalized against the canonical lab test master (see lab_test_matcher.py).
         result["labTests"] = self._dedupe_strings(lab_test_matcher.correct_lab_test_names(result["labTests"]))
         result["transcriptChunked"] = chunked
+        # True when at least one underlying Groq call genuinely failed (API error, exhausted
+        # retries) rather than the model looking at real content and finding nothing to report --
+        # see _generate_json's "__ai_call_failed__" sentinel. Distinct from an empty draft that's
+        # empty because the doctor/patient genuinely said very little; this specifically means
+        # the draft may be missing content that WAS spoken. Not yet surfaced in any frontend
+        # (same as transcriptChunked above) -- callers/UI should show a retry warning rather than
+        # silently presenting a note that looks complete.
+        result["noteExtractionFailed"] = extraction_failed
         return result
 
     def clinical_helper(self, current_draft: dict, query: str) -> str:
@@ -559,6 +610,16 @@ Prescription:
 
 Keep drug names in English. Translate descriptions, instructions, and test names. Return pure JSON."""
         result = self._generate_json(prompt, temperature=0.3, fallback=self._fallback_extract)
+        if result.pop("__ai_call_failed__", False):
+            # The translation call itself never succeeded (see _generate_json's sentinel
+            # comment) -- backfilling every field to "" here would silently DISCARD the
+            # perfectly good English draft passed in as `draft`, replacing a real prescription
+            # with a blank one purely because translation failed. Return the original draft
+            # unchanged instead (untranslated, not empty) with an explicit flag, matching
+            # scribe_transcript's noteExtractionFailed convention.
+            returned = dict(draft)
+            returned["translationFailed"] = True
+            return returned
         default = {
             "chiefComplaint": "", "hpi": "", "physicalExam": "", "primaryDiagnosis": "",
             "differentialDiagnosis": "", "medications": [], "advice": "", "labTests": []
@@ -566,9 +627,11 @@ Keep drug names in English. Translate descriptions, instructions, and test names
         for key in default:
             if key not in result:
                 result[key] = default[key]
-        return self._coerce_string_fields(
+        result = self._coerce_string_fields(
             result, ("chiefComplaint", "hpi", "physicalExam", "primaryDiagnosis", "differentialDiagnosis", "advice")
         )
+        result["translationFailed"] = False
+        return result
 
     def generate_discharge_summary(self, context: dict) -> dict:
         """
@@ -614,6 +677,12 @@ Return a JSON object with exactly these keys:
 }}
 If information for a field is not present in the input above, use an empty string or empty array -- do not fabricate."""
         result = self._generate_json(prompt, temperature=0.3)
+        # See _generate_json's "__ai_call_failed__" sentinel comment. No caller-specific fallback
+        # is passed here, so on total API failure this is the ONLY signal available -- pop it
+        # (an internal implementation detail, never meant to reach a stored/returned document) and
+        # surface it as an explicit flag instead, same convention as scribe_transcript's
+        # noteExtractionFailed / translate_prescription's translationFailed.
+        extraction_failed = result.pop("__ai_call_failed__", False)
         default = {
             "admissionSummary": "", "hospitalCourse": "", "dischargeDiagnosis": "",
             "medicationsAtDischarge": [], "followUpInstructions": "", "conditionAtDischarge": ""
@@ -625,6 +694,7 @@ If information for a field is not present in the input above, use an empty strin
             result, ("admissionSummary", "hospitalCourse", "dischargeDiagnosis", "followUpInstructions", "conditionAtDischarge")
         )
         result["medicationsAtDischarge"] = drug_matcher.correct_medication_names(result["medicationsAtDischarge"])
+        result["dischargeSummaryFailed"] = extraction_failed
         return result
 
     def is_available(self) -> bool:

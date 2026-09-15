@@ -113,8 +113,17 @@ imports `backend.app.main:app` directly — not a hand-maintained duplicate.
     Always backfills missing/`None` keys with the default empty structure — **never raises**
     even if the LLM call or JSON parse fails (falls through to `_fallback_extract`, worst case
     returns all-empty defaults). This means a Groq outage degrades to an empty prescription
-    draft rather than a 500 — a deliberate-looking but *undocumented* safety behavior worth
-    flagging: the OPD user gets a silently-empty draft with no indication the AI actually failed.
+    draft rather than a 500 — a deliberate safety behavior. **Fixed (2026-09-15, found via a real
+    duration-scaling test run against the live Groq API, 5–60 min synthetic consultations)**: an
+    empty draft caused by a genuine API failure (retries exhausted on a spurious 413, or a real
+    429 storm from a long consultation's own burst of sequential chunk calls) is no longer
+    indistinguishable from the model legitimately finding nothing to report. `_generate_json`
+    returns `{"__ai_call_failed__": True}` on a real failure (see its own docstring); every
+    doctor/patient-facing caller pops that sentinel and surfaces an explicit flag instead —
+    `scribe_transcript`'s `noteExtractionFailed`, `translate_prescription`'s `translationFailed`
+    (which also now returns the original untranslated draft on failure instead of discarding it
+    for a blank one), and `generate_discharge_summary`'s `dischargeSummaryFailed`. None of these
+    flags are consumed by any frontend yet — that's the next step, not done here.
   - `clinical_helper(current_draft, query)` — free-text advice, returns raw LLM string (no
     structure, no persistence).
   - `translate_prescription(draft, target_language)` — passthrough if `target_language ==

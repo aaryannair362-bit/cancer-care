@@ -126,6 +126,21 @@ def test_estimate_tokens_scales_with_prompt_length_and_includes_max_tokens():
     assert short >= 100  # at minimum, the max_tokens completion budget is included
 
 
+def test_estimate_tokens_completion_cap_reflects_real_reasoning_token_cost():
+    """Regression test: the completion-token estimate cap was previously 800 -- calibrated for
+    a structured JSON response's visible text alone, before it was known that the configured
+    reasoning model (GROQ_MODEL) spends hidden reasoning tokens on top of that, which still
+    count fully against the real tokens-per-minute budget. Verified live via
+    tests/scale/runner.py's own measured calibration (~1945 real completion tokens for a
+    comparable call, 1733 of it hidden reasoning) and a real duration-scaling test run where
+    undercounting this caused a long consultation's own burst of rapid sequential calls to
+    repeatedly exhaust retries on real 429s. Pinned here so it can't silently regress back down
+    -- a caller requesting a large max_tokens (e.g. extract_clinical_facts's 6000) must estimate
+    meaningfully above the old 800 cap, not be silently clipped back down to it."""
+    estimate = estimate_tokens("short prompt", max_tokens=6000)
+    assert estimate >= 1945  # at least the one real measured value this was calibrated against
+
+
 # ---------------------------------------------------------------------------
 # TokenBucket.true_up -- post-call reconciliation against a provider's REAL reported usage.
 # Added after live evidence (a real Selenium end-to-end run against Sarvam+Groq) that a
