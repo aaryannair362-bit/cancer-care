@@ -144,6 +144,32 @@ def queue_transcription_result(monkeypatch, app_main, *texts):
     monkeypatch.setattr(app_main.scribe, "transcribe_audio", _fake)
 
 
+def queue_chunk_transcription_results(monkeypatch, app_main, *texts):
+    """
+    Chunked-upload equivalent of queue_transcription_result -- monkeypatches
+    app_main.scribe.transcribe_audio (the same method the "whisper" provider path calls; see
+    main.py's _transcribe_one_audio_file, shared by both /api/transcribe-audio and
+    /api/transcribe-audio-chunk) to pop one canned transcript per call, in call order. One call
+    happens per uploaded chunk (both mid-recording rotations and the final is_final upload), so
+    for N expected chunks pass N canned strings, e.g.
+    queue_chunk_transcription_results(monkeypatch, app_main, "first chunk text", "second chunk text")
+    for a recording that rotates once before Stop. The server joins them with a space and
+    returns that as the final transcript -- assert on the space-joined result, not any one
+    chunk's text alone.
+    """
+    remaining = list(texts)
+
+    def _fake(audio_bytes, content_type, filename):
+        if not remaining:
+            raise AssertionError(
+                "scribe.transcribe_audio was called more times than "
+                "queue_chunk_transcription_results was given canned results for"
+            )
+        return remaining.pop(0)
+
+    monkeypatch.setattr(app_main.scribe, "transcribe_audio", _fake)
+
+
 def mock_transcription_network_failure(page):
     """
     Secondary helper for the small number of tests that specifically want a NETWORK-level

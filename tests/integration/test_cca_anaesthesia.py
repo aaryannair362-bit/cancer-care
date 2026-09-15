@@ -255,6 +255,22 @@ def test_worklist_lists_surgical_plans_with_evaluation_status(client, surgeon_he
     assert row_after["pre_op_evaluation"]["asa_grade"] == "II"
 
 
+def test_worklist_broadened_to_performed_and_post_op_for_surgical_nurse(client, surgeon_headers, or_nurse_headers, patient):
+    """Oncologist-requested change item 3: this endpoint is now also the Surgical Nurse OR
+    Worklist's own data source (surgical_nurse.html), which needs performed/post_op plans too
+    (that's exactly when its intra-op documentation forms apply) -- previously excluded
+    entirely by this endpoint's planned/pre_op_ready/scheduled-only filter, which is why that
+    page was reported empty even with a real, relevant plan. Confirms both an early-stage
+    (planned) and a late-stage (performed) plan are both visible to the Surgical Nurse."""
+    plan_id = _create_plan(client, surgeon_headers, patient.id)
+    client.patch(f"/api/cca/surgical-plans/{plan_id}", headers=surgeon_headers, json={"status": "surgeon_reviewed"})
+    client.patch(f"/api/cca/surgical-plans/{plan_id}", headers=surgeon_headers, json={"status": "planned"})
+
+    worklist = client.get("/api/cca/surgical-plans/worklist", headers=or_nurse_headers)
+    assert worklist.status_code == 200, worklist.text
+    assert any(r["id"] == plan_id and r["status"] == "planned" for r in worklist.json()["worklist"])
+
+
 def test_cross_org_pre_op_evaluation_is_not_found(client, surgeon_headers, anaesthetist_headers, patient, make_user, auth_headers):
     plan_id = _create_plan(client, surgeon_headers, patient.id)
     created = client.post(f"/api/cca/surgical-plans/{plan_id}/anaesthesia/pre-op", headers=anaesthetist_headers, json={})

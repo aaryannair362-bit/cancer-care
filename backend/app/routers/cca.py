@@ -8983,6 +8983,11 @@ def _clinical_master_item_dict(i: ClinicalMasterItem) -> dict:
     return {"id": i.id, "master_id": i.master_id, "sequence_number": i.sequence_number, "fields": i.fields}
 
 
+# Valid CCAOrder.order_type values an ORDER_SET item's fields may declare -- see
+# add_clinical_master_item's validation and models_cca.py's CCAOrder.order_type comment.
+_ORDER_SET_ITEM_ORDER_TYPES = {"LAB", "RADIOLOGY", "PATHOLOGY", "OTHER_DIAGNOSTIC", "MOLECULAR_DIAGNOSTIC"}
+
+
 @router.post("/clinical-masters")
 async def create_clinical_master(
     request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
@@ -9132,6 +9137,22 @@ async def add_clinical_master_item(
     fields = body.get("fields")
     if not isinstance(fields, dict) or not fields:
         raise HTTPException(422, "fields must be a non-empty object")
+    if master.master_type == "ORDER_SET":
+        # apply_order_set (below) used to silently default a missing order_type to "LAB" --
+        # verified live as the single most reproducible cause of an oncologist-reported bug:
+        # an admin builds an investigation panel via this generic JSON-fields editor (whose UI
+        # hint doesn't even mention order_type -- see frontend/admin.html), omits it for an
+        # imaging/ECG item, and every patient it's applied to gets that item filed as a LAB
+        # order. Caught here, at authoring time, rather than left to silently default at apply
+        # time against a real patient -- existing already-published order sets are untouched
+        # (apply_order_set's own default still covers items created before this validation
+        # existed), this only stops new bad items from being created going forward.
+        order_type = fields.get("order_type")
+        if order_type not in _ORDER_SET_ITEM_ORDER_TYPES:
+            raise HTTPException(
+                422,
+                f"An ORDER_SET item's fields must include order_type, one of {sorted(_ORDER_SET_ITEM_ORDER_TYPES)}",
+            )
     item = ClinicalMasterItem(
         master_id=id, sequence_number=_coerce_int(body, "sequence_number", 1), fields=fields,
         created_by=_actor(current_user),

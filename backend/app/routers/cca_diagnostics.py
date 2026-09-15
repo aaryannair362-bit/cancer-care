@@ -1011,6 +1011,20 @@ def lab_worklist(db: Session = Depends(get_cca_db), current_user: dict = Depends
     return {"worklist": _worklist(db, _org_id(current_user), "LAB")}
 
 
+@router.get("/other-diagnostics/worklist")
+def other_diagnostics_worklist(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """ECG and similar investigations that are neither a lab/specimen test nor an imaging
+    study (oncologist feedback: these were previously mis-routed into Lab/Phlebotomy purely
+    because nothing else classified them -- see ORDER_TYPE_KEYWORDS in the oncologist HTML
+    pages and apply_order_set's old silent "LAB" default in cca.py). No dedicated role owns
+    this category yet -- readable by Lab/Phlebotomy and Radiology Coordinator (the two existing
+    roles closest to bedside/ancillary diagnostics) on top of _require_diagnostics_read's
+    always-on oncologist/Admin access, same least-privilege pattern as every other worklist
+    here."""
+    _require_diagnostics_read(current_user, is_cca_lab_phlebotomy, is_cca_radiology_coordinator)
+    return {"worklist": _worklist(db, _org_id(current_user), "OTHER_DIAGNOSTIC")}
+
+
 @router.post("/lab/orders/{order_id}/collect")
 async def collect_specimen(order_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     if not (is_cca_lab_phlebotomy(current_user) or is_admin(current_user)):

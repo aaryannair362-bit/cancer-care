@@ -94,7 +94,7 @@
         <main class="canvas">
             <div id="view-worklist" class="view-panel active">
                 <h1 class="page-title">OR Worklist</h1>
-                <p class="page-subtitle">Surgical plans scheduled, in progress, or in post-op — document intra-operative monitoring, the operative note, specimen handoff, and any blood transfusion here.</p>
+                <p class="page-subtitle">Relevant surgical plans across the caseload, from planning through post-op — procedure and procedure notes are visible as soon as a plan exists; intra-operative monitoring, specimen handoff, and blood transfusion documentation become available once a plan is scheduled.</p>
                 <div id="worklist-content"><!-- Populated via JS: loadOrWorklist() --></div>
             </div>
         </main>
@@ -113,34 +113,45 @@
             if (tab === 'worklist') loadOrWorklist();
         }
 
+        // OR-documentation input forms (monitoring/intra-op notes/specimens/blood) only make
+        // sense once a case is actually in/near the OR -- shown for these statuses only.
+        // Earlier-stage plans (planned/pre_op_ready) still appear in the worklist (procedure +
+        // procedure notes, read-only) so the nurse can see what's coming, per the oncologist's
+        // own framing ("information may already be written higher in the workflow ... needs to
+        // be surfaced down"), without offering intra-op forms for a case that hasn't happened yet.
+        const OR_DOCUMENTATION_STATUSES = ['scheduled', 'performed', 'post_op'];
+
         async function loadOrWorklist() {
             const container = document.getElementById('worklist-content');
             try {
-                const data = await Api.get(`${CCA_API}/patients`);
-                const patients = data.results || data.patients || [];
-                // No cross-patient surgical-plans endpoint exists (unlike the Radiation
-                // Physicist/Technologist worklist) -- surgical plans are few enough per
-                // organization that per-patient lookup is acceptable here.
-                const plansByPatient = await Promise.all(patients.map(async p => {
-                    try {
-                        const r = await Api.get(`${CCA_API}/patients/${p.id}/surgical-plans`);
-                        return { patient: p, plans: (r.surgical_plans || []).filter(pl => ['scheduled', 'performed', 'post_op'].includes(pl.status)) };
-                    } catch (err) { return { patient: p, plans: [] }; }
-                }));
-                const rows = plansByPatient.filter(r => r.plans.length);
+                // Shared with the Anaesthetist Worklist (cca_anaesthesia.py) -- org-wide join,
+                // already readable by CCASurgicalNurse, already returns procedure/status/
+                // pre_op_evaluation. Replaces the old per-patient N+1 loop, whose narrow
+                // scheduled/performed/post_op-only filter (client-side, on top of fetching
+                // every patient's plans individually) left this worklist empty for the common
+                // case of a real, relevant plan that simply hadn't reached "scheduled" yet.
+                const data = await Api.get(`${CCA_API}/surgical-plans/worklist`);
+                const rows = data.worklist || [];
                 if (!rows.length) {
-                    container.innerHTML = '<div class="section-card"><p class="empty-hint">No surgical plans currently scheduled, in progress, or in post-op.</p></div>';
+                    container.innerHTML = '<div class="section-card"><p class="empty-hint">No relevant surgical plans right now.</p></div>';
                     return;
                 }
-                container.innerHTML = rows.map(({ patient, plans }) => plans.map(plan => `
+                container.innerHTML = rows.map(plan => {
+                    const showOrForms = OR_DOCUMENTATION_STATUSES.includes(plan.status);
+                    return `
                     <div class="section-card">
                         <div class="section-head">
                             <div>
-                                <div class="section-title">${escapeHtml(patient.name)} <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(patient.mrn)}</span></div>
+                                <div class="section-title">${escapeHtml(plan.patient_name)} <span style="font-weight:400; color:var(--ink-500);">· ${escapeHtml(plan.patient_mrn)}</span></div>
                                 <div class="section-sub">${escapeHtml(plan.procedure)}${plan.anatomical_site ? ' · ' + escapeHtml(plan.anatomical_site) : ''}</div>
                             </div>
-                            <span class="badge ${plan.status === 'scheduled' ? 'badge-blue' : 'badge-green'}">${escapeHtml(plan.status.replace(/_/g, ' '))}</span>
+                            <span class="badge ${showOrForms ? (plan.status === 'scheduled' ? 'badge-blue' : 'badge-green') : 'badge-amber'}">${escapeHtml(plan.status.replace(/_/g, ' '))}</span>
                         </div>
+
+                        <div class="wl-label" style="margin-top:4px;">Procedure Notes</div>
+                        <div id="or-procedure-notes-${plan.id}"></div>
+
+                        ${showOrForms ? `
                         <div id="or-monitoring-${plan.id}"></div>
                         <div class="form-grid-3">
                             <div class="form-group"><label class="form-label">Vitals</label><input type="text" id="or-mon-vitals-${plan.id}" class="form-input" placeholder="e.g. BP 118/76, pulse 78" /></div>
@@ -168,10 +179,34 @@
                         </div>
                         <div class="form-checkbox-row"><input type="checkbox" id="or-blood-crossmatch-${plan.id}"/> <label for="or-blood-crossmatch-${plan.id}">Crossmatch/compatibility confirmed</label></div>
                         <button class="btn-outline btn-sm" onclick="submitOrBloodTransfusion(${plan.id})">+ Record Unit</button>
+                        ` : '<p class="empty-hint">Intra-operative documentation becomes available once this plan is scheduled.</p>'}
                     </div>
-                `).join('')).join('');
-                rows.forEach(({ plans }) => plans.forEach(plan => { loadOrMonitoring(plan.id); loadOrIntraOpNotes(plan.id); loadOrSpecimens(plan.id); loadOrBlood(plan.id); }));
+                `; }).join('');
+                rows.forEach(plan => {
+                    loadOrProcedureNotes(plan.id);
+                    if (OR_DOCUMENTATION_STATUSES.includes(plan.status)) {
+                        loadOrMonitoring(plan.id); loadOrIntraOpNotes(plan.id); loadOrSpecimens(plan.id); loadOrBlood(plan.id);
+                    }
+                });
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        // Read-only here -- authored by the Surgical Oncologist (surgical_oncologist.html),
+        // just surfaced down to the Surgical Nurse per the oncologist's own explicit request.
+        async function loadOrProcedureNotes(planId) {
+            const el = document.getElementById(`or-procedure-notes-${planId}`);
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${planId}/procedure-notes`);
+                el.innerHTML = (data.results || []).map(n => `
+                    <div class="med-card">
+                        <div class="med-card-title">${escapeHtml(n.procedure_name)}</div>
+                        ${n.indication ? `<div class="med-card-meta">Indication: ${escapeHtml(n.indication)}</div>` : ''}
+                        ${n.findings ? `<div class="med-card-meta">Findings: ${escapeHtml(n.findings)}</div>` : ''}
+                        ${n.technique ? `<div class="med-card-meta">Technique: ${escapeHtml(n.technique)}</div>` : ''}
+                        ${n.complications ? `<div class="med-card-meta">Complications: ${escapeHtml(n.complications)}</div>` : ''}
+                    </div>
+                `).join('') || '<p class="empty-hint">No procedure notes recorded yet.</p>';
+            } catch (err) { el.innerHTML = ''; }
         }
 
         async function loadOrMonitoring(planId) {

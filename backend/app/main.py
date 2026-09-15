@@ -7,7 +7,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -89,6 +89,39 @@ def _enforce_rate_limit(request: Request, bucket: str, limit: int, window_second
         raise HTTPException(429, "Too many requests, please try again later")
     hits.append(now)
     _rate_limit_hits[key] = hits
+
+
+# In-memory per-recording-session chunk transcript state for the chunked-upload OPD Scribe
+# flow (POST /api/transcribe-audio-chunk, frontend/js/voice-capture.js) -- same single-process
+# pattern as _rate_limit_hits above (WEB_CONCURRENCY=1, confirmed in render.yaml/config.py).
+# session_id -> {chunk_index: transcript_text}. Built (2026-09) alongside a real production fix:
+# during a long recording, MediaRecorder captures entirely client-side, so the browser makes
+# ZERO backend requests until Stop -- on Render's free tier, a service with 15+ minutes of no
+# inbound traffic scales to zero, so a consultation running longer than that got the service
+# spun down mid-recording, and the Stop-triggered upload then hit a cold, sleeping container.
+# Periodic chunk uploads during recording (~every 3 min, see voice-capture.js) keep real traffic
+# flowing throughout, independent of whatever Render plan is actually active, and progressively
+# transcribe the consultation so the final Stop-triggered wait is just the last short chunk
+# rather than the whole recording.
+_audio_chunk_sessions: dict[str, dict[int, str]] = {}
+_audio_chunk_session_started_at: dict[str, float] = {}
+_AUDIO_CHUNK_SESSION_MAX_AGE_SEC = 2 * 60 * 60  # 2 hours -- see _purge_stale_audio_chunk_sessions
+
+
+def _purge_stale_audio_chunk_sessions() -> None:
+    """A recording that's abandoned mid-way (browser closed/crashed before Stop ever fires the
+    is_final chunk) would otherwise leak its entry in _audio_chunk_sessions forever -- the exact
+    class of unbounded-growth failure the OLD, since-removed rolling-chunk-restart mode never
+    had to worry about (it kept everything client-side until Stop) but this design must guard
+    against explicitly. Cheap (dict scan), called at the top of the chunk-upload endpoint rather
+    than on a timer -- no new background-task infrastructure needed for what's a rare cleanup
+    path."""
+    cutoff = time.time() - _AUDIO_CHUNK_SESSION_MAX_AGE_SEC
+    stale = [sid for sid, started in _audio_chunk_session_started_at.items() if started < cutoff]
+    for sid in stale:
+        _audio_chunk_sessions.pop(sid, None)
+        _audio_chunk_session_started_at.pop(sid, None)
+
 
 app = FastAPI(title="AIVANA Hospital System")
 app.include_router(pharmacy_router)
@@ -1014,6 +1047,17 @@ async def get_transcription_provider(current_user: dict = Depends(get_current_us
     return {"provider": settings.TRANSCRIPTION_PROVIDER}
 
 
+async def _transcribe_one_audio_file(data: bytes, content_type: str, filename: str) -> str:
+    """Shared provider-branch transcription call -- used by both /api/transcribe-audio (whole
+    recording, one call) and /api/transcribe-audio-chunk (one call per chunk). Never catches
+    exceptions itself; callers decide how to surface a failure."""
+    if settings.TRANSCRIPTION_PROVIDER == "sarvam":
+        return await run_in_threadpool(
+            sarvam_batch_transcriber.transcribe_long_audio, data, content_type, filename,
+        )
+    return await run_in_threadpool(scribe.transcribe_audio, data, content_type, filename)
+
+
 @app.post("/api/transcribe-audio")
 async def transcribe_audio_endpoint(
     request: Request, audio: list[UploadFile] = File(...), current_user: dict = Depends(get_current_user)
@@ -1030,6 +1074,11 @@ async def transcribe_audio_endpoint(
     file client-side and only ever read audio[0] here. A stray extra file under the same field
     name is simply ignored rather than erroring, so this endpoint's behavior can't regress if
     TRANSCRIPTION_PROVIDER is switched.
+
+    Still used as-is for a short recording (voice-capture.js only ever produced one chunk, so
+    it's uploaded here as before) and as the fallback the Stop-time is_final chunk upload
+    degrades to if a recording somehow never rotated -- see /api/transcribe-audio-chunk for the
+    periodic-upload path a longer recording now takes instead.
     """
     # Fast pre-flight rejection on the declared size before buffering anything, plus a
     # post-read recheck below as defense-in-depth (a missing/spoofed Content-Length under
@@ -1046,15 +1095,7 @@ async def transcribe_audio_endpoint(
             raise HTTPException(400, "Empty audio upload")
         if len(data) > MAX_AUDIO_UPLOAD_BYTES:
             raise HTTPException(413, "Audio file too large")
-        if settings.TRANSCRIPTION_PROVIDER == "sarvam":
-            text = await run_in_threadpool(
-                sarvam_batch_transcriber.transcribe_long_audio,
-                data, first.content_type or "audio/webm", first.filename or "recording.webm",
-            )
-        else:
-            text = await run_in_threadpool(
-                scribe.transcribe_audio, data, first.content_type or "audio/webm", first.filename or "recording.webm"
-            )
+        text = await _transcribe_one_audio_file(data, first.content_type or "audio/webm", first.filename or "recording.webm")
         return {"transcript": text}
     except HTTPException:
         raise
@@ -1064,6 +1105,89 @@ async def transcribe_audio_endpoint(
         # caller, not just a log.
         logger.error("Audio transcription error: %s", e)
         raise HTTPException(502, "Transcription failed")
+
+
+@app.post("/api/transcribe-audio-chunk")
+async def transcribe_audio_chunk_endpoint(
+    request: Request, session_id: str = Form(...), chunk_index: int = Form(...),
+    is_final: bool = Form(False), audio: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Periodic-chunk leg of the OPD voice-consultation flow (see frontend/js/voice-capture.js) --
+    called every ~3 minutes DURING a long recording, not just once at Stop like
+    /api/transcribe-audio. Two production reasons this exists, not just latency:
+
+    1. During recording, MediaRecorder captures entirely client-side -- the browser makes ZERO
+       backend requests until Stop. A consultation running past 15 minutes of silence got the
+       Render service (free tier: scales to zero after 15 min with no inbound traffic) spun
+       down mid-recording, so the Stop-triggered upload hit a cold, sleeping container -- a real
+       production failure, confirmed from Render's own logs, independent of anything in the
+       Sarvam/Groq pipeline. Periodic chunk uploads keep real traffic flowing throughout.
+    2. By the time Stop is clicked, most of the consultation is already transcribed -- the
+       doctor only waits on the last short chunk, not the whole recording.
+
+    Each chunk is independently transcribed via the SAME provider-aware path
+    _transcribe_one_audio_file/transcribe_audio_endpoint already uses -- no new transcription
+    logic. Transcripts accumulate in _audio_chunk_sessions, keyed by session_id (a UUID the
+    client generates once per recording) and chunk_index (explicit, not arrival order --
+    chunk uploads can race and complete out of order over the network). A chunk that fails to
+    transcribe is dropped, not fatal (matching the OLD rolling-chunk mode's per-chunk
+    best-effort philosophy -- see git history, commit cd20eea) -- the final response flags
+    transcriptPartial instead of silently losing that slice with no signal.
+
+    On is_final=True: transcribes this last chunk too, joins every chunk for this session in
+    index order, clears the session, and returns the full transcript in the exact same
+    {"transcript": ...} shape /api/transcribe-audio already returns -- voice-capture.js's public
+    stop() contract is unchanged either way. No cap on chunk count -- unlike the OLD rolling-
+    chunk mode's hard MAX_AUDIO_CHUNKS=40 (which silently dropped the ENTIRE transcript past
+    ~16.7 minutes), a long recording just produces more chunks here; nothing rejects the whole
+    session over count.
+    """
+    _purge_stale_audio_chunk_sessions()
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_AUDIO_UPLOAD_BYTES:
+        raise HTTPException(413, "Audio chunk too large")
+    try:
+        data = await audio.read()
+        if data and len(data) > MAX_AUDIO_UPLOAD_BYTES:
+            raise HTTPException(413, "Audio chunk too large")
+
+        chunks = _audio_chunk_sessions.setdefault(session_id, {})
+        _audio_chunk_session_started_at.setdefault(session_id, time.time())
+
+        if data:
+            try:
+                chunks[chunk_index] = await _transcribe_one_audio_file(
+                    data, audio.content_type or "audio/webm", audio.filename or f"chunk_{chunk_index}.webm",
+                )
+            except Exception as e:
+                logger.warning("Audio chunk %d (session %s) failed to transcribe, dropping: %s", chunk_index, session_id, e)
+                # Key intentionally left absent (not set to "") -- see the is_final join below,
+                # which only counts an actually-present key as "this many chunks succeeded".
+
+        if not is_final:
+            return {"status": "accepted", "chunk_index": chunk_index}
+
+        # Chunk indices are 0-based and sequential (voice-capture.js), so chunk_index + 1 is
+        # exactly how many chunks this recording ever produced -- fewer actually-present keys
+        # than that means at least one genuinely failed to transcribe (see the except above,
+        # which deliberately never sets a key on failure) rather than that chunk legitimately
+        # being silence, which isn't distinguished here -- an occasional false "partial" flag on
+        # a truly-silent final chunk is an acceptable trade for never silently hiding a real
+        # transcription failure.
+        ordered_indices = sorted(chunks.keys())
+        transcript = " ".join(chunks[i] for i in ordered_indices if chunks[i]).strip()
+        transcript_partial = len(ordered_indices) < (chunk_index + 1)
+        _audio_chunk_sessions.pop(session_id, None)
+        _audio_chunk_session_started_at.pop(session_id, None)
+        return {"transcript": transcript, "transcriptPartial": transcript_partial}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Audio chunk transcription error (session %s): %s", session_id, e)
+        raise HTTPException(502, "Transcription failed")
+
 
 @app.post("/api/translate")
 async def translate_prescription(request: Request, current_user: dict = Depends(get_current_user)):

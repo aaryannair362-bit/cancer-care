@@ -97,3 +97,128 @@ def test_any_authenticated_role_can_call_it(client, make_user, auth_headers, mon
         headers=auth_headers(nurse),
     )
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# POST /api/transcribe-audio-chunk -- periodic-chunk leg of the same flow (see
+# frontend/js/voice-capture.js's module docstring for the production Render-sleep bug this
+# exists to fix). Each call transcribes one chunk via the same _transcribe_one_audio_file this
+# endpoint's sibling above already uses; a real session accumulates several before is_final.
+# ---------------------------------------------------------------------------
+
+def _upload_chunk(client, headers, session_id, chunk_index, is_final, audio=b"fake-audio-bytes"):
+    return client.post(
+        "/api/transcribe-audio-chunk",
+        files={"audio": (f"chunk_{chunk_index}.webm", audio, "audio/webm")},
+        data={"session_id": session_id, "chunk_index": str(chunk_index), "is_final": "true" if is_final else "false"},
+        headers=headers,
+    )
+
+
+def test_single_chunk_session_is_final_immediately(client, doctor, auth_headers, monkeypatch):
+    """A short recording that never rotates -- exactly one chunk, uploaded as is_final=true --
+    matches the old /api/transcribe-audio single-shot behavior."""
+    _mock_transcribe(monkeypatch, text="Patient has fever for two days")
+    resp = _upload_chunk(client, auth_headers(doctor), "sess-1", 0, is_final=True)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"transcript": "Patient has fever for two days", "transcriptPartial": False}
+
+
+def test_multiple_chunks_join_in_order_regardless_of_arrival_order(client, doctor, auth_headers, monkeypatch):
+    """Chunk uploads can race over the network -- the server must join by explicit chunk_index,
+    not the order requests happen to arrive in."""
+    texts = {0: "first chunk", 1: "second chunk", 2: "third chunk"}
+    headers = auth_headers(doctor)
+
+    def _fake(audio_bytes, content_type, filename):
+        # filename encodes which chunk this call is for (see _upload_chunk) -- lets the mock
+        # return the RIGHT text regardless of call order, same as the real per-chunk transcribe
+        # call would based on that chunk's own audio content.
+        idx = int(filename.split("_")[1].split(".")[0])
+        return texts[idx]
+
+    monkeypatch.setattr(app_main.scribe, "transcribe_audio", _fake)
+
+    # Upload out of order: 1, then 0, then 2 (final).
+    r1 = _upload_chunk(client, headers, "sess-order", 1, is_final=False)
+    assert r1.status_code == 200, r1.text
+    assert r1.json() == {"status": "accepted", "chunk_index": 1}
+    r0 = _upload_chunk(client, headers, "sess-order", 0, is_final=False)
+    assert r0.status_code == 200, r0.text
+    r2 = _upload_chunk(client, headers, "sess-order", 2, is_final=True)
+    assert r2.status_code == 200, r2.text
+    assert r2.json() == {"transcript": "first chunk second chunk third chunk", "transcriptPartial": False}
+
+
+def test_a_failed_chunk_is_dropped_and_flags_transcript_partial(client, doctor, auth_headers, monkeypatch):
+    """A chunk whose transcription genuinely fails (Groq/Sarvam error) must not abort the whole
+    session -- it's dropped, and the final response flags transcriptPartial so the doctor gets
+    a visible signal instead of a silently-incomplete transcript (same convention as
+    scribe.py's noteExtractionFailed)."""
+    headers = auth_headers(doctor)
+
+    def _fake(audio_bytes, content_type, filename):
+        if "chunk_1" in filename:
+            raise RuntimeError("simulated transient failure on this chunk")
+        return "ok chunk"
+
+    monkeypatch.setattr(app_main.scribe, "transcribe_audio", _fake)
+
+    r0 = _upload_chunk(client, headers, "sess-partial", 0, is_final=False)
+    assert r0.status_code == 200, r0.text
+    r1 = _upload_chunk(client, headers, "sess-partial", 1, is_final=False)
+    assert r1.status_code == 200, r1.text  # the chunk upload itself still succeeds -- failure is per-chunk, not per-request
+    r2 = _upload_chunk(client, headers, "sess-partial", 2, is_final=True)
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert body["transcript"] == "ok chunk ok chunk"  # chunk 1's text is missing, not "" inserted mid-string
+    assert body["transcriptPartial"] is True
+
+
+def test_session_state_is_cleared_after_finalizing(client, doctor, auth_headers, monkeypatch):
+    """A finalized session must not leak into a later session that happens to reuse chunk
+    indices -- confirms the per-session dict entry is actually removed, not just marked done."""
+    _mock_transcribe(monkeypatch, text="session one")
+    first = _upload_chunk(client, auth_headers(doctor), "sess-reuse", 0, is_final=True)
+    assert first.json()["transcript"] == "session one"
+
+    _mock_transcribe(monkeypatch, text="session two")
+    second = _upload_chunk(client, auth_headers(doctor), "sess-reuse", 0, is_final=True)
+    assert second.json()["transcript"] == "session two"  # not "session one session two"
+
+
+def test_chunk_session_requires_authentication(client):
+    resp = client.post(
+        "/api/transcribe-audio-chunk",
+        files={"audio": ("chunk_0.webm", b"fake-audio", "audio/webm")},
+        data={"session_id": "sess-noauth", "chunk_index": "0", "is_final": "true"},
+    )
+    assert resp.status_code in (401, 403)
+
+
+def test_oversized_chunk_rejected(client, doctor, auth_headers, monkeypatch):
+    monkeypatch.setattr(app_main, "MAX_AUDIO_UPLOAD_BYTES", 10)
+    _mock_transcribe(monkeypatch, text="should never be reached")
+    resp = _upload_chunk(client, auth_headers(doctor), "sess-oversized", 0, is_final=True, audio=b"x" * 100)
+    assert resp.status_code == 413
+
+
+def test_stale_chunk_sessions_are_purged(client, doctor, auth_headers, monkeypatch):
+    """A recording abandoned mid-way (browser closed before Stop ever sends is_final) must not
+    leak its entry in the in-memory session dict forever -- the class of unbounded-growth
+    failure the design explicitly guards against (see main.py's
+    _purge_stale_audio_chunk_sessions)."""
+    _mock_transcribe(monkeypatch, text="abandoned")
+    headers = auth_headers(doctor)
+    stale = _upload_chunk(client, headers, "sess-stale", 0, is_final=False)
+    assert stale.status_code == 200, stale.text
+    assert "sess-stale" in app_main._audio_chunk_sessions
+
+    monkeypatch.setattr(
+        app_main, "_audio_chunk_session_started_at",
+        {"sess-stale": app_main._audio_chunk_session_started_at["sess-stale"] - app_main._AUDIO_CHUNK_SESSION_MAX_AGE_SEC - 1},
+    )
+
+    # Any subsequent chunk upload (a different, live session) triggers the purge sweep.
+    _upload_chunk(client, headers, "sess-fresh", 0, is_final=False)
+    assert "sess-stale" not in app_main._audio_chunk_sessions

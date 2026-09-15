@@ -118,7 +118,11 @@
             const container = document.getElementById('worklist-content');
             try {
                 const data = await Api.get(`${CCA_API}/surgical-plans/worklist`);
-                const rows = data.worklist || [];
+                // This endpoint now also returns performed/post_op plans (broadened for the
+                // Surgical Nurse's OR Worklist, which shares it) -- a case that's already
+                // happened no longer "needs anaesthesia review", so keep this page's own
+                // pre-op-only scope by filtering those back out here.
+                const rows = (data.worklist || []).filter(r => !['performed', 'post_op'].includes(r.status));
                 if (!rows.length) {
                     container.innerHTML = '<div class="section-card"><p style="font-size:12.5px; color:var(--ink-500);">No surgical plans currently need anaesthesia review.</p></div>';
                     return;

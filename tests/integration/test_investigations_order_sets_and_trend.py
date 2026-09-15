@@ -94,6 +94,44 @@ def test_investigations_trend_and_overdue(client, onc_headers, patient, publishe
     assert any(o["patient_id"] == patient.id and o["item_name"] == "CBC" for o in overdue.json()["overdue"])
 
 
+def test_order_set_item_without_order_type_is_rejected(client, admin_headers):
+    """Regression test: apply_order_set used to silently default a missing order_type to "LAB"
+    -- confirmed live as the most reproducible cause of an oncologist-reported bug (USG/MRI/ECG
+    order-set items landing under Lab/Phlebotomy). Now caught at authoring time instead."""
+    master_id = client.post("/api/cca/clinical-masters", headers=admin_headers, json={
+        "master_type": "ORDER_SET", "name": "Staging Panel With A Bug",
+    }).json()["master"]["id"]
+
+    missing = client.post(f"/api/cca/clinical-masters/{master_id}/items", headers=admin_headers, json={
+        "sequence_number": 1, "fields": {"item_name": "USG Whole Abdomen", "item_code": "RAD-USG-ABD"},
+    })
+    assert missing.status_code == 422, missing.text
+
+    bogus = client.post(f"/api/cca/clinical-masters/{master_id}/items", headers=admin_headers, json={
+        "sequence_number": 1, "fields": {"order_type": "IMAGING", "item_name": "USG Whole Abdomen"},
+    })
+    assert bogus.status_code == 422, bogus.text
+
+    ok = client.post(f"/api/cca/clinical-masters/{master_id}/items", headers=admin_headers, json={
+        "sequence_number": 1, "fields": {"order_type": "OTHER_DIAGNOSTIC", "item_name": "ECG", "item_code": "OD-ECG"},
+    })
+    assert ok.status_code == 200, ok.text
+
+
+def test_order_type_validation_does_not_apply_to_non_order_set_masters(client, admin_headers):
+    """The same generic /clinical-masters/{id}/items endpoint serves many unrelated master
+    types (FACILITY, FORMULARY, ...) with completely different fields schemas -- the new
+    order_type validation must only fire for master_type=ORDER_SET, not break every other kind
+    of clinical master."""
+    master_id = client.post("/api/cca/clinical-masters", headers=admin_headers, json={
+        "master_type": "FORMULARY", "name": "Some Formulary",
+    }).json()["master"]["id"]
+    res = client.post(f"/api/cca/clinical-masters/{master_id}/items", headers=admin_headers, json={
+        "sequence_number": 1, "fields": {"code": "PARA500", "name": "Paracetamol 500mg"},
+    })
+    assert res.status_code == 200, res.text
+
+
 def test_adhoc_order_with_expected_result_by(client, onc_headers, patient):
     order = client.post("/api/cca/orders", headers=onc_headers, json={
         "patient_id": patient.id, "order_type": "LAB", "item_name": "Serum Creatinine",

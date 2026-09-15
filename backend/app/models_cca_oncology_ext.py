@@ -373,6 +373,38 @@ class SurgicalOperativeNote(Base):
     authored_at = Column(DateTime, default=datetime.utcnow)
 
 
+class SurgicalProcedureNote(Base):
+    """Oncologist-requested change (CCA_Oncology_Oncologist_Requested_Changes.pdf item 2):
+    a dedicated Procedure Notes area for the Surgical Oncologist's own Surgical Plan ->
+    Procedure -> Procedure Notes workflow, kept available to downstream surgical team members
+    (Surgical Nurse's OR Worklist reads these too).
+
+    Deliberately NOT the same table as ClinicalProcedureNote (models_cca_oncology_ext.py,
+    "Procedures & Notes" for Medical/Radiation Oncology and Palliative Care) -- that model's
+    own router explicitly 403s a CCASurgicalOncologist caller (see
+    cca_oncology_ext.py's _PROCEDURE_NOTE_ROLES and
+    tests/integration/test_palliative_and_procedure_notes.py::
+    test_surgical_oncologist_cannot_record_a_procedure_note, which must keep passing), because
+    a surgical procedure's notes belong with SurgicalPlan/SurgicalOperativeNote, not the
+    bedside/outpatient-procedure model those three specialties share. Also distinct from
+    SurgicalOperativeNote (the formal POST-operative record) -- this covers a note against the
+    plan/procedure at any stage (commonly pre-op/planning), not only after surgery is performed.
+    """
+    __tablename__ = "cca_surgical_procedure_notes"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    procedure_name = Column(String(255), nullable=False)
+    indication = Column(Text, nullable=True)
+    findings = Column(Text, nullable=True)
+    technique = Column(Text, nullable=True)
+    complications = Column(Text, nullable=True)
+    performed_at = Column(DateTime, default=datetime.utcnow)
+    performed_by = Column(String(200))
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class SurgicalIntraOpNote(Base):
     """Core Oncology 4 Sections gap-fill, Surgery item 2.2 -- a dedicated, append-only
     intra-operative narrative log kept by the Surgical Nurse, distinct from the surgeon's own

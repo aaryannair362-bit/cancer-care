@@ -412,6 +412,7 @@
                                     <option value="RADIOLOGY">Radiology</option>
                                     <option value="PATHOLOGY">Pathology</option>
                                     <option value="MOLECULAR_DIAGNOSTIC">Molecular Diagnostic</option>
+                                    <option value="OTHER_DIAGNOSTIC">Other Diagnostic (ECG, etc.)</option>
                                 </select>
                             </div>
                             <div class="form-group">
@@ -927,6 +928,10 @@
             MOLECULAR_DIAGNOSTIC: ['fish', 'ngs', 'next generation sequencing', 'pcr', 'pd-l1', 'pdl1', 'egfr', 'alk', 'ros1', 'braf', 'kras', 'brca', 'mutation', 'genomic', 'gene panel', 'gene expression', 'sequencing', 'msi', 'her2 fish'],
             PATHOLOGY: ['biopsy', 'histopath', 'histopathology', 'cytology', 'fnac', 'frozen section', 'ihc', 'immunohistochemistry', 'specimen', 'excision', 'core needle'],
             RADIOLOGY: ['ct ', 'cect', 'mri', 'pet-ct', 'pet ct', 'x-ray', 'xray', 'ultrasound', 'usg', 'mammogram', 'bone scan', 'imaging'],
+            // Oncologist feedback: ECG and similar bedside diagnostics were silently falling
+            // through to the 'LAB' default below (no keyword bucket matched them at all) and
+            // showing up under Lab/Phlebotomy instead of an appropriate diagnostics category.
+            OTHER_DIAGNOSTIC: ['ecg', 'ekg', 'electrocardiogram', 'echo', 'echocardiogram', 'echocardiography', 'pulmonary function', 'pft', 'spirometry', 'audiometry', 'stress test', 'treadmill test'],
         };
 
         function suggestOrderType() {
@@ -940,6 +945,7 @@
             if (ORDER_TYPE_KEYWORDS.MOLECULAR_DIAGNOSTIC.some(kw => combined.includes(kw))) matched = 'MOLECULAR_DIAGNOSTIC';
             else if (ORDER_TYPE_KEYWORDS.PATHOLOGY.some(kw => combined.includes(kw))) matched = 'PATHOLOGY';
             else if (ORDER_TYPE_KEYWORDS.RADIOLOGY.some(kw => combined.includes(kw))) matched = 'RADIOLOGY';
+            else if (ORDER_TYPE_KEYWORDS.OTHER_DIAGNOSTIC.some(kw => combined.includes(kw))) matched = 'OTHER_DIAGNOSTIC';
             typeSelect.value = matched;
             tagEl.style.display = 'inline';
         }

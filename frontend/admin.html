@@ -602,9 +602,15 @@ async function viewMasterDetail(id) {
         </table>
         ${isDraft ? `
         <div class="flex">
-            <input type="text" id="item-fields-json" placeholder='{"code":"...", "name":"..."}' style="flex:2;" />
+            <input type="text" id="item-fields-json" placeholder='${
+                data.master.master_type === 'ORDER_SET'
+                    ? '{"order_type":"LAB|RADIOLOGY|PATHOLOGY|OTHER_DIAGNOSTIC|MOLECULAR_DIAGNOSTIC", "item_name":"...", "item_code":"..."}'
+                    : '{"code":"...", "name":"..."}'
+            }' style="flex:2;" />
             <button class="btn-primary" onclick="addMasterItem()">Add Item</button>
-        </div>` : '<p style="color:var(--ink-500);">Published/retired masters are immutable — create a new draft version to change items.</p>'}
+        </div>
+        ${data.master.master_type === 'ORDER_SET' ? '<p style="color:var(--ink-500); font-size:12px; margin-top:6px;">order_type is required for every investigation order-set item -- an omitted or unrecognized value is now rejected here rather than silently defaulting to LAB when the order set is applied to a patient.</p>' : ''}
+        ` : '<p style="color:var(--ink-500);">Published/retired masters are immutable — create a new draft version to change items.</p>'}
     `;
 }
 

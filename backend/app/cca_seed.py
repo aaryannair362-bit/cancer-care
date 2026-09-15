@@ -44,7 +44,7 @@ from .models_cca_oncology_ext import (
     RadiationDiscrepancyRecord, RadiationPreTreatmentVerification,
     RadiationInVivoDosimetry, RadiationOncologyConsultation,
     SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
-    SurgicalStomaRecord, SurgicalComplicationRecord, SurgicalIntraOpNote,
+    SurgicalStomaRecord, SurgicalComplicationRecord, SurgicalIntraOpNote, SurgicalProcedureNote,
     AnaesthesiaPreOpEvaluation, AnaesthesiaPreOpEvaluationVersion,
     AnaesthesiaIntraOpRecord, AnaesthesiaRecoveryRecord,
 )
@@ -136,7 +136,7 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # SurgicalSpecimen/SurgicalBloodTransfusion convention), even though SurgicalPlan
             # itself is a pre-existing omission from this reset (not introduced here).
             SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
-            SurgicalStomaRecord, SurgicalComplicationRecord, SurgicalIntraOpNote,
+            SurgicalStomaRecord, SurgicalComplicationRecord, SurgicalIntraOpNote, SurgicalProcedureNote,
             # R10 Anaesthetist module (Core Oncology 4 Sections + 11 Additional Modules
             # developer handoffs) -- all three have their own patient_id.
             # AnaesthesiaPreOpEvaluationVersion (no patient_id of its own) is deleted above via

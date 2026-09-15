@@ -23,6 +23,7 @@ import pytest
 from tests.e2e.conftest import (
     mint_expired_access_token,
     mint_tokens,
+    queue_chunk_transcription_results,
     queue_transcription_result,
     set_tokens_in_browser,
 )
@@ -32,7 +33,8 @@ pytestmark = pytest.mark.e2e
 
 @pytest.fixture
 def opd_patient(make_user, db_session):
-    from app.models import Patient
+    from datetime import date
+    from app.models import Patient, QueueToken
 
     doctor = make_user(email="doctor@e2e-opd.com", role="Doctor")
     patient = Patient(name="E2E OPD Patient", age=30, gender="M", ward="OPD",
@@ -40,6 +42,17 @@ def opd_patient(make_user, db_session):
     db_session.add(patient)
     db_session.commit()
     db_session.refresh(patient)
+    # opd.html's #patient-select is populated exclusively from GET /api/queue/tokens
+    # (loadOpdQueue(), see frontend/opd.html) -- a raw Patient row alone never appears there. A
+    # Doctor caller's own query is additionally filtered to QueueToken.doctor_id ==
+    # current_user["id"] (routers/appointments.py's list_queue), so the token must be issued to
+    # THIS specific doctor, not just the same organization, to show up in the dropdown at all --
+    # matching how a real walk-in patient actually reaches this screen (Front Desk check-in).
+    db_session.add(QueueToken(
+        organization_id=doctor.organization_id, patient_id=patient.id, doctor_id=doctor.id,
+        token_number=1, token_date=date.today(), status="Waiting", issued_by=doctor.id,
+    ))
+    db_session.commit()
     return doctor, patient
 
 
@@ -142,3 +155,64 @@ def test_transcript_is_not_duplicated_across_multiple_utterances(
     )
     assert captured_prompts, "scribe was never called"
     assert captured_prompts[0].count("first thing said") == 1
+
+
+def test_long_recording_uploads_chunks_periodically_and_joins_the_transcript(
+    js_page, live_server_url, opd_patient, monkeypatch
+):
+    """
+    Regression test for a real production bug: a long consultation recording made ZERO
+    backend requests between Start and Stop (MediaRecorder captures entirely client-side),
+    which let Render's free-tier service scale to zero mid-recording after 15 minutes of no
+    traffic -- confirmed from real production logs. voice-capture.js now restarts the
+    MediaRecorder every chunkIntervalMs (3 min in production, not overridable from opd.html's
+    own call site) and uploads each finished chunk immediately via
+    POST /api/transcribe-audio-chunk, so real traffic flows throughout a long recording
+    instead of only once at Stop.
+
+    Drives this via Playwright's virtual clock (page.clock) rather than actually waiting real
+    minutes or modifying opd.html to accept a test-only short interval -- fast-forwarding
+    virtual time fires the real 3-minute setInterval exactly as production would, with zero
+    production code changes needed for testability. Two rotations (6+ minutes of virtual time)
+    plus the final Stop-triggered chunk = 3 total chunk uploads, each transcribed independently
+    and joined server-side in order.
+    """
+    import app.main as app_main
+    doctor, patient = opd_patient
+    monkeypatch.setattr(app_main.scribe, "_call_groq_api",
+                         lambda *a, **k: '{"chiefComplaint": "Long consultation"}')
+    queue_chunk_transcription_results(
+        monkeypatch, app_main, "first chunk of the conversation", "second chunk of the conversation",
+        "final short chunk",
+    )
+
+    tokens = mint_tokens(doctor)
+    set_tokens_in_browser(js_page, live_server_url, tokens["access_token"], tokens["refresh_token"])
+
+    js_page.goto(f"{live_server_url}/opd.html")
+    js_page.wait_for_selector("#patient-select")
+    js_page.wait_for_function("document.querySelector('#patient-select').options.length > 1")
+    js_page.select_option("#patient-select", str(patient.id))
+
+    # Installed AFTER navigation (so the page's own initial load/auth calls run on real time)
+    # but BEFORE Start Consulting is clicked, so the rotation timer voice-capture.js sets up
+    # inside start() is the one actually being advanced.
+    js_page.clock.install()
+    js_page.click("#start-consult-btn")
+    js_page.wait_for_timeout(150)  # let the first MediaRecorder actually start (real time, unaffected by the fake clock)
+
+    js_page.clock.fast_forward("03:05")  # past one 3-minute rotation
+    js_page.wait_for_timeout(150)  # let the rotation's chunk upload actually reach the (real) server
+    js_page.clock.fast_forward("03:05")  # past a second rotation
+    js_page.wait_for_timeout(150)
+
+    js_page.click("#stop-consult-btn")
+    js_page.wait_for_timeout(1200)
+
+    assert js_page.js_errors == [], f"unexpected JS errors: {js_page.js_errors}"
+    transcript_value = js_page.eval_on_selector("#transcript-input", "el => el.value")
+    assert transcript_value == "first chunk of the conversation second chunk of the conversation final short chunk", (
+        f"chunks were not uploaded/joined in order: {transcript_value!r}"
+    )
+    chief_complaint = js_page.eval_on_selector("#chief-complaint", "el => el.value")
+    assert chief_complaint == "Long consultation"

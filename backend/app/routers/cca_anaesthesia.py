@@ -105,13 +105,28 @@ def anaesthesia_surgical_plan_worklist(db: Session = Depends(get_cca_db), curren
     """Cross-patient worklist for the Anaesthetist -- surgical plans awaiting or already
     linked to a pre-op evaluation, org-wide (this role works off "who needs me next" across
     the whole caseload, matching radiation_phase_worklist's own reasoning for the same
-    problem in the Radiation module)."""
+    problem in the Radiation module).
+
+    Also the Surgical Nurse's OR Worklist's own data source (see surgical_nurse.html) -- shared
+    rather than duplicated, since it's already org-scoped, already readable by
+    is_cca_surgical_nurse (_require_anaesthesia_reader), and already returns exactly the
+    procedure/status/pre_op_evaluation shape both roles need. Status list broadened
+    (2026-09, oncologist feedback) from planned/pre_op_ready/scheduled-only to also include
+    performed/post_op -- the Surgical Nurse's OR-documentation forms (intra-op monitoring,
+    specimens, blood transfusion) are only relevant once a plan reaches exactly those later
+    stages, which this endpoint previously excluded entirely, leaving the nurse's list
+    effectively always empty even for a real, relevant plan. anaesthetist.html filters
+    performed/post_op back out client-side (a case that's already happened no longer "needs
+    anaesthesia review"), so this broadening is invisible to that page's own behavior."""
     _require_anaesthesia_reader(current_user)
     org_id = _org_id(current_user)
     rows = (
         db.query(SurgicalPlan, CCAPatient)
         .join(CCAPatient, SurgicalPlan.patient_id == CCAPatient.id)
-        .filter(CCAPatient.organization_id == org_id, SurgicalPlan.status.in_(["planned", "pre_op_ready", "scheduled"]))
+        .filter(
+            CCAPatient.organization_id == org_id,
+            SurgicalPlan.status.in_(["planned", "pre_op_ready", "scheduled", "performed", "post_op"]),
+        )
         .order_by(SurgicalPlan.id.desc())
         .all()
     )

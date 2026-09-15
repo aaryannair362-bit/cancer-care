@@ -157,6 +157,43 @@ def test_operative_note_requires_procedure_performed_and_never_overwrites_plan_f
 
 
 # ---------------------------------------------------------------------------
+# Oncologist-requested change item 2/3: Surgical Procedure Notes -- a dedicated Procedure Notes
+# area against a SurgicalPlan, distinct from ClinicalProcedureNote (which explicitly excludes
+# the Surgical Oncologist -- see test_palliative_and_procedure_notes.py), readable by both the
+# Surgical Oncologist and the Surgical Nurse (OR Worklist surfaces these).
+# ---------------------------------------------------------------------------
+
+def test_surgical_procedure_note_requires_procedure_name_and_is_readable_by_nurse(client, surgeon_headers, or_nurse_headers, patient, anaesthetist_headers):
+    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id, anaesthetist_headers)
+
+    missing = client.post(f"/api/cca/surgical-plans/{plan_id}/procedure-notes", headers=surgeon_headers, json={
+        "findings": "No adverse findings.",
+    })
+    assert missing.status_code == 422
+
+    note = client.post(f"/api/cca/surgical-plans/{plan_id}/procedure-notes", headers=surgeon_headers, json={
+        "procedure_name": "Modified radical mastectomy", "indication": "T2N0 invasive ductal carcinoma.",
+        "findings": "No adverse findings.", "technique": "Standard approach.",
+    })
+    assert note.status_code == 201, note.text
+    assert note.json()["procedure_note"]["procedure_name"] == "Modified radical mastectomy"
+
+    listed_by_nurse = client.get(f"/api/cca/surgical-plans/{plan_id}/procedure-notes", headers=or_nurse_headers)
+    assert listed_by_nurse.status_code == 200, listed_by_nurse.text
+    assert len(listed_by_nurse.json()["results"]) == 1
+
+
+def test_infusion_nurse_cannot_write_or_read_surgical_procedure_notes(client, surgeon_headers, infusion_nurse_headers, patient, anaesthetist_headers):
+    plan_id = _create_and_schedule_plan(client, surgeon_headers, patient.id, anaesthetist_headers)
+    denied_write = client.post(f"/api/cca/surgical-plans/{plan_id}/procedure-notes", headers=infusion_nurse_headers, json={
+        "procedure_name": "Modified radical mastectomy",
+    })
+    assert denied_write.status_code == 403
+    denied_read = client.get(f"/api/cca/surgical-plans/{plan_id}/procedure-notes", headers=infusion_nurse_headers)
+    assert denied_read.status_code == 403
+
+
+# ---------------------------------------------------------------------------
 # Item 26: Specimen Labelling and Lab Handoff
 # ---------------------------------------------------------------------------
 

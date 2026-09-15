@@ -412,7 +412,10 @@ class CCAOrder(Base):
     id = Column(Integer, primary_key=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     encounter_id = Column(Integer, ForeignKey("cca_encounters.id"), nullable=True)
-    order_type = Column(String(50), nullable=False)  # LAB, RADIOLOGY, PATHOLOGY
+    # LAB, RADIOLOGY, PATHOLOGY, OTHER_DIAGNOSTIC (ECG and similar non-lab/non-imaging
+    # investigations -- see routers/cca_diagnostics.py's other_diagnostics_worklist). Free-text
+    # String, not a DB/Python enum -- whatever the caller sends is written verbatim.
+    order_type = Column(String(50), nullable=False)
     item_name = Column(String(200), nullable=False)
     item_code = Column(String(100))
     clinical_indication = Column(Text, nullable=False)

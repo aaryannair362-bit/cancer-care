@@ -33,7 +33,8 @@ from ..models_cca_oncology_ext import (
     RadiationTreatmentUnit, RadiationEquipmentQARecord, RadiationEquipmentIssue,
     RadiationInVivoDosimetry, RadiationOncologyConsultation,
     Regimen, RegimenDrugLine, SurgicalPlan, TreatmentPlanPhase,
-    SurgicalIntraOpMonitoring, SurgicalIntraOpNote, SurgicalOperativeNote, SurgicalSpecimen, SurgicalBloodTransfusion,
+    SurgicalIntraOpMonitoring, SurgicalIntraOpNote, SurgicalOperativeNote, SurgicalProcedureNote,
+    SurgicalSpecimen, SurgicalBloodTransfusion,
     SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
     SurgicalStomaRecord, SurgicalComplicationRecord,
     ClinicalProcedureNote, PalliativeTreatmentOrder,
@@ -1191,6 +1192,58 @@ async def record_operative_note(plan_id: int, request: Request, db: Session = De
     db.commit()
     db.refresh(note)
     return {"status": "success", "operative_note": _operative_note_out(note)}
+
+
+def _surgical_procedure_note_out(n: SurgicalProcedureNote) -> dict:
+    return {
+        "id": n.id, "patient_id": n.patient_id, "surgical_plan_id": n.surgical_plan_id,
+        "procedure_name": n.procedure_name, "indication": n.indication, "findings": n.findings,
+        "technique": n.technique, "complications": n.complications,
+        "performed_at": n.performed_at.isoformat(), "performed_by": n.performed_by,
+    }
+
+
+@router.get("/surgical-plans/{plan_id}/procedure-notes")
+def list_surgical_procedure_notes(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Oncologist-requested change item 2/3 -- readable by the same surgical team as OR
+    documentation (_require_surgical_team: Surgical Oncologist or Surgical Nurse), so the
+    Surgical Nurse's OR Worklist can surface these alongside the procedure itself."""
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    rows = db.query(SurgicalProcedureNote).filter(
+        SurgicalProcedureNote.surgical_plan_id == plan.id
+    ).order_by(SurgicalProcedureNote.performed_at.desc()).all()
+    return {"results": [_surgical_procedure_note_out(n) for n in rows]}
+
+
+@router.post("/surgical-plans/{plan_id}/procedure-notes", status_code=201)
+async def record_surgical_procedure_note(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """See SurgicalProcedureNote's docstring for why this is a separate model/endpoint from
+    ClinicalProcedureNote's patient-scoped one (which explicitly excludes the Surgical
+    Oncologist)."""
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    procedure_name = (body.get("procedure_name") or "").strip()
+    if not procedure_name:
+        raise HTTPException(422, "procedure_name is required")
+
+    actor = _actor(current_user)
+    note = SurgicalProcedureNote(
+        patient_id=plan.patient_id, surgical_plan_id=plan.id, procedure_name=procedure_name,
+        indication=body.get("indication"), findings=body.get("findings"), technique=body.get("technique"),
+        complications=body.get("complications"), performed_by=actor, created_by=actor,
+    )
+    db.add(note)
+    db.flush()
+    publish(
+        db, "SURGICAL_PROCEDURE_NOTE_RECORDED", patient_id=plan.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Procedure note: {procedure_name}", category="TREATMENT",
+        description=f"{actor} recorded a procedure note for {procedure_name}.", plan_id=plan.id,
+    )
+    db.commit()
+    db.refresh(note)
+    return {"status": "success", "procedure_note": _surgical_procedure_note_out(note)}
 
 
 def _specimen_out(s: SurgicalSpecimen) -> dict:

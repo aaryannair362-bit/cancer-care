@@ -17,6 +17,7 @@ from tests._voice_helpers import (  # noqa: F401 - compatibility re-exports
     MOCK_MEDIA_RECORDER_INIT_SCRIPT,
     mint_tokens,
     mock_transcription_network_failure,
+    queue_chunk_transcription_results,
     queue_transcription_result,
     set_tokens_in_browser,
     start_live_server,
