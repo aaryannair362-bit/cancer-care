@@ -30,6 +30,7 @@ from ..ocr_service import extract_document, strip_markup_for_display
 from ..scribe import scribe
 from .. import drug_matcher
 from ..document_pages import process_document_pages
+from ..transcript_correction import correct_transcript
 from ..models_cca_oncology_ext import (
     CCARadiationPhase, RadiationFraction, RadiationPrescription,
     Regimen, RegimenDrugLine, TreatmentOrderDrugLine, SurgicalPlan,
@@ -2284,6 +2285,26 @@ def resolve_adverse_reaction(id: int, db: Session = Depends(get_cca_db), current
     db.commit()
     db.refresh(entry)
     return {"status": "success", "adverse_reaction": _adverse_reaction_out(entry)}
+
+
+@router.post("/transcript/correct")
+async def correct_encounter_transcript(
+    request: Request, current_user: dict = Depends(get_current_user)
+):
+    """Applies transcript_correction.correct_transcript's curated, narrow ASR-misrecognition
+    fixes (see that module's docstring for exactly what this does and does not attempt) to a
+    just-transcribed consultation recording, BEFORE the doctor ever sees it in their editable
+    transcript box -- see the CCA oncologist pages' stopScribeRecording(), which calls this
+    right after the recording finishes transcribing. Stateless -- no DB/patient/org involvement,
+    same as POST /api/scribe and POST /api/transcribe-audio -- so no role gate beyond
+    authentication. Deliberately its own endpoint rather than folded into the shared
+    /api/transcribe-audio(-chunk) endpoints: those are used by the GENERAL non-oncology OPD
+    scribe too, and this correction vocabulary is oncology-specific."""
+    body = await request.json()
+    transcript = body.get("transcript")
+    if not isinstance(transcript, str):
+        raise HTTPException(400, "transcript must be a string")
+    return correct_transcript(transcript)
 
 
 @router.post("/encounters/{id}/note/draft")

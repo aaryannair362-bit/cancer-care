@@ -1063,3 +1063,37 @@ def test_list_documents_reports_page_type_sections(client, headers, db_session, 
         {"page_type": "CASE_DETAILS", "start_page": 1, "end_page": 1, "page_count": 1},
         {"page_type": "LAB_REPORT", "start_page": 2, "end_page": 2, "page_count": 1},
     ]
+
+
+# ---------------------------------------------------------------------------
+# POST /api/cca/transcript/correct -- oncology-specific ASR-misrecognition correction pass
+# (transcript_correction.py) applied to a just-transcribed consultation recording before the
+# doctor sees it. See that module's docstring for what it does and deliberately does not.
+# ---------------------------------------------------------------------------
+
+def test_transcript_correct_applies_known_asr_confusions(client, headers):
+    res = client.post(
+        "/api/cca/transcript/correct", headers=headers,
+        json={"transcript": "the report shows heart is 2 positive, planning new adjuvant therapy"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["corrected_text"] == "the report shows HER2 positive, planning neoadjuvant therapy"
+    assert len(body["corrections"]) == 2
+
+
+def test_transcript_correct_no_known_confusions_returns_unchanged(client, headers):
+    text = "patient reports mild fatigue for two weeks"
+    res = client.post("/api/cca/transcript/correct", headers=headers, json={"transcript": text})
+    assert res.status_code == 200
+    assert res.json() == {"corrected_text": text, "corrections": []}
+
+
+def test_transcript_correct_requires_authentication(client):
+    res = client.post("/api/cca/transcript/correct", json={"transcript": "some text"})
+    assert res.status_code in (401, 403)
+
+
+def test_transcript_correct_rejects_non_string_transcript(client, headers):
+    res = client.post("/api/cca/transcript/correct", headers=headers, json={"transcript": 12345})
+    assert res.status_code == 400

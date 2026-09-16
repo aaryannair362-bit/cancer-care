@@ -342,6 +342,7 @@
                         <div class="form-group" style="margin-bottom:10px;">
                             <label class="form-label">Transcript</label>
                             <textarea id="scribe-transcript" class="form-textarea" rows="4" placeholder="Speak using Start Recording, or type/paste the consultation transcript here..."></textarea>
+                            <div id="scribe-asr-corrections" style="display:none;font-size:11.5px;color:#B45309;background:#FEF3C7;border:1px solid #F59E0B;border-radius:6px;padding:6px 10px;margin-top:6px;"></div>
                         </div>
                         <button class="btn-outline" onclick="generateAiDraft()">✨ Generate AI Draft</button>
                         <div id="scribe-status" style="font-size:12px; margin-top:8px; color:var(--ink-500);"></div>
@@ -740,11 +741,48 @@
             }
             try {
                 await scribeVoiceRecorder.start();
+                const asrNoteEl = document.getElementById('scribe-asr-corrections');
+                if (asrNoteEl) asrNoteEl.style.display = 'none';
                 document.getElementById('scribe-start-btn').style.display = 'none';
                 document.getElementById('scribe-stop-btn').style.display = 'inline-block';
                 statusEl.textContent = '🎤 Recording...';
             } catch (err) {
                 statusEl.textContent = '⚠️ Microphone access denied — type the transcript manually.';
+            }
+        }
+
+        // Oncology-specific ASR-error correction (backend/app/transcript_correction.py) -- runs
+        // right after transcription, BEFORE the doctor ever sees the transcript, so what they
+        // review already has known Sarvam misrecognitions fixed (e.g. "heart is 2 positive" ->
+        // "HER2 positive"). Every correction actually made is shown in #scribe-asr-corrections,
+        // never applied invisibly: a wrong correction costs no more than a raw ASR error would,
+        // since the transcript box stays freely editable either way, but only if the doctor can
+        // SEE that a correction happened. Never blocks/fails the recording flow -- a correction-
+        // endpoint error just falls back to the raw transcript, same as a raw ASR error would
+        // have been shown before this feature existed.
+        async function applyAsrCorrections(transcript) {
+            const noteEl = document.getElementById('scribe-asr-corrections');
+            if (!transcript || !transcript.trim()) {
+                if (noteEl) noteEl.style.display = 'none';
+                return transcript;
+            }
+            try {
+                const result = await Api.post(`${CCA_API}/transcript/correct`, { transcript });
+                const corrections = result.corrections || [];
+                if (noteEl) {
+                    if (corrections.length) {
+                        noteEl.style.display = 'block';
+                        noteEl.innerHTML = '⚠️ AI corrected ' + corrections.length + ' likely misheard term(s) -- verify against the recording: ' +
+                            corrections.map(c => `<strong>"${escapeHtml(c.before)}"</strong> → <strong>"${escapeHtml(c.after)}"</strong>`).join(', ');
+                    } else {
+                        noteEl.style.display = 'none';
+                    }
+                }
+                return result.corrected_text || transcript;
+            } catch (err) {
+                console.error("Transcript correction failed, using raw transcript:", err);
+                if (noteEl) noteEl.style.display = 'none';
+                return transcript;
             }
         }
 
@@ -756,7 +794,8 @@
             statusEl.textContent = 'Transcribing...';
             try {
                 const transcript = await scribeVoiceRecorder.stop();
-                document.getElementById('scribe-transcript').value = transcript;
+                const corrected = await applyAsrCorrections(transcript);
+                document.getElementById('scribe-transcript').value = corrected;
                 if (scribeVoiceRecorder.wasInterrupted()) {
                     statusEl.textContent = '⚠️ Recording was interrupted before you clicked Stop — the transcript below may be incomplete. Review it carefully.';
                     toast('Recording was interrupted — transcript may be incomplete', 'error');
