@@ -8,9 +8,6 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    # Higher-limit developer-tier key, kept as a separate .env entry rather than overwriting
-    # GROQ_API_KEY directly so the original key stays available/documented as a fallback.
-    GROQ_API_KEY_Prod: str = os.getenv("GROQ_API_KEY_Prod", "")
     # Env-overridable (not hardcoded) so a model swap is a Render dashboard env var edit, not a
     # code deploy -- learned the hard way: GROQ_AUDIO_MODEL wasn't overridable this way either
     # when it was changed in-code, which turned one wrong model guess into a broken-production-
@@ -27,9 +24,9 @@ class Settings(BaseSettings):
     # classify_and_extract_page) -- kept on its OWN Groq account/key so a multi-page document
     # upload's token usage never competes with GROQ_API_KEY's 8000-token/minute budget for live
     # OPD/IPD consultation scribing (see rate_limiter.py's ocr_extraction_* buckets). Falls back
-    # to GROQ_API_KEY below (post-construction, after the Prod-key resolution) when not set, so a
-    # deployment that hasn't been given a dedicated key yet keeps working exactly as before --
-    # both workloads sharing one budget, not a broken one.
+    # to GROQ_API_KEY below (post-construction) when not set, so a deployment that hasn't been
+    # given a dedicated key yet keeps working exactly as before -- both workloads sharing one
+    # budget, not a broken one.
     GROQ_API_KEY_OCR: str = os.getenv("GROQ_API_KEY_OCR", "")
     # Sarvam AI's Saaras v3 (sarvam_batch_transcriber.py) -- audio transcription engine
     # purpose-built for Hindi/English medical speech and code-switching. Legacy shared
@@ -40,7 +37,7 @@ class Settings(BaseSettings):
     # (Scribe's audio transcription) are billed and rate-limited independently on Sarvam's side
     # per key, so a burst on one feature can no longer exhaust the other's quota by sharing one
     # account. Each falls back to the shared SARVAM_API_KEY above (resolved post-construction
-    # below, same reason GROQ_API_KEY_Prod is) when its own dedicated key isn't set, so a
+    # below, same reason GROQ_API_KEY_OCR is) when its own dedicated key isn't set, so a
     # deployment that hasn't been given split keys yet keeps working unchanged.
     SARVAM_OCR_API_KEY: str = os.getenv("SARVAM_OCR_API_KEY", "")
     SARVAM_STT_API_KEY: str = os.getenv("SARVAM_STT_API_KEY", "")
@@ -58,7 +55,7 @@ class Settings(BaseSettings):
     SARVAM_OCR_LANGUAGE: str = os.getenv("SARVAM_OCR_LANGUAGE", "en-IN")
     # "sarvam" (Sarvam Document AI, see ocr_service.py) or "local" (RapidOCR, no external call).
     # Left blank by default here -- resolved below, after Settings() construction, against the
-    # already-loaded SARVAM_API_KEY (same reason GROQ_API_KEY_Prod is applied post-construction
+    # already-loaded SARVAM_API_KEY (same reason GROQ_API_KEY_OCR is applied post-construction
     # below: a bare os.getenv() at class-body-eval time can't see a key that only exists in the
     # backend/.env file, which pydantic-settings loads later, during Settings() itself).
     OCR_PROVIDER: str = os.getenv("OCR_PROVIDER", "")
@@ -98,14 +95,9 @@ class Settings(BaseSettings):
         )
 
 settings = Settings()
-# Prefer the developer-tier key (higher rate limits) whenever it's configured; every caller
-# in the app reads settings.GROQ_API_KEY, so this is the one place that needs to know both
-# exist.
-if settings.GROQ_API_KEY_Prod:
-    settings.GROQ_API_KEY = settings.GROQ_API_KEY_Prod
-
-# Resolved AFTER the Prod-key override above so an unset GROQ_API_KEY_OCR falls back to whichever
-# key GROQ_API_KEY actually ended up as, not the pre-override value.
+# GROQ_API_KEY_OCR falls back to GROQ_API_KEY when not set, so a deployment that hasn't been
+# given a dedicated OCR key yet keeps working exactly as before (both workloads sharing one
+# budget, not a broken one).
 if not settings.GROQ_API_KEY_OCR:
     settings.GROQ_API_KEY_OCR = settings.GROQ_API_KEY
 
