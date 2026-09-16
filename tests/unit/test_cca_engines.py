@@ -139,6 +139,40 @@ def test_extract_clinical_facts_parses_real_shaped_response(monkeypatch):
     assert facts[0]["value"] == "Breast"
 
 
+def test_extract_clinical_facts_accepts_the_other_clinical_finding_fallback(monkeypatch):
+    """Regression: FACT_TYPES used to be a closed, oncology-staging-specific enum (PRIMARY_SITE/
+    LATERALITY/HISTOLOGY/.../ALLERGY) with no fallback -- a real fact the model correctly read
+    off the page (e.g. surgical/family/social history, a non-oncology diagnosis) had no valid
+    fact_type to be assigned, so extraction silently dropped it even though OCR, preprocessing,
+    and the model all worked correctly. OTHER_CLINICAL_FINDING closes that gap; this pins that a
+    fact using it is accepted, not filtered out the way an actually-invalid type is."""
+    def _fake_generate_json(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
+        return {"facts": [
+            {"fact_type": "OTHER_CLINICAL_FINDING", "value": "Appendectomy in 2018", "verbatim": "s/p appendectomy 2018", "confidence": 0.9},
+        ]}
+
+    monkeypatch.setattr(scribe, "_generate_json", _fake_generate_json)
+    facts = extract_clinical_facts("Past surgical history: s/p appendectomy 2018")
+    assert len(facts) == 1
+    assert facts[0]["fact_type"] == "OTHER_CLINICAL_FINDING"
+    assert facts[0]["value"] == "Appendectomy in 2018"
+
+
+def test_extract_clinical_facts_prompt_instructs_the_model_not_to_drop_unfitting_facts(monkeypatch):
+    """Pins the actual instruction text reaches the model -- the fallback fact_type existing is
+    useless if the prompt never tells the model when to use it."""
+    captured = {}
+
+    def _fake_generate_json(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
+        captured["system"] = system
+        return {"facts": []}
+
+    monkeypatch.setattr(scribe, "_generate_json", _fake_generate_json)
+    extract_clinical_facts("Diagnosis: Breast carcinoma")
+    assert "OTHER_CLINICAL_FINDING" in captured["system"]
+    assert "never silently omit" in captured["system"]
+
+
 def test_staging_readiness_state_machine(db_session):
     patient = CCAPatient(mrn="TEST-MRN-02", name="Staging Patient", age=60, sex="F", organization_id=1)
     db_session.add(patient)

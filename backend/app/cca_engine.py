@@ -674,6 +674,17 @@ FACT_TYPES = (
     "PRIMARY_SITE", "LATERALITY", "HISTOLOGY", "GRADE", "T_EVIDENCE", "N_EVIDENCE",
     "M_EVIDENCE", "BIOMARKER_RESULT", "LAB_RESULT", "IMAGING_FINDING", "ECOG",
     "COMORBIDITY", "MEDICATION", "ALLERGY",
+    # Fallback bucket -- added after finding this enum was closed with no escape hatch: every
+    # other entry above is a specific oncology-staging concept, so any clinically relevant fact
+    # that doesn't fit one of them (surgical/family/social history, vitals, a non-oncology
+    # diagnosis, a follow-up plan, ...) had nowhere to go, and the prompt below only ever asked
+    # for "one of" this list with no instruction covering that case -- extraction silently
+    # dropped it rather than mis-typing it. This is a real, not hypothetical, information-loss
+    # path: a document can be entirely correctly OCR'd and entirely correctly sent to Groq, and
+    # still lose real clinical content purely because the category vocabulary had no room for
+    # it. Never used as a dumping ground for things that DO fit a specific type above -- both
+    # prompts below say so explicitly.
+    "OTHER_CLINICAL_FINDING",
 )
 
 # Shared by extract_clinical_facts (below) and classify_and_extract_page (further down) -- both
@@ -764,7 +775,14 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
         '{"facts": [{"fact_type": "<one of ' + "|".join(FACT_TYPES) + '>", '
         '"value": "<short structured value>", "verbatim": "<exact quoted source text, at most '
         'roughly 15 words>", "confidence": <0.0-1.0>}]}. If nothing relevant is found, return '
-        '{"facts": []}. Never include markdown or commentary outside the JSON object.'
+        '{"facts": []}. Never include markdown or commentary outside the JSON object. '
+        "IMPORTANT: never silently omit a clinically relevant fact just because it doesn't "
+        "match one of the specific fact_type values above -- use OTHER_CLINICAL_FINDING for "
+        "anything clinically relevant (surgical/family/social history, vitals, a diagnosis "
+        "unrelated to the primary cancer, a follow-up plan or advice, or any other real clinical "
+        "content) that doesn't fit a more specific type. Only use OTHER_CLINICAL_FINDING when "
+        "no more specific type applies -- never as a default for something a specific type "
+        "already covers."
     )
 
     slices = _slice_text_by_bytes(document_text, _PAGE_EXTRACTION_SLICE_BYTES)
@@ -1015,7 +1033,13 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
         "|".join(FACT_TYPES) + '>", "value": "<short structured value>", "verbatim": "<exact '
         'quoted source text, at most roughly 15 words>", "confidence": <0.0-1.0>}]}. If no '
         'facts are found, return an empty "facts" array. Never include markdown or commentary '
-        "outside the JSON object."
+        "outside the JSON object. IMPORTANT: never silently omit a clinically relevant fact "
+        "just because it doesn't match one of the specific fact_type values above -- use "
+        "OTHER_CLINICAL_FINDING for anything clinically relevant (surgical/family/social "
+        "history, vitals, a diagnosis unrelated to the primary cancer, a follow-up plan or "
+        "advice, or any other real clinical content) that doesn't fit a more specific type. "
+        "Only use OTHER_CLINICAL_FINDING when no more specific type applies -- never as a "
+        "default for something a specific type already covers."
     )
 
     slices = _slice_text_by_bytes(text, _PAGE_EXTRACTION_SLICE_BYTES)

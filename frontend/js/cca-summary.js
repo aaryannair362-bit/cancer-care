@@ -18,6 +18,7 @@ const CCA_SUMMARY_FACT_LABELS = {
     M_EVIDENCE: 'M stage evidence', BIOMARKER_RESULT: 'Biomarker result', LAB_RESULT: 'Lab result',
     IMAGING_FINDING: 'Imaging finding', ECOG: 'ECOG', COMORBIDITY: 'Comorbidity',
     MEDICATION: 'Medication', ALLERGY: 'Allergy',
+    OTHER_CLINICAL_FINDING: 'Other clinical findings',
 };
 
 const CCA_MED_SOURCE_LABEL = {
