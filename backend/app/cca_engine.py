@@ -682,7 +682,18 @@ FACT_TYPES = (
 # full however many calls that takes, however large it is -- see both functions' docstrings for
 # the real documents (data_insurance/) that motivated removing the truncation/ceiling this
 # constant used to have paired with it.
-_PAGE_EXTRACTION_SLICE_CHARS = 6000
+#
+# Raised from 6000 -- verified live (see rate_limiter.py's own token-bucket calibration notes)
+# that each Groq call pays a large ~1700+ hidden-reasoning-token cost roughly independent of how
+# much real content is in the prompt, so a smaller slice size doesn't make each call cheaper, it
+# just multiplies how many times that fixed cost gets paid for the same document. 18000 chars is
+# ~4500 estimated prompt tokens + up to 2000 completion tokens (~6500 total), still comfortably
+# under rate_limiter.estimate_tokens's own 7500-token per-call cap, while cutting total calls per
+# document roughly 3x for the same content coverage -- a real 126-call multi-page document's
+# call count (both this pass and classify_and_extract_page's per-page/chunk pass, which shares
+# this same constant) drops proportionally, directly reducing how much of the shared per-minute
+# Groq budget one large document upload consumes.
+_PAGE_EXTRACTION_SLICE_CHARS = 18000
 
 
 def extract_clinical_facts(document_text: str) -> List[Dict]:
