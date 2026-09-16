@@ -133,11 +133,20 @@ class TokenBucket:
             self.tokens -= shortfall
 
 
-# Calibrated against live Groq headers:
-# x-ratelimit-limit-requests: 1000, x-ratelimit-limit-tokens: 8000 (tokens refill continuously in ~60s = ~133 TPM)
-# Paced conservatively with headroom for concurrent OPD and IPD users.
-_REQUEST_RATE_PER_SEC = 1.0
-_REQUEST_BURST_CAPACITY = 10.0
+# CORRECTED 2026-09-16: the "x-ratelimit-limit-requests: 1000" this was originally calibrated
+# against is this account's REQUESTS-PER-DAY limit, not requests-per-minute -- confirmed against
+# Groq's own published rate-limits page, which lists openai/gpt-oss-120b's free-tier limits as
+# RPM 30 / RPD 1,000 / TPM 8,000 / TPD 200,000. The live header this file reads back doesn't
+# distinguish RPM from RPD by name, and 1000 happens to be the RPD figure, so the request bucket
+# was paced at ~60 requests/minute (_REQUEST_RATE_PER_SEC=1.0) -- roughly DOUBLE the real 30 RPM
+# ceiling -- for as long as this calibration stood. Any real burst (e.g. a multi-slice document
+# upload) could blow through the actual per-minute cap well before this bucket ever throttled it,
+# independent of token size or slice size. Paced at 0.4/sec (~24 RPM) with a small burst, leaving
+# headroom below the documented 30 RPM rather than pacing right up against it.
+#
+# Token side (TPM 8,000) was already correctly calibrated and is unchanged.
+_REQUEST_RATE_PER_SEC = 0.4
+_REQUEST_BURST_CAPACITY = 5.0
 _TOKEN_RATE_PER_SEC = 120.0
 _TOKEN_BURST_CAPACITY = 8000.0
 
@@ -175,8 +184,12 @@ token_bucket = TokenBucket(rate_per_sec=_TOKEN_RATE_PER_SEC, capacity=_TOKEN_BUR
 # Genuinely separate TokenBucket instances, now correctly reflecting two independent accounts:
 # a document-OCR burst can no longer starve a live consultation's own budget (or vice versa),
 # and this workload no longer competes with scribing for the same 8000 TPM ceiling at all.
-_OCR_REQUEST_RATE_PER_SEC = 1.0
-_OCR_REQUEST_BURST_CAPACITY = 10.0
+#
+# Same RPM-vs-RPD fix as request_bucket above applies here too -- this account is also
+# openai/gpt-oss-120b free tier (RPM 30 / RPD 1,000 / TPM 8,000), so the request side is paced
+# the same way, not the old ~60 RPM figure.
+_OCR_REQUEST_RATE_PER_SEC = 0.4
+_OCR_REQUEST_BURST_CAPACITY = 5.0
 _OCR_TOKEN_RATE_PER_SEC = 120.0
 _OCR_TOKEN_BURST_CAPACITY = 8000.0
 
