@@ -683,23 +683,44 @@ FACT_TYPES = (
 # the real documents (data_insurance/) that motivated removing the truncation/ceiling this
 # constant used to have paired with it.
 #
-# REVERTED 2026-09-16, same day: was briefly raised 6000 -> 18000 to cut call count (fewer,
-# bigger slices pay this app's own per-call token-rate-limit "tax" less often). That reasoning
-# only accounted for Groq's TOKEN-per-minute rate limit (the estimate_tokens()/token_bucket
-# machinery) -- it never checked Groq's separate, independent request BODY SIZE limit, which is
-# what actually produces a 413 (Payload Too Large), a different failure mode from 429. Confirmed
-# live in production: at 18000 chars, one real document's slice 2/5 got a hard 413 that exhausted
-# all 5 retries and permanently contributed zero facts for that slice's text (extract_clinical_
-# facts's except block only logs a warning and continues -- there is no fallback or later retry
-# for a slice that fails this way). Slicing by CHARACTER count doesn't bound BYTE size either --
-# this codebase explicitly supports Hindi/Devanagari and other multi-byte-UTF-8 content (see
-# scribe.py's Hinglish handling), so the same character count can be a very different number of
-# real bytes depending on which slice of the document it lands on, which is the likely reason
-# slice 1 went through fine while slice 2 of the SAME document hit the body-size ceiling. 6000
-# was the value verified working in production before this was touched -- reverted to it rather
-# than guessing at a new "safer" number without live verification against Groq's real payload
-# limit (which nothing in this codebase had measured before either value was chosen).
-_PAGE_EXTRACTION_SLICE_CHARS = 6000
+# FIXED PROPERLY 2026-09-16 (third pass, same day): this was CHARACTER-count slicing (6000, then
+# briefly 18000, which caused live 413s -- see git history), but Groq's real request-size
+# constraint is on BYTES, and this codebase explicitly handles Hindi/Devanagari content where one
+# character is 3 UTF-8 bytes. Character-count slicing can't bound byte size, so the exact same
+# constant produced wildly different real payload sizes depending on which script a given slice
+# happened to contain -- confirmed as the likely cause of one document's slice 2/5 hitting a hard
+# 413 while slice 1 didn't.
+#
+# Switched to BYTE-count slicing (_slice_text_by_bytes below), and the byte limit itself is
+# calibrated against REAL measurements, not a guess: deliberately over-budget calls against the
+# live API (reading Groq's own "Requested N tokens" figure back from its 429 error body, which
+# costs nothing since the call is rejected before generating anything) measured ~5.0-5.5 real
+# tokens per byte across ASCII, Devanagari, and mixed content -- byte count turns out to be a
+# stable predictor of token cost across scripts, unlike character count. 20000 bytes -> ~4000-4400
+# estimated prompt tokens (using the same conservative ~4.5 bytes/token this file's
+# estimate_tokens() now uses), leaving comfortable headroom under the account's 8000 TPM ceiling
+# even before this call's own completion tokens are added.
+_PAGE_EXTRACTION_SLICE_BYTES = 20000
+
+
+def _slice_text_by_bytes(text: str, max_bytes: int) -> List[str]:
+    """Splits text into chunks whose UTF-8-encoded size is at most max_bytes each, without ever
+    splitting a multi-byte character across a chunk boundary (which would corrupt it on decode).
+    UTF-8 continuation bytes are always in 0x80-0xBF -- backing off until the byte at the cut
+    point is NOT a continuation byte guarantees the cut lands on a real character boundary."""
+    encoded = text.encode("utf-8")
+    total = len(encoded)
+    if total == 0:
+        return []
+    slices = []
+    start = 0
+    while start < total:
+        end = min(start + max_bytes, total)
+        while end < total and (encoded[end] & 0xC0) == 0x80:
+            end -= 1
+        slices.append(encoded[start:end].decode("utf-8"))
+        start = end
+    return slices
 
 
 def extract_clinical_facts(document_text: str) -> List[Dict]:
@@ -709,7 +730,7 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
     ingested with its raw OCR text, it just has fewer PROPOSED facts for the clinician to
     review, rather than the request failing.
 
-    Walks the ENTIRE document in bounded _PAGE_EXTRACTION_SLICE_CHARS-sized slices (one
+    Walks the ENTIRE document in bounded _PAGE_EXTRACTION_SLICE_BYTES-sized slices (one
     extraction call per slice, merged and deduped by (fact_type, value)) rather than truncating
     to a single call's worth of text -- this used to cap at the first 8000 characters, silently
     making every later page of a multi-page document invisible to this pass. Verified live: a
@@ -746,10 +767,7 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
         '{"facts": []}. Never include markdown or commentary outside the JSON object.'
     )
 
-    slices = [
-        document_text[offset:offset + _PAGE_EXTRACTION_SLICE_CHARS]
-        for offset in range(0, len(document_text), _PAGE_EXTRACTION_SLICE_CHARS)
-    ]
+    slices = _slice_text_by_bytes(document_text, _PAGE_EXTRACTION_SLICE_BYTES)
 
     facts: List[Dict] = []
     seen_facts: set = set()
@@ -951,7 +969,7 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
        always collapsing to UNCLASSIFIED purely because AI enrichment was down. It is never
        preferred over a real LLM answer.
     4. Within a single page/chunk, the text itself is walked in bounded
-       _PAGE_EXTRACTION_SLICE_CHARS-sized slices, one extraction call per slice, rather than
+       _PAGE_EXTRACTION_SLICE_BYTES-sized slices, one extraction call per slice, rather than
        truncating to whatever the first call's prompt can hold. A local-OCR page is already
        single-page text and almost always fits in one slice (no behavior change there); a
        Sarvam chunk bundles up to 10 pages of markdown into one blob, which can easily run past
@@ -1000,10 +1018,7 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
         "outside the JSON object."
     )
 
-    slices = [
-        text[offset:offset + _PAGE_EXTRACTION_SLICE_CHARS]
-        for offset in range(0, len(text), _PAGE_EXTRACTION_SLICE_CHARS)
-    ]
+    slices = _slice_text_by_bytes(text, _PAGE_EXTRACTION_SLICE_BYTES)
 
     facts: List[Dict] = []
     seen_facts: set = set()

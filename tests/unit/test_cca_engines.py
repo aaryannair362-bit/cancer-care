@@ -18,6 +18,7 @@ from backend.app.cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
     evaluate_guideline_readiness, synthesize_nexus_brief, generate_care_plan_prefill,
     extract_clinical_facts, build_medication_lists, build_results_from_document_facts,
+    _slice_text_by_bytes,
 )
 from backend.app.scribe import scribe
 
@@ -96,6 +97,32 @@ def test_extract_clinical_facts_requests_a_higher_token_budget_than_the_generic_
     monkeypatch.setattr(scribe, "_generate_json", _fake_generate_json)
     extract_clinical_facts("Diagnosis: Breast carcinoma")
     assert captured["max_tokens"] > 3000
+
+
+def test_slice_text_by_bytes_never_splits_a_multibyte_character():
+    """Regression: this codebase explicitly handles Hindi/Devanagari content (one character = 3
+    UTF-8 bytes), so a naive byte-offset cut can land mid-character and produce invalid Unicode
+    on decode. Devanagari text repeated past several byte-boundary crossings must reconstruct
+    byte-for-byte identical to the original, and no slice may exceed the requested byte budget."""
+    devanagari = "रोगी को तीन दिन से बुख़ार और खांसी है। " * 50
+    slices = _slice_text_by_bytes(devanagari, max_bytes=37)  # deliberately NOT a multiple of any char's byte width
+
+    assert "".join(slices) == devanagari
+    for s in slices:
+        assert len(s.encode("utf-8")) <= 37
+
+
+def test_slice_text_by_bytes_matches_char_slicing_for_pure_ascii():
+    text = "Hemoglobin: 11.2 g/dL. Creatinine: 0.9 mg/dL. " * 300
+    slices = _slice_text_by_bytes(text, max_bytes=100)
+
+    assert "".join(slices) == text
+    assert all(len(s) <= 100 for s in slices[:-1])  # every slice but the last is exactly full
+
+
+def test_slice_text_by_bytes_handles_empty_and_short_text():
+    assert _slice_text_by_bytes("", max_bytes=100) == []
+    assert _slice_text_by_bytes("short", max_bytes=100) == ["short"]
 
 
 def test_extract_clinical_facts_parses_real_shaped_response(monkeypatch):

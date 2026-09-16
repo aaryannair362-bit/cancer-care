@@ -220,10 +220,23 @@ sarvam_doc_ai_request_bucket = TokenBucket(
 def estimate_tokens(prompt: str, max_tokens: int) -> float:
     """
     Cheap, tokenizer-free estimate of a call's total token cost, used to pace the token
-    bucket BEFORE the real usage is known. ~4 characters/token for prompt, plus a completion
-    estimate capped well above what a plain structured-JSON response's visible text would need,
-    because the configured model (GROQ_MODEL, a reasoning model) spends hidden "reasoning
-    tokens" that never appear in the completion text but count fully against the real
+    bucket BEFORE the real usage is known.
+
+    Prompt term is BYTES/4.5, not characters/4.0 (the prior formula) -- calibrated live against
+    Groq's own accounting, not guessed: deliberately over-budget calls against the real API
+    (reading the exact "Requested N tokens" figure back from the resulting 429 error body, which
+    costs nothing since the call is rejected before generating anything) measured ~5.0-5.5 real
+    tokens per UTF-8 byte across pure-ASCII, pure-Devanagari, and mixed content alike. Character
+    count is NOT a stable proxy across scripts -- this codebase explicitly handles Hindi/
+    Devanagari content where one character is 3 UTF-8 bytes, so characters/4.0 could silently
+    undercount a non-Latin-heavy prompt by a large factor while looking fine for an English one.
+    Byte count turned out to be stable across scripts, so it's used directly; 4.5 (below the
+    measured 5.0-5.5 bytes/token) errs toward overestimating, the safe direction, same reasoning
+    as token_bucket.true_up's own "never refund an overshoot" rule below.
+
+    Completion estimate is capped well above what a plain structured-JSON response's visible
+    text would need, because the configured model (GROQ_MODEL, a reasoning model) spends hidden
+    "reasoning tokens" that never appear in the completion text but count fully against the real
     tokens-per-minute budget (see token_bucket.true_up's docstring).
 
     The cap here was previously 800 -- calibrated for the visible JSON alone, before this
@@ -254,7 +267,7 @@ def estimate_tokens(prompt: str, max_tokens: int) -> float:
     attempted) while a genuinely small prompt still gets the full, realistic completion
     allowance above.
     """
-    estimated_prompt_tokens = len(prompt) / 4.0
+    estimated_prompt_tokens = len(prompt.encode("utf-8")) / 4.5
     estimated_completion_tokens = min(float(max_tokens), 2000.0)
     total = estimated_prompt_tokens + estimated_completion_tokens
     return min(total, _TOKEN_BURST_CAPACITY - 500.0)

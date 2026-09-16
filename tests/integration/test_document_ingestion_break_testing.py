@@ -254,7 +254,7 @@ def test_large_page_chunk_text_is_extracted_in_slices_not_truncated(monkeypatch)
     fix directly (no upload/OCR involved): the full text is now walked in bounded slices, one
     real extraction call per slice, with facts from every slice merged."""
     import app.scribe as scribe_module
-    from app.cca_engine import classify_and_extract_page, _PAGE_EXTRACTION_SLICE_CHARS
+    from app.cca_engine import classify_and_extract_page, _PAGE_EXTRACTION_SLICE_BYTES
 
     calls = []
 
@@ -268,18 +268,19 @@ def test_large_page_chunk_text_is_extracted_in_slices_not_truncated(monkeypatch)
     monkeypatch.setattr(scribe_module.scribe, "_generate_json", _fake_generate_json)
 
     # Confidently LAB-classifiable (keyword deterministic classifier), and well past two full
-    # slices of the app's own current slice size -- derived from _PAGE_EXTRACTION_SLICE_CHARS
-    # rather than a hardcoded character count, so this test can't silently stop exercising the
-    # multi-slice path if that constant is ever retuned again (see cca_engine.py's own comment
-    # on why it was raised from 6000 to 18000).
+    # slices of the app's own current slice size -- derived from _PAGE_EXTRACTION_SLICE_BYTES
+    # (byte-based, not character-based -- see cca_engine.py's own comment on why) rather than a
+    # hardcoded size, so this test can't silently stop exercising the multi-slice path if that
+    # constant is ever retuned again. This unit string is pure ASCII, so its byte length equals
+    # its character length -- fine for sizing purposes here, no need to encode explicitly.
     unit = "Hemoglobin: 11.2 g/dL. Creatinine: 0.9 mg/dL. "
-    long_text = unit * (((_PAGE_EXTRACTION_SLICE_CHARS * 3) // len(unit)) + 1)
-    assert len(long_text) > _PAGE_EXTRACTION_SLICE_CHARS * 2
+    long_text = unit * (((_PAGE_EXTRACTION_SLICE_BYTES * 3) // len(unit)) + 1)
+    assert len(long_text) > _PAGE_EXTRACTION_SLICE_BYTES * 2
 
     result = classify_and_extract_page(long_text, is_image_heavy=False)
 
     assert result["page_type"] == "LAB_REPORT"  # from the (mocked) LLM here -- see precedence test below
-    assert len(calls) >= 3, f"expected one LLM call per ~{_PAGE_EXTRACTION_SLICE_CHARS}-char slice, got {len(calls)}"
+    assert len(calls) >= 3, f"expected one LLM call per ~{_PAGE_EXTRACTION_SLICE_BYTES}-byte slice, got {len(calls)}"
     values = {f["value"] for f in result["facts"]}
     assert len(values) == len(calls), "facts from every slice should be merged, not just the first"
 
