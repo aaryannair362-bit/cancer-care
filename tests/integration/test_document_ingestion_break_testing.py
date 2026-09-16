@@ -186,7 +186,7 @@ def test_confidently_classified_pages_now_get_real_fact_extraction(client, heade
 
     call_count = {"n": 0}
 
-    def _fake_generate_json(prompt, system=None, max_tokens=None):
+    def _fake_generate_json(prompt, system=None, max_tokens=None, **kwargs):
         if max_tokens == 6000:
             return {"facts": []}  # the whole-document extract_clinical_facts call -- not under test here
         call_count["n"] += 1
@@ -234,7 +234,7 @@ def test_large_page_chunk_text_is_extracted_in_slices_not_truncated(monkeypatch)
 
     calls = []
 
-    def _fake_generate_json(prompt, system=None, max_tokens=None):
+    def _fake_generate_json(prompt, system=None, max_tokens=None, **kwargs):
         calls.append(prompt)
         return {
             "page_type": "LAB_REPORT", "confidence": 0.9,
@@ -269,7 +269,7 @@ def test_llm_classification_wins_over_deterministic_keyword_guess(monkeypatch):
     # _DOCUMENT_CLASS_KEYWORDS["LAB"]), but the LLM (mocked) reads it as a pathology report.
     text = "Hemoglobin: 11.2 g/dL. Creatinine: 0.9 mg/dL. Final impression follows below."
 
-    def _fake_generate_json(prompt, system=None, max_tokens=None):
+    def _fake_generate_json(prompt, system=None, max_tokens=None, **kwargs):
         return {"page_type": "PATHOLOGY_REPORT", "confidence": 0.88, "facts": []}
 
     monkeypatch.setattr(scribe_module.scribe, "_generate_json", _fake_generate_json)

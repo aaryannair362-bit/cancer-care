@@ -128,11 +128,26 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
                 logger.debug("Response body: %s", e.response.text)
             raise
 
-    def _call_groq_api(self, prompt: str, system: str = None, temperature: float = 0.3, max_tokens: int = 3000) -> str:
-        if not self.api_key:
+    def _call_groq_api(
+        self, prompt: str, system: str = None, temperature: float = 0.3, max_tokens: int = 3000,
+        api_key: Optional[str] = None, request_bucket=None, token_bucket=None,
+    ) -> str:
+        """
+        `api_key`/`request_bucket`/`token_bucket` default to this engine's own key and
+        rate_limiter's shared scribe buckets (today's behavior, unchanged for every OPD/IPD
+        scribing caller) -- cca_engine.py's document-OCR extraction calls pass GROQ_API_KEY_OCR
+        and rate_limiter.ocr_extraction_*_bucket instead, so a multi-page document upload paces
+        against (and, when GROQ_API_KEY_OCR is a genuinely separate Groq account, draws from) a
+        budget that a live consultation's own scribing calls can never be starved by. See
+        rate_limiter.py's ocr_extraction_* bucket comment for the incident this fixes.
+        """
+        api_key = api_key or self.api_key
+        request_bucket = request_bucket if request_bucket is not None else rate_limiter.request_bucket
+        token_bucket = token_bucket if token_bucket is not None else rate_limiter.token_bucket
+        if not api_key:
             raise ValueError("Groq API key not configured. Set GROQ_API_KEY in environment.")
 
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         payload = {
             "model": self.model,
             "messages": [
@@ -160,9 +175,9 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
         # concurrent OPD+IPD callers could 429 together and each independently sit in the
         # retry loop below at the same time). Blocks this thread until it's this call's turn;
         # under normal, non-concurrent usage the buckets are full and this returns immediately.
-        rate_limiter.request_bucket.consume(1)
+        request_bucket.consume(1)
         estimated_tokens = rate_limiter.estimate_tokens(prompt, payload["max_tokens"])
-        rate_limiter.token_bucket.consume(estimated_tokens)
+        token_bucket.consume(estimated_tokens)
 
         try:
             data = self._post_with_retry(self.base_url, {"headers": headers, "json": payload, "timeout": 60})
@@ -173,14 +188,17 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
                 and response.status_code == 400 and "reasoning_format" in response.text
             ):
                 self._reasoning_format_supported = False
-                return self._call_groq_api(prompt, system, temperature, max_tokens)
+                return self._call_groq_api(
+                    prompt, system, temperature, max_tokens,
+                    api_key=api_key, request_bucket=request_bucket, token_bucket=token_bucket,
+                )
             raise
         # True up the token bucket against what this call actually cost, per Groq's own
         # returned usage -- see TokenBucket.true_up's docstring for why the pre-call estimate
         # alone under-paces a reasoning-capable model's hidden "reasoning tokens".
         actual_total = ((data or {}).get("usage") or {}).get("total_tokens")
         if isinstance(actual_total, (int, float)):
-            rate_limiter.token_bucket.true_up(actual_total, estimated_tokens)
+            token_bucket.true_up(actual_total, estimated_tokens)
         return data["choices"][0]["message"]["content"]
 
     def transcribe_audio(self, audio_bytes: bytes, content_type: str, filename: str) -> str:
@@ -227,6 +245,7 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
     def _generate_json(
         self, prompt: str, system: str = None, temperature: float = 0.3, max_tokens: int = 3000,
         fallback: Optional[Callable[[str], dict]] = None, _retry: int = 0,
+        api_key: Optional[str] = None, request_bucket=None, token_bucket=None,
     ) -> dict:
         """
         Calls Groq expecting a JSON object back. `fallback` is caller-specific: pass
@@ -246,9 +265,17 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
         a reasoning-capable model occasionally emits almost-valid JSON with a stray formatting
         slip; a same-prompt retry often just gets a clean response the second time, which is
         cheaper than losing that call's entire result.
+
+        `api_key`/`request_bucket`/`token_bucket` pass straight through to _call_groq_api (see
+        its own docstring) -- unset by every scribe.py caller (today's shared-budget behavior),
+        set by cca_engine.py's document-OCR callers to keep that workload off the live-scribing
+        budget.
         """
         try:
-            raw = self._call_groq_api(prompt, system, temperature, max_tokens)
+            raw = self._call_groq_api(
+                prompt, system, temperature, max_tokens,
+                api_key=api_key, request_bucket=request_bucket, token_bucket=token_bucket,
+            )
             logger.debug("RAW RESPONSE: %s...", raw[:500])
             # Defense-in-depth: _call_groq_api already requests reasoning_format="hidden" so
             # a <think>...</think> block should never appear in `content`, but strip one out
@@ -294,7 +321,10 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
                     pass
             if _retry < 1:
                 logger.warning("Retrying Groq call once after JSON parse failure")
-                return self._generate_json(prompt, system, temperature, max_tokens, fallback=fallback, _retry=_retry + 1)
+                return self._generate_json(
+                    prompt, system, temperature, max_tokens, fallback=fallback, _retry=_retry + 1,
+                    api_key=api_key, request_bucket=request_bucket, token_bucket=token_bucket,
+                )
             return fallback(raw) if fallback else {}
         except Exception as e:
             logger.error("Unexpected error in _generate_json: %s", e)

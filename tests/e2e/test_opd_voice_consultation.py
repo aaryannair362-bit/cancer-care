@@ -131,7 +131,7 @@ def test_transcript_is_not_duplicated_across_multiple_utterances(
     doctor, patient = opd_patient
     captured_prompts = []
 
-    def _capture(prompt, system=None, temperature=0.3, max_tokens=3000):
+    def _capture(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
         captured_prompts.append(prompt)
         return '{"chiefComplaint": "test"}'
 

@@ -22,6 +22,8 @@ from .models_cca_oncology_ext import (
     CCARadiationPhase, RadiationFraction, RadiationPrescription, PalliativeTreatmentOrder,
 )
 from .scribe import scribe
+from .config import settings
+from . import rate_limiter
 
 
 def calculate_bsa(height_cm: float, weight_kg: float, formula: str = "DuBois") -> Tuple[float, float]:
@@ -728,7 +730,15 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
     for slice_text in slices:
         prompt = f"Extract clinical facts from this document:\n\n{slice_text}"
         try:
-            result = scribe._generate_json(prompt, system=system, max_tokens=6000)
+            # Dedicated key/buckets (see rate_limiter.py's ocr_extraction_* comment) so a
+            # multi-page document's extraction calls can never exhaust the same per-minute
+            # budget a live doctor's consultation scribing is paced against.
+            result = scribe._generate_json(
+                prompt, system=system, max_tokens=6000,
+                api_key=settings.GROQ_API_KEY_OCR,
+                request_bucket=rate_limiter.ocr_extraction_request_bucket,
+                token_bucket=rate_limiter.ocr_extraction_token_bucket,
+            )
         except Exception:
             continue
         raw_facts = result.get("facts") if isinstance(result, dict) else None
@@ -929,7 +939,14 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
     for slice_text in slices:
         prompt = f"Classify and extract clinical facts from this page:\n\n{slice_text}"
         try:
-            result = scribe._generate_json(prompt, system=system, max_tokens=4000)
+            # See extract_clinical_facts's identical comment above -- same dedicated
+            # GROQ_API_KEY_OCR budget, kept off the live-scribing buckets.
+            result = scribe._generate_json(
+                prompt, system=system, max_tokens=4000,
+                api_key=settings.GROQ_API_KEY_OCR,
+                request_bucket=rate_limiter.ocr_extraction_request_bucket,
+                token_bucket=rate_limiter.ocr_extraction_token_bucket,
+            )
         except Exception:
             continue
         if not isinstance(result, dict):

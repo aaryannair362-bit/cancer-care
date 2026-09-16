@@ -23,6 +23,14 @@ class Settings(BaseSettings):
     # already-known-too-slow qwen model with no warning. Matching the default to the real,
     # working value removes that trap regardless of the env var.
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    # Dedicated key for PDF/document OCR AI-extraction (cca_engine.py's extract_clinical_facts /
+    # classify_and_extract_page) -- kept on its OWN Groq account/key so a multi-page document
+    # upload's token usage never competes with GROQ_API_KEY's 8000-token/minute budget for live
+    # OPD/IPD consultation scribing (see rate_limiter.py's ocr_extraction_* buckets). Falls back
+    # to GROQ_API_KEY below (post-construction, after the Prod-key resolution) when not set, so a
+    # deployment that hasn't been given a dedicated key yet keeps working exactly as before --
+    # both workloads sharing one budget, not a broken one.
+    GROQ_API_KEY_OCR: str = os.getenv("GROQ_API_KEY_OCR", "")
     # Sarvam AI's Saaras v3 (sarvam_batch_transcriber.py) -- audio transcription engine
     # purpose-built for Hindi/English medical speech and code-switching. Legacy shared
     # credential, kept only as the fallback SARVAM_OCR_API_KEY/SARVAM_STT_API_KEY use below when
@@ -95,6 +103,11 @@ settings = Settings()
 # exist.
 if settings.GROQ_API_KEY_Prod:
     settings.GROQ_API_KEY = settings.GROQ_API_KEY_Prod
+
+# Resolved AFTER the Prod-key override above so an unset GROQ_API_KEY_OCR falls back to whichever
+# key GROQ_API_KEY actually ended up as, not the pre-override value.
+if not settings.GROQ_API_KEY_OCR:
+    settings.GROQ_API_KEY_OCR = settings.GROQ_API_KEY
 
 # Each dedicated Sarvam key falls back to the shared SARVAM_API_KEY when not explicitly set --
 # see the SARVAM_OCR_API_KEY/SARVAM_STT_API_KEY declarations above for why they're split.

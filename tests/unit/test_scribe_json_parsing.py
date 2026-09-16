@@ -23,7 +23,7 @@ def engine():
 
 
 def _stub_call(engine, raw_return=None, raise_exc=None):
-    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000):
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
         if raise_exc is not None:
             raise raise_exc
         return raw_return
@@ -99,7 +99,7 @@ def test_generate_json_retries_once_on_parse_failure_before_falling_back(engine)
     that a retry often just doesn't repeat."""
     calls = []
 
-    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000):
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
         calls.append(1)
         if len(calls) == 1:
             return "not json { broken"
@@ -114,7 +114,7 @@ def test_generate_json_retries_once_on_parse_failure_before_falling_back(engine)
 def test_generate_json_gives_up_after_one_retry(engine):
     calls = []
 
-    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000):
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
         calls.append(1)
         return "still not json { broken"
 
@@ -182,7 +182,7 @@ def test_scribe_transcript_chunks_very_long_transcripts_instead_of_truncating(en
     processed across more than one paced request."""
     prompt_lens = []
 
-    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000):
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
         prompt_lens.append(len(prompt))
         return json.dumps({"chiefComplaint": "fever"})
 
@@ -268,7 +268,7 @@ def test_system_prompt_forbids_medications_in_hpi_or_chief_complaint(engine):
 def test_scribe_transcript_prompt_field_descriptions_exclude_medications(engine):
     captured = {}
 
-    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000):
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
         captured["prompt"] = prompt
         return json.dumps({})
 
@@ -329,7 +329,7 @@ def test_scribe_transcript_flags_note_extraction_failed_if_any_chunk_fails(engin
     must be flagged, not just silently merged as if every chunk succeeded."""
     calls = {"n": 0}
 
-    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000):
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
         calls["n"] += 1
         if calls["n"] == 2:
             raise RuntimeError("simulated network failure on the second chunk")

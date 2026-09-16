@@ -89,7 +89,7 @@ def test_extract_clinical_facts_requests_a_higher_token_budget_than_the_generic_
     it can't silently regress back to the shared default."""
     captured = {}
 
-    def _fake_generate_json(prompt, system=None, temperature=0.3, max_tokens=3000):
+    def _fake_generate_json(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
         captured["max_tokens"] = max_tokens
         return {"facts": []}
 
@@ -99,7 +99,7 @@ def test_extract_clinical_facts_requests_a_higher_token_budget_than_the_generic_
 
 
 def test_extract_clinical_facts_parses_real_shaped_response(monkeypatch):
-    def _fake_generate_json(prompt, system=None, temperature=0.3, max_tokens=3000):
+    def _fake_generate_json(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
         return {"facts": [
             {"fact_type": "PRIMARY_SITE", "value": "Breast", "verbatim": "Breast carcinoma", "confidence": 0.95},
             {"fact_type": "NOT_A_REAL_TYPE", "value": "should be dropped"},

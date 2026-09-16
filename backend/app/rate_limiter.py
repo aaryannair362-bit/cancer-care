@@ -145,6 +145,23 @@ request_bucket = TokenBucket(rate_per_sec=_REQUEST_RATE_PER_SEC, capacity=_REQUE
 token_bucket = TokenBucket(rate_per_sec=_TOKEN_RATE_PER_SEC, capacity=_TOKEN_BURST_CAPACITY)
 
 
+# Dedicated pacing for PDF/document OCR AI-extraction (cca_engine.py's extract_clinical_facts /
+# classify_and_extract_page), kept SEPARATE from request_bucket/token_bucket above. Found live:
+# a multi-page document upload's per-slice extraction calls and a concurrent doctor's live OPD/
+# IPD consultation scribing both funnel through the same GROQ_API_KEY and therefore the same
+# 8000-token/minute account ceiling -- a document processing burst could exhaust that whole
+# budget by itself and starve a live consultation waiting on its own note draft, or vice versa,
+# with no way to tell which workload actually caused a given 429. cca_engine.py now sends its
+# calls on GROQ_API_KEY_OCR (see config.py -- a separate Groq account/key when configured, so
+# this is a genuinely separate 8000 TPM budget rather than a second queue sharing the same one)
+# and paces against these buckets instead of the scribe ones. Same rate/capacity calibration as
+# above since it's the same GROQ_MODEL and the same real Groq per-account limits when
+# GROQ_API_KEY_OCR isn't set and falls back to sharing GROQ_API_KEY (see config.py) -- only the
+# key and bucket differ, not the math.
+ocr_extraction_request_bucket = TokenBucket(rate_per_sec=_REQUEST_RATE_PER_SEC, capacity=_REQUEST_BURST_CAPACITY)
+ocr_extraction_token_bucket = TokenBucket(rate_per_sec=_TOKEN_RATE_PER_SEC, capacity=_TOKEN_BURST_CAPACITY)
+
+
 # Calibrated against Sarvam's own documented rate limit for Document Intelligence / Vision
 # (docs.sarvam.ai/api-reference-docs/ratelimits): 10 requests/minute, uniform across every plan
 # tier (upgrading the plan does not raise this) -- a vendor-stated number, not a guess. This
