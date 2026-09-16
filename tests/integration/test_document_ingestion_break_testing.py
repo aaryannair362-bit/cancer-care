@@ -151,6 +151,30 @@ def test_dense_lab_report_yields_many_deterministic_lab_facts_with_no_llm(client
     assert any(v.startswith("Creatinine:") for v in values)
 
 
+def test_medications_line_yields_a_deterministic_medication_fact_with_no_llm(client, headers, patient_id, db_session):
+    """Regression pin for the "labs extracted, medications silently dropped" production bug:
+    unlike LAB_RESULT (extract_deterministic_lab_facts), MEDICATION facts used to come ONLY from
+    the LLM pass (extract_clinical_facts) -- with real Groq calls blocked/failing-closed by
+    default in this test module (see module docstring), a document with both a "Medications:"
+    line and a dense lab panel used to yield LAB_RESULT facts but zero MEDICATION facts, even
+    though the medications line was sitting right there in ocr_service._clinical_signals's
+    output the whole time. extract_deterministic_medication_facts fixes that -- this must now
+    produce at least one MEDICATION fact from the raw regex scan alone, no LLM involved."""
+    res = _upload(client, headers, patient_id, "meds_and_labs.pdf", df.build("medications_and_labs_report"), "application/pdf")
+    assert res.status_code == 201, res.text
+
+    facts = db_session.query(ClinicalFact).filter(
+        ClinicalFact.document_id == res.json()["document"]["id"],
+    ).all()
+    med_facts = [f for f in facts if f.fact_type == "MEDICATION"]
+    lab_facts = [f for f in facts if f.fact_type == "LAB_RESULT"]
+    assert med_facts, f"expected at least one deterministic MEDICATION fact, got fact_types: {[f.fact_type for f in facts]}"
+    assert "Metformin" in med_facts[0].value
+    # Labs must still be present too -- this document has both, same as the real one that
+    # surfaced the bug.
+    assert lab_facts, "expected deterministic LAB_RESULT facts alongside the medication fact"
+
+
 def test_huge_90_page_document_extracts_lab_facts_from_pages_the_llm_pass_never_truncated_reach(
     client, headers, patient_id, db_session,
 ):

@@ -30,6 +30,7 @@ from ..models_cca import (
     PathologyMdtReviewNote,
     CancerEpisode,
 )
+from ..models_cca_oncology_ext import SurgicalSpecimen
 from ..events import publish
 from .cca import get_cca_db, _org_id, _actor, _get_org_patient, _check_patient_in_org
 
@@ -389,6 +390,7 @@ def _accession_out(a: PathologySpecimenAccession) -> dict:
         "container_count": a.container_count, "condition_on_receipt": a.condition_on_receipt,
         "labelling_concordant": bool(a.labelling_concordant), "discrepancy_note": a.discrepancy_note,
         "status": a.status, "received_by": a.received_by, "received_at": a.received_at.isoformat() if a.received_at else None,
+        "surgical_specimen_id": a.surgical_specimen_id,
     }
 
 
@@ -416,11 +418,25 @@ async def accession_specimen(order_id: int, request: Request, db: Session = Depe
     discrepancy_note = (body.get("discrepancy_note") or "").strip()
     if has_discrepancy and not discrepancy_note:
         raise HTTPException(422, "discrepancy_note is required when condition_on_receipt is not Intact or labelling is discordant")
+    # Surgical-oncologist missing-development round: optional traceability link back to the
+    # OR-side SurgicalSpecimen this accession corresponds to -- previously zero linkage existed
+    # between the two (every Pathology* model keyed off order_id alone). Purely a link; this
+    # accession's own ACCEPTED/QUARANTINED status stays independent of the surgical team's own
+    # chain-of-custody status on SurgicalSpecimen (same separation-of-concerns precedent as
+    # AnaesthesiaIntraOpRecord staying independent of SurgicalOperativeNote).
+    surgical_specimen_id = body.get("surgical_specimen_id")
+    if surgical_specimen_id is not None:
+        linked_specimen = db.query(SurgicalSpecimen).filter(
+            SurgicalSpecimen.id == surgical_specimen_id, SurgicalSpecimen.patient_id == order.patient_id,
+        ).first()
+        if not linked_specimen:
+            raise HTTPException(422, "surgical_specimen_id does not reference a specimen for this patient")
     accession = PathologySpecimenAccession(
         order_id=order_id, patient_id=order.patient_id, accession_number=accession_number,
         container_count=body.get("container_count"), condition_on_receipt=condition,
         labelling_concordant=labelling_concordant, discrepancy_note=discrepancy_note or None,
         status="QUARANTINED" if has_discrepancy else "ACCEPTED", received_by=_actor(current_user),
+        surgical_specimen_id=surgical_specimen_id,
     )
     db.add(accession)
     db.commit()

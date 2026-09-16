@@ -300,6 +300,12 @@ class SurgicalPlan(Base):
     # and populated opportunistically only when the caller already has an episode in context
     # (e.g. created from a Care Plan/MDT flow) -- every existing caller is unaffected.
     episode_id = Column(Integer, ForeignKey("cca_cancer_episodes.id"), nullable=True)
+    # Surgical Oncologist missing-development round: the pre-op diagnosis belongs on the PLAN
+    # (known before the operation), distinct from SurgicalOperativeNote.pre_op_diagnosis (the
+    # note's own copy, filled in at operative-note authoring time -- see that model's own
+    # field, added independently). Carried forward as a default when a note is created from
+    # this plan, never silently kept in sync afterward.
+    pre_op_diagnosis = Column(Text, nullable=True)
     procedure = Column(String(255), nullable=False)
     indication = Column(Text, nullable=True)
     intent = Column(String(50))
@@ -326,6 +332,41 @@ class SurgicalPlan(Base):
     signer_email = Column(String(200), nullable=True)
     signer_role = Column(String(50), nullable=True)
     signed_at = Column(DateTime, nullable=True)
+    # Pre-op readiness checklist -- a list of {label, status, note} items the surgical team
+    # ticks off (outstanding investigations, fitness clearance, required consultations,
+    # blockers). readiness_status is SERVER-recomputed from the checklist on every update
+    # (never accepted directly from the client) so it can never drift out of sync with the
+    # checklist it summarizes.
+    readiness_checklist = Column(JSON, nullable=True)
+    readiness_status = Column(String(30), default="Pending")  # Pending, Ready, Blocked
+    # Explicit surgeon sign-off on the plan itself, distinct from `signed_at` above (which
+    # signs the PERFORMED outcome, set via /surgical-plans/{id}/performed). Mirrors
+    # MDTDecision's disposition-with-reason idiom (models_cca.py) rather than a bare boolean,
+    # so a returned-for-changes plan carries the surgeon's reasoning forward.
+    review_status = Column(String(30), default="Pending")  # Pending, Approved, ReturnedForChanges
+    review_by = Column(String(200), nullable=True)
+    review_at = Column(DateTime, nullable=True)
+    review_comments = Column(Text, nullable=True)
+    # Links this plan to the actual MDT DECISION (not just the case, which mdt_case_id above
+    # already covers) once the team has one -- same field name/pattern as
+    # TreatmentPlan.mdt_decision_id (models_cca.py) so a plan can show the real recommendation/
+    # decision status without every case being forced through MDT.
+    mdt_decision_id = Column(Integer, ForeignKey("cca_mdt_decisions.id"), nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SurgicalPlanVersion(Base):
+    """Amendment/version history for SurgicalPlan -- same snapshot-on-amend shape as
+    CarePlanVersion/TreatmentPlanVersion (models_cca.py): a full JSON snapshot of the plan's
+    prior state plus a mandatory reason, appended whenever an already-Approved plan is edited
+    or returned for changes. Never mutated after creation."""
+    __tablename__ = "cca_surgical_plan_versions"
+    id = Column(Integer, primary_key=True)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    version_no = Column(Integer, nullable=False)
+    snapshot = Column(JSON, nullable=False)
+    change_reason = Column(Text, nullable=False)
     created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -367,10 +408,44 @@ class SurgicalOperativeNote(Base):
     closure = Column(Text, nullable=True)
     surgeon = Column(String(200), nullable=True)
     assistants = Column(Text, nullable=True)
+    # Structured [{name, role}, ...] alongside the pre-existing freeform `assistants` above
+    # (kept, not replaced, so existing rows/UI keep working) -- lets the full surgical team
+    # (assistants, scrub nurse, etc.) be recorded as distinct named entries.
+    surgical_team = Column(JSON, nullable=True)
     anaesthesia_type = Column(String(100), nullable=True)
+    # Links to the anaesthetist's own AnaesthesiaIntraOpRecord below rather than duplicating
+    # anaesthesia fields here -- this note only needs the linkage, not a second copy of the
+    # anaesthesia team's own documentation.
+    anaesthesia_intraop_record_id = Column(Integer, ForeignKey("cca_anaesthesia_intraop_records.id"), nullable=True)
+    procedure_start_time = Column(DateTime, nullable=True)
+    procedure_end_time = Column(DateTime, nullable=True)
+    # Set when the performed procedure differed from SurgicalPlan.procedure/proposed_extent --
+    # the plan's own planned fields are never overwritten (see this table's own docstring);
+    # this only flags that a difference exists and why.
+    variance_from_plan = Column(Boolean, default=False)
+    variance_reason = Column(Text, nullable=True)
     estimated_blood_loss = Column(String(50), nullable=True)
+    # AI_DRAFT (from scribe.draft_operative_note, unreviewed), FINAL (surgeon-reviewed and
+    # signed), AMENDED (finalised again after FINAL, with amendment_reason on the resulting
+    # SurgicalOperativeNoteVersion row). Mirrors CCAEncounter.note_status's exact convention
+    # (routers/cca.py) so the frontend can reuse the same "AI DRAFT" badge treatment.
+    note_status = Column(String(30), default="FINAL")
     authored_by = Column(String(200))
     authored_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SurgicalOperativeNoteVersion(Base):
+    """Amendment history for SurgicalOperativeNote -- same snapshot-plus-mandatory-reason shape
+    as CCAEncounterVersion (models_cca.py). Appended only when an already-FINAL note is
+    finalised again (i.e. amended), never on the first draft->finalise transition."""
+    __tablename__ = "cca_surgical_operative_note_versions"
+    id = Column(Integer, primary_key=True)
+    operative_note_id = Column(Integer, ForeignKey("cca_surgical_operative_notes.id"), nullable=False)
+    version_no = Column(Integer, nullable=False)
+    snapshot = Column(JSON, nullable=False)
+    amendment_reason = Column(Text, nullable=False)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class SurgicalProcedureNote(Base):
@@ -428,9 +503,16 @@ class SurgicalSpecimen(Base):
     id = Column(Integer, primary_key=True)
     patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
     surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    # Direct traceability from a specimen to the exact operative note it was taken during, in
+    # addition to the plan-level link above -- a plan can span more than one operative episode
+    # (e.g. a re-look), so the plan link alone doesn't pin down which operation.
+    operative_note_id = Column(Integer, ForeignKey("cca_surgical_operative_notes.id"), nullable=True)
     specimen_label = Column(String(200), nullable=False)
     specimen_type = Column(String(200), nullable=True)
     site = Column(String(200), nullable=True)
+    laterality = Column(String(20), nullable=True)  # Right, Left, Bilateral, N/A
+    orientation_notes = Column(Text, nullable=True)
+    clinical_question = Column(Text, nullable=True)  # what the surgeon wants pathology to answer
     container_type = Column(String(100), nullable=True)
     fixative = Column(String(100), nullable=True)
     collected_by = Column(String(200), nullable=True)
@@ -440,7 +522,17 @@ class SurgicalSpecimen(Base):
     lab_accession_number = Column(String(100), nullable=True)
     received_by_lab = Column(String(200), nullable=True)
     received_at = Column(DateTime, nullable=True)
-    status = Column(String(30), default="Collected")  # Collected, HandedOff, ReceivedByLab
+    # Collected -> HandedOff -> ReceivedByLab -> Accepted, with Exception reachable from
+    # ReceivedByLab -- the original 3-state chain is kept exactly as-is (existing data/UI/tests
+    # depend on it); Accepted/Exception are new terminal states appended after it, not a rename.
+    status = Column(String(30), default="Collected")
+    accepted_by = Column(String(200), nullable=True)
+    accepted_at = Column(DateTime, nullable=True)
+    exception_reason = Column(Text, nullable=True)
+    # Closes the loop back to the final pathology result once one exists, same precedent as
+    # PathologyFrozenSection.permanent_result_id (models_cca.py) -- avoids a disconnected
+    # pathology result with no path back to the specimen it came from.
+    result_id = Column(Integer, ForeignKey("cca_results.id"), nullable=True)
     notes = Column(Text, nullable=True)
     created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -916,3 +1008,35 @@ class RadiationInVivoDosimetry(Base):
     performed_by = Column(String(200))
     reviewed_by = Column(String(200), nullable=True)
     performed_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Surgical Oncologist missing-development round -- structured post-operative plan, separate
+# from SurgicalPlan.performed_procedure/histopathology_summary (short summary fields on the
+# plan itself). One row per SurgicalPlan; sign-off is a distinct, explicit action from just
+# saving the plan's content, matching this repo's existing draft-vs-signed convention
+# elsewhere.
+# ---------------------------------------------------------------------------
+
+class SurgicalPostOpPlan(Base):
+    __tablename__ = "cca_surgical_post_op_plans"
+    id = Column(Integer, primary_key=True)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    monitoring_plan = Column(Text, nullable=True)
+    medications_orders = Column(Text, nullable=True)
+    drain_wound_plan = Column(Text, nullable=True)
+    pathology_pending = Column(Boolean, default=True)
+    follow_up_clinician = Column(String(200), nullable=True)
+    follow_up_timing = Column(String(100), nullable=True)
+    escalation_plan = Column(Text, nullable=True)
+    disposition = Column(String(30), nullable=True)  # PACU, Ward, ICU, Other
+    pathology_review_status = Column(String(30), default="Pending")  # Pending, Reviewed
+    pathology_review_note = Column(Text, nullable=True)
+    pathology_reviewed_by = Column(String(200), nullable=True)
+    pathology_reviewed_at = Column(DateTime, nullable=True)
+    sign_off_status = Column(String(30), default="Open")  # Open, SignedOff
+    signed_off_by = Column(String(200), nullable=True)
+    signed_off_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)

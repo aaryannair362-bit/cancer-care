@@ -24,7 +24,7 @@ from ..auth import (
     is_cca_radiation_oncologist, is_cca_palliative_care_specialist,
     is_cca_radiation_technologist,
 )
-from ..models_cca import CCAPatient, DomainEvent, MDTCase
+from ..models_cca import CCAConsent, CCAPatient, CCAResult, DomainEvent, MDTCase, MDTDecision
 from ..models_cca import ResponseAssessment, ToxicityEvent, TreatmentPlan
 from ..models_cca_oncology_ext import (
     CCARadiationPhase, OncologyRecordExtension, RadiationFraction, RadiationPrescription,
@@ -32,15 +32,17 @@ from ..models_cca_oncology_ext import (
     RadiationDiscrepancyRecord, RadiationPreTreatmentVerification,
     RadiationTreatmentUnit, RadiationEquipmentQARecord, RadiationEquipmentIssue,
     RadiationInVivoDosimetry, RadiationOncologyConsultation,
-    Regimen, RegimenDrugLine, SurgicalPlan, TreatmentPlanPhase,
-    SurgicalIntraOpMonitoring, SurgicalIntraOpNote, SurgicalOperativeNote, SurgicalProcedureNote,
+    Regimen, RegimenDrugLine, SurgicalPlan, SurgicalPlanVersion, SurgicalPostOpPlan, TreatmentPlanPhase,
+    SurgicalIntraOpMonitoring, SurgicalIntraOpNote, SurgicalOperativeNote, SurgicalOperativeNoteVersion,
+    SurgicalProcedureNote,
     SurgicalSpecimen, SurgicalBloodTransfusion,
     SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
     SurgicalStomaRecord, SurgicalComplicationRecord,
     ClinicalProcedureNote, PalliativeTreatmentOrder,
-    AnaesthesiaPreOpEvaluation,
+    AnaesthesiaPreOpEvaluation, AnaesthesiaIntraOpRecord,
 )
 from ..events import publish
+from ..scribe import scribe
 from .cca import (
     _actor, _check_patient_in_org, _get_org_patient, _org_id,
     _require_clinical_or_nursing_role, _require_clinician, _require_modality_signer,
@@ -232,12 +234,17 @@ def _surgical_plan_out(p: SurgicalPlan) -> dict:
         "pre_op_requirements": p.pre_op_requirements, "required_imaging_pathology": p.required_imaging_pathology,
         "anaesthesia_clearance": p.anaesthesia_clearance, "blood_requirement": p.blood_requirement,
         "special_instructions": p.special_instructions, "status": p.status,
+        "pre_op_diagnosis": p.pre_op_diagnosis,
         "performed_procedure": p.performed_procedure,
         "performed_date": p.performed_date.isoformat() if p.performed_date else None,
         "histopathology_summary": p.histopathology_summary,
         "fed_back_to_mdt_case_id": p.fed_back_to_mdt_case_id,
         "signer_email": p.signer_email, "signer_role": p.signer_role,
         "signed_at": p.signed_at.isoformat() if p.signed_at else None, "created_by": p.created_by,
+        "readiness_checklist": p.readiness_checklist, "readiness_status": p.readiness_status,
+        "review_status": p.review_status, "review_by": p.review_by,
+        "review_at": p.review_at.isoformat() if p.review_at else None,
+        "review_comments": p.review_comments, "mdt_decision_id": p.mdt_decision_id,
     }
 
 
@@ -956,6 +963,7 @@ async def create_surgical_plan(request: Request, db: Session = Depends(get_cca_d
 
     plan = SurgicalPlan(
         patient_id=patient_id, mdt_case_id=body.get("mdt_case_id"), procedure=body["procedure"],
+        pre_op_diagnosis=body.get("pre_op_diagnosis"),
         indication=body.get("indication"), intent=body.get("intent"), anatomical_site=body.get("anatomical_site"),
         laterality=body.get("laterality"), proposed_extent=body.get("proposed_extent"), approach=body.get("approach"),
         nodal_procedure=body.get("nodal_procedure"), reconstruction=body.get("reconstruction"),
@@ -1059,6 +1067,146 @@ async def record_surgical_outcome(plan_id: int, request: Request, db: Session = 
 
 
 # ---------------------------------------------------------------------------
+# Surgical Oncologist missing-development round: pre-op readiness, procedure-specific
+# consent status, explicit surgeon Review/Approve/Return-for-Changes sign-off with version
+# history, and MDT decision linkage -- all on the existing SurgicalPlan, none of it a rebuild
+# of the plan itself.
+# ---------------------------------------------------------------------------
+
+@router.patch("/surgical-plans/{plan_id}/readiness")
+async def update_surgical_plan_readiness(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Readiness is a checklist the surgical team maintains (outstanding investigations,
+    fitness clearance, required consultations, blockers) -- readiness_status is always
+    SERVER-recomputed from the checklist actually stored, never accepted directly from the
+    client, so the summary can never drift from what the checklist says."""
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    checklist = body.get("checklist")
+    if not isinstance(checklist, list):
+        raise HTTPException(422, "checklist (a list of {label, status, note}) is required")
+    plan.readiness_checklist = checklist
+    blocked = any((item or {}).get("status") == "Blocked" for item in checklist if isinstance(item, dict))
+    all_done = bool(checklist) and all((item or {}).get("status") == "Done" for item in checklist if isinstance(item, dict))
+    plan.readiness_status = "Blocked" if blocked else ("Ready" if all_done else "Pending")
+    publish(
+        db, "SURGICAL_PLAN_READINESS_UPDATED", patient_id=plan.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Surgical plan readiness updated", category="TREATMENT",
+        description=f"{_actor(current_user)} updated the pre-op readiness checklist ({plan.readiness_status}).",
+        plan_id=plan.id,
+    )
+    db.commit()
+    db.refresh(plan)
+    return {"status": "success", "surgical_plan": _surgical_plan_out(plan)}
+
+
+@router.get("/surgical-plans/{plan_id}/consent-status")
+def get_surgical_plan_consent_status(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Derived at read time from CCAConsent rows linked to this plan, same convention as
+    GET /treatment-plans/{id}/consent-status -- consent status is never assumed from plan
+    creation and never duplicated onto SurgicalPlan itself."""
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    linked = db.query(CCAConsent).filter(
+        CCAConsent.surgical_plan_id == plan.id, CCAConsent.status == "ACTIVE"
+    ).order_by(CCAConsent.valid_from.desc()).first()
+    return {
+        "surgical_plan_id": plan.id,
+        "consent_obtained": linked is not None,
+        "consent": ({
+            "id": linked.id, "consent_types": linked.consent_types, "signatory": linked.signatory,
+            "valid_from": linked.valid_from.isoformat() if linked.valid_from else None,
+        } if linked else None),
+    }
+
+
+@router.post("/surgical-plans/{plan_id}/link-mdt-decision")
+async def link_surgical_plan_mdt_decision(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Same validation as TreatmentPlan's own link-mdt-decision (routers/cca.py): the decision
+    must belong to the same patient and already be APPROVED/PARTIALLY_APPROVED by the treating
+    clinician. Recording which decision this plan is executing, not a protocol/content change
+    -- no version bump here."""
+    _require_modality_signer(current_user, "surgical")
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    mdt_decision_id = body.get("mdt_decision_id")
+    if not mdt_decision_id:
+        raise HTTPException(422, "mdt_decision_id is required")
+    decision = db.query(MDTDecision).filter(MDTDecision.id == mdt_decision_id).first()
+    if not decision or decision.patient_id != plan.patient_id:
+        raise HTTPException(422, "mdt_decision_id must reference an MDT decision for this same patient")
+    if decision.status not in ("APPROVED", "PARTIALLY_APPROVED"):
+        raise HTTPException(409, f"This MDT decision is not yet approved by the treating clinician (status: {decision.status})")
+    plan.mdt_decision_id = decision.id
+    publish(
+        db, "SURGICAL_PLAN_MDT_DECISION_LINKED", patient_id=plan.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="MDT decision linked to Surgical Plan", category="TREATMENT",
+        description=f"{_actor(current_user)} linked MDT decision #{decision.id} to the surgical plan.",
+        plan_id=plan.id, mdt_decision_id=decision.id,
+    )
+    db.commit()
+    db.refresh(plan)
+    return {"status": "success", "surgical_plan": _surgical_plan_out(plan)}
+
+
+_SURGICAL_PLAN_REVIEW_DECISIONS = ("Approve", "ReturnForChanges")
+
+
+def _surgical_plan_snapshot(plan: SurgicalPlan) -> dict:
+    return {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in _surgical_plan_out(plan).items()}
+
+
+@router.patch("/surgical-plans/{plan_id}/review")
+async def review_surgical_plan(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Explicit surgeon sign-off on the PLAN itself (distinct from signing the performed
+    outcome). Every decision snapshots the plan's pre-decision state into SurgicalPlanVersion
+    with a mandatory reason on ReturnForChanges -- same "amend requires a reason, snapshot the
+    prior state" convention as CarePlanVersion/TreatmentPlanVersion/CCAEncounterVersion."""
+    _require_modality_signer(current_user, "surgical")
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    decision = body.get("decision")
+    if decision not in _SURGICAL_PLAN_REVIEW_DECISIONS:
+        raise HTTPException(422, f"decision must be one of {_SURGICAL_PLAN_REVIEW_DECISIONS}")
+    comments = body.get("comments")
+    if decision == "ReturnForChanges" and not comments:
+        raise HTTPException(422, "comments is required when returning a plan for changes")
+
+    version_count = db.query(SurgicalPlanVersion).filter(SurgicalPlanVersion.surgical_plan_id == plan.id).count()
+    db.add(SurgicalPlanVersion(
+        surgical_plan_id=plan.id, version_no=version_count + 1, snapshot=_surgical_plan_snapshot(plan),
+        change_reason=comments or "Plan approved", created_by=_actor(current_user),
+    ))
+
+    plan.review_status = "Approved" if decision == "Approve" else "ReturnedForChanges"
+    plan.review_by = _actor(current_user)
+    plan.review_at = datetime.utcnow()
+    plan.review_comments = comments
+    publish(
+        db, "SURGICAL_PLAN_REVIEWED", patient_id=plan.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Surgical plan reviewed", category="TREATMENT",
+        description=f"{_actor(current_user)} {'approved' if decision == 'Approve' else 'returned for changes'} the surgical plan.",
+        plan_id=plan.id, decision=decision,
+    )
+    db.commit()
+    db.refresh(plan)
+    return {"status": "success", "surgical_plan": _surgical_plan_out(plan)}
+
+
+@router.get("/surgical-plans/{plan_id}/versions")
+def list_surgical_plan_versions(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    rows = db.query(SurgicalPlanVersion).filter(
+        SurgicalPlanVersion.surgical_plan_id == plan.id
+    ).order_by(SurgicalPlanVersion.version_no.asc()).all()
+    return {"versions": [
+        {
+            "id": v.id, "version_no": v.version_no, "snapshot": v.snapshot, "change_reason": v.change_reason,
+            "created_by": v.created_by, "created_at": v.created_at.isoformat() if v.created_at else None,
+        } for v in rows
+    ]}
+
+
+# ---------------------------------------------------------------------------
 # Surgical Oncology OR documentation (Gap Analysis PDF items 24-27): Intra-operative
 # Monitoring, Intra-operative Notes, Specimen Labelling and Lab Handoff, Surgical Blood
 # Transfusion Record. All keyed off an existing SurgicalPlan; available from "scheduled"
@@ -1147,10 +1295,34 @@ def _operative_note_out(n: SurgicalOperativeNote) -> dict:
         "pre_op_diagnosis": n.pre_op_diagnosis, "post_op_diagnosis": n.post_op_diagnosis,
         "procedure_performed": n.procedure_performed, "findings": n.findings, "technique": n.technique,
         "complications": n.complications, "closure": n.closure, "surgeon": n.surgeon,
-        "assistants": n.assistants, "anaesthesia_type": n.anaesthesia_type,
-        "estimated_blood_loss": n.estimated_blood_loss,
+        "assistants": n.assistants, "surgical_team": n.surgical_team,
+        "anaesthesia_type": n.anaesthesia_type,
+        "anaesthesia_intraop_record_id": n.anaesthesia_intraop_record_id,
+        "procedure_start_time": n.procedure_start_time.isoformat() if n.procedure_start_time else None,
+        "procedure_end_time": n.procedure_end_time.isoformat() if n.procedure_end_time else None,
+        "variance_from_plan": n.variance_from_plan, "variance_reason": n.variance_reason,
+        "estimated_blood_loss": n.estimated_blood_loss, "note_status": n.note_status,
         "authored_by": n.authored_by, "authored_at": n.authored_at.isoformat(),
     }
+
+
+def _validate_anaesthesia_link(db: Session, plan: SurgicalPlan, anaesthesia_intraop_record_id) -> None:
+    if anaesthesia_intraop_record_id is None:
+        return
+    record = db.query(AnaesthesiaIntraOpRecord).filter(
+        AnaesthesiaIntraOpRecord.id == anaesthesia_intraop_record_id,
+        AnaesthesiaIntraOpRecord.surgical_plan_id == plan.id,
+    ).first()
+    if not record:
+        raise HTTPException(422, "anaesthesia_intraop_record_id does not reference an anaesthesia record for this surgical plan")
+
+
+_OPERATIVE_NOTE_FIELDS = (
+    "pre_op_diagnosis", "post_op_diagnosis", "procedure_performed", "findings", "technique",
+    "complications", "closure", "surgeon", "assistants", "surgical_team",
+    "anaesthesia_type", "anaesthesia_intraop_record_id", "estimated_blood_loss",
+    "variance_from_plan", "variance_reason",
+)
 
 
 @router.get("/surgical-plans/{plan_id}/operative-notes")
@@ -1172,15 +1344,32 @@ async def record_operative_note(plan_id: int, request: Request, db: Session = De
     body = await request.json()
     if not body.get("procedure_performed"):
         raise HTTPException(422, "procedure_performed is required")
+    _validate_anaesthesia_link(db, plan, body.get("anaesthesia_intraop_record_id"))
 
     actor = _actor(current_user)
     note = SurgicalOperativeNote(
-        patient_id=plan.patient_id, surgical_plan_id=plan.id, pre_op_diagnosis=body.get("pre_op_diagnosis"),
+        patient_id=plan.patient_id, surgical_plan_id=plan.id,
+        # Carried forward from the plan when the surgeon doesn't override it -- see
+        # SurgicalPlan.pre_op_diagnosis's docstring.
+        pre_op_diagnosis=body.get("pre_op_diagnosis") or plan.pre_op_diagnosis,
         post_op_diagnosis=body.get("post_op_diagnosis"), procedure_performed=body["procedure_performed"],
         findings=body.get("findings"), technique=body.get("technique"), complications=body.get("complications"),
         closure=body.get("closure"), surgeon=body.get("surgeon"), assistants=body.get("assistants"),
-        anaesthesia_type=body.get("anaesthesia_type"), estimated_blood_loss=body.get("estimated_blood_loss"),
-        authored_by=actor,
+        surgical_team=body.get("surgical_team"), anaesthesia_type=body.get("anaesthesia_type"),
+        anaesthesia_intraop_record_id=body.get("anaesthesia_intraop_record_id"),
+        # Client-supplied ISO datetime strings must be parsed before hitting the DateTime
+        # column -- SQLAlchemy's DateTime type rejects a raw str outright (see this repo's
+        # established datetime.fromisoformat(...) if body.get(...) else None convention used
+        # for every other client-supplied datetime field, e.g. cca.py's due_date/scheduled_at).
+        procedure_start_time=(
+            datetime.fromisoformat(body["procedure_start_time"]) if body.get("procedure_start_time") else None
+        ),
+        procedure_end_time=(
+            datetime.fromisoformat(body["procedure_end_time"]) if body.get("procedure_end_time") else None
+        ),
+        variance_from_plan=bool(body.get("variance_from_plan")), variance_reason=body.get("variance_reason"),
+        estimated_blood_loss=body.get("estimated_blood_loss"),
+        note_status="FINAL", authored_by=actor,
     )
     db.add(note)
     db.flush()
@@ -1192,6 +1381,126 @@ async def record_operative_note(plan_id: int, request: Request, db: Session = De
     db.commit()
     db.refresh(note)
     return {"status": "success", "operative_note": _operative_note_out(note)}
+
+
+def _get_org_operative_note(db: Session, note_id: int, org_id: int) -> SurgicalOperativeNote:
+    note = db.query(SurgicalOperativeNote).filter(SurgicalOperativeNote.id == note_id).first()
+    if not note:
+        raise HTTPException(404, "Operative note not found")
+    _check_patient_in_org(db, note.patient_id, org_id)
+    return note
+
+
+@router.post("/surgical-plans/{plan_id}/operative-notes/draft", status_code=201)
+async def draft_operative_note(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """AI-assisted drafting from dictated/transcribed procedure content (surgeon-requested
+    missing-development item). Reuses scribe.py's existing Groq JSON-extraction plumbing (rate
+    limiting, retry, JSON repair) via draft_operative_note -- nothing new there, just a new
+    prompt/schema. Creates the note already in AI_DRAFT status: every field stays editable and
+    the surgeon must explicitly finalise before it counts as a real clinical record (see
+    finalise_operative_note below)."""
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    dictated_text = (body.get("dictated_text") or "").strip()
+    if not dictated_text:
+        raise HTTPException(422, "dictated_text is required")
+
+    drafted = scribe.draft_operative_note(dictated_text)
+    draft_failed = drafted.pop("draftFailed", False)
+    actor = _actor(current_user)
+    note = SurgicalOperativeNote(
+        patient_id=plan.patient_id, surgical_plan_id=plan.id,
+        pre_op_diagnosis=plan.pre_op_diagnosis,
+        procedure_performed=drafted.get("procedure_performed") or "",
+        findings=drafted.get("findings"), technique=drafted.get("technique"),
+        complications=drafted.get("complications"), estimated_blood_loss=drafted.get("estimated_blood_loss"),
+        note_status="AI_DRAFT", authored_by=actor,
+    )
+    db.add(note)
+    db.flush()
+    publish(
+        db, "SURGICAL_OPERATIVE_NOTE_AI_DRAFTED", patient_id=plan.patient_id, actor=actor, role=current_user.get("role"),
+        title="Operative note AI-drafted", category="TREATMENT",
+        description=f"{actor} generated an AI draft operative note for {plan.procedure}, pending review.",
+        plan_id=plan.id, note_id=note.id,
+    )
+    db.commit()
+    db.refresh(note)
+    # draftFailed tells the frontend the AI call itself never succeeded (vs. it legitimately
+    # transcribing very little) -- surfaced so the surgeon isn't shown an empty draft with no
+    # indication anything went wrong; never persisted on the note itself.
+    return {"status": "success", "operative_note": _operative_note_out(note), "draftFailed": draft_failed}
+
+
+@router.post("/operative-notes/{note_id}/finalise")
+async def finalise_operative_note(note_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Same draft->review->finalise contract as CCAEncounter's note draft/finalise
+    (routers/cca.py): finalising an AI_DRAFT (or a note with no prior FINAL) just accepts the
+    surgeon's (possibly edited) content -- the AI text is never treated as verified until this
+    happens. Finalising an already-FINAL/AMENDED note requires amendment_reason, snapshots the
+    prior content into SurgicalOperativeNoteVersion, and marks the note AMENDED -- signed
+    records are never silently overwritten."""
+    _require_surgical_team(current_user)
+    note = _get_org_operative_note(db, note_id, _org_id(current_user))
+    body = await request.json()
+
+    if note.note_status in ("FINAL", "AMENDED"):
+        amendment_reason = body.get("amendment_reason")
+        if not amendment_reason:
+            raise HTTPException(422, "amendment_reason is required to amend an already-finalised operative note")
+        version_count = db.query(SurgicalOperativeNoteVersion).filter(
+            SurgicalOperativeNoteVersion.operative_note_id == note.id
+        ).count()
+        db.add(SurgicalOperativeNoteVersion(
+            operative_note_id=note.id, version_no=version_count + 1,
+            snapshot=_operative_note_out(note), amendment_reason=amendment_reason,
+            created_by=_actor(current_user),
+        ))
+        new_status = "AMENDED"
+    else:
+        new_status = "FINAL"
+
+    if "anaesthesia_intraop_record_id" in body:
+        plan = _get_org_surgical_plan(db, note.surgical_plan_id, _org_id(current_user))
+        _validate_anaesthesia_link(db, plan, body.get("anaesthesia_intraop_record_id"))
+    for field in _OPERATIVE_NOTE_FIELDS:
+        if field in body:
+            setattr(note, field, body[field])
+    # Kept out of _OPERATIVE_NOTE_FIELDS's blind setattr loop above -- these need
+    # datetime.fromisoformat parsing first, same as record_operative_note's own handling of
+    # the same two fields, or they hit the same DateTime-column-rejects-a-raw-str failure.
+    for dt_field in ("procedure_start_time", "procedure_end_time"):
+        if dt_field in body:
+            setattr(note, dt_field, datetime.fromisoformat(body[dt_field]) if body[dt_field] else None)
+    if not note.procedure_performed:
+        raise HTTPException(422, "procedure_performed is required")
+    note.note_status = new_status
+    note.authored_by = _actor(current_user)
+    note.authored_at = datetime.utcnow()
+    publish(
+        db, "SURGICAL_OPERATIVE_NOTE_FINALISED", patient_id=note.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Operative note finalised", category="TREATMENT",
+        description=f"{_actor(current_user)} {'amended' if new_status == 'AMENDED' else 'finalised'} the operative note.",
+        plan_id=note.surgical_plan_id, note_id=note.id,
+    )
+    db.commit()
+    db.refresh(note)
+    return {"status": "success", "operative_note": _operative_note_out(note)}
+
+
+@router.get("/operative-notes/{note_id}/versions")
+def list_operative_note_versions(note_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    note = _get_org_operative_note(db, note_id, _org_id(current_user))
+    rows = db.query(SurgicalOperativeNoteVersion).filter(
+        SurgicalOperativeNoteVersion.operative_note_id == note.id
+    ).order_by(SurgicalOperativeNoteVersion.version_no.asc()).all()
+    return {"versions": [
+        {
+            "id": v.id, "version_no": v.version_no, "snapshot": v.snapshot, "amendment_reason": v.amendment_reason,
+            "created_by": v.created_by, "created_at": v.created_at.isoformat() if v.created_at else None,
+        } for v in rows
+    ]}
 
 
 def _surgical_procedure_note_out(n: SurgicalProcedureNote) -> dict:
@@ -1249,13 +1558,18 @@ async def record_surgical_procedure_note(plan_id: int, request: Request, db: Ses
 def _specimen_out(s: SurgicalSpecimen) -> dict:
     return {
         "id": s.id, "patient_id": s.patient_id, "surgical_plan_id": s.surgical_plan_id,
+        "operative_note_id": s.operative_note_id,
         "specimen_label": s.specimen_label, "specimen_type": s.specimen_type, "site": s.site,
+        "laterality": s.laterality, "orientation_notes": s.orientation_notes,
+        "clinical_question": s.clinical_question,
         "container_type": s.container_type, "fixative": s.fixative,
         "collected_by": s.collected_by, "collected_at": s.collected_at.isoformat() if s.collected_at else None,
         "handed_off_to": s.handed_off_to, "handed_off_at": s.handed_off_at.isoformat() if s.handed_off_at else None,
         "lab_accession_number": s.lab_accession_number, "received_by_lab": s.received_by_lab,
-        "received_at": s.received_at.isoformat() if s.received_at else None, "status": s.status,
-        "notes": s.notes,
+        "received_at": s.received_at.isoformat() if s.received_at else None,
+        "accepted_by": s.accepted_by, "accepted_at": s.accepted_at.isoformat() if s.accepted_at else None,
+        "exception_reason": s.exception_reason, "result_id": s.result_id,
+        "status": s.status, "notes": s.notes,
     }
 
 
@@ -1278,8 +1592,13 @@ async def add_specimen(plan_id: int, request: Request, db: Session = Depends(get
 
     actor = _actor(current_user)
     specimen = SurgicalSpecimen(
-        patient_id=plan.patient_id, surgical_plan_id=plan.id, specimen_label=label,
-        specimen_type=body.get("specimen_type"), site=body.get("site"), container_type=body.get("container_type"),
+        patient_id=plan.patient_id, surgical_plan_id=plan.id,
+        operative_note_id=body.get("operative_note_id"),
+        specimen_label=label,
+        specimen_type=body.get("specimen_type"), site=body.get("site"),
+        laterality=body.get("laterality"), orientation_notes=body.get("orientation_notes"),
+        clinical_question=body.get("clinical_question"),
+        container_type=body.get("container_type"),
         fixative=body.get("fixative"), collected_by=actor, collected_at=datetime.utcnow(),
         notes=body.get("notes"), created_by=actor,
     )
@@ -1295,17 +1614,23 @@ async def add_specimen(plan_id: int, request: Request, db: Session = Depends(get
     return {"status": "success", "specimen": _specimen_out(specimen)}
 
 
-# Workflow-sequencing only -- chain-of-custody progression, not a clinical rule.
+# Workflow-sequencing only -- chain-of-custody progression, not a clinical rule. Accepted and
+# Exception are new terminal states appended after ReceivedByLab (surgical-oncologist
+# missing-development round) -- the original 3-state chain is kept exactly as it was rather
+# than renamed, since existing data/UI/tests depend on it.
 _SPECIMEN_TRANSITIONS = {
     "HandedOff": {"Collected"},
     "ReceivedByLab": {"HandedOff"},
+    "Accepted": {"ReceivedByLab"},
+    "Exception": {"ReceivedByLab"},
 }
 
 
 @router.post("/specimens/{specimen_id}/event")
 async def record_specimen_event(specimen_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     """Advances a specimen's chain-of-custody by one step. HandedOff requires handed_off_to;
-    ReceivedByLab requires received_by_lab -- both the actual named recipient, never defaulted."""
+    ReceivedByLab requires received_by_lab; Exception requires exception_reason -- named
+    individuals and the actual reason, never defaulted."""
     _require_surgical_team(current_user)
     org_id = _org_id(current_user)
     specimen = db.query(SurgicalSpecimen).filter(SurgicalSpecimen.id == specimen_id).first()
@@ -1334,12 +1659,49 @@ async def record_specimen_event(specimen_id: int, request: Request, db: Session 
         specimen.received_at = now
         if body.get("lab_accession_number"):
             specimen.lab_accession_number = body["lab_accession_number"]
+    if target == "Accepted":
+        specimen.accepted_by = body.get("accepted_by") or _actor(current_user)
+        specimen.accepted_at = now
+    if target == "Exception":
+        if not body.get("exception_reason"):
+            raise HTTPException(422, "exception_reason is required")
+        specimen.exception_reason = body["exception_reason"]
     specimen.status = target
     db.flush()
     publish(
         db, "SURGICAL_SPECIMEN_" + target.upper(), patient_id=specimen.patient_id, actor=_actor(current_user),
         role=current_user.get("role"), title=f"Specimen {target}", category="TREATMENT",
         description=f"{_actor(current_user)} recorded specimen \"{specimen.specimen_label}\" as {target}.",
+        plan_id=specimen.surgical_plan_id,
+    )
+    db.commit()
+    db.refresh(specimen)
+    return {"status": "success", "specimen": _specimen_out(specimen)}
+
+
+@router.patch("/specimens/{specimen_id}/link-result")
+async def link_specimen_result(specimen_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Closes the loop back to the final pathology result once one exists (surgical-oncologist
+    missing-development round) -- an explicit link, same precedent as
+    PathologyFrozenSection.permanent_result_id, never inferred/auto-matched."""
+    _require_surgical_team(current_user)
+    org_id = _org_id(current_user)
+    specimen = db.query(SurgicalSpecimen).filter(SurgicalSpecimen.id == specimen_id).first()
+    if not specimen:
+        raise HTTPException(404, "Specimen not found")
+    _check_patient_in_org(db, specimen.patient_id, org_id)
+    body = await request.json()
+    result_id = body.get("result_id")
+    if not result_id:
+        raise HTTPException(422, "result_id is required")
+    result = db.query(CCAResult).filter(CCAResult.id == result_id, CCAResult.patient_id == specimen.patient_id).first()
+    if not result:
+        raise HTTPException(422, "result_id does not reference a result for this patient")
+    specimen.result_id = result.id
+    publish(
+        db, "SURGICAL_SPECIMEN_RESULT_LINKED", patient_id=specimen.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Pathology result linked to specimen", category="TREATMENT",
+        description=f"{_actor(current_user)} linked result #{result.id} to specimen \"{specimen.specimen_label}\".",
         plan_id=specimen.surgical_plan_id,
     )
     db.commit()
@@ -1648,6 +2010,119 @@ async def resolve_complication(id: int, request: Request, db: Session = Depends(
     db.commit()
     db.refresh(record)
     return {"status": "success", "complication": _complication_record_out(record)}
+
+
+# ---------------------------------------------------------------------------
+# Surgical Oncologist missing-development round: structured Post-operative Plan, separate
+# from SurgicalPlan.performed_procedure/histopathology_summary (short summary fields on the
+# plan itself). One row per SurgicalPlan (get-or-create, same idiom as
+# SurgicalSafetyChecklist's _get_or_create_checklist); sign-off is a distinct, explicit action
+# from just saving the plan's content.
+# ---------------------------------------------------------------------------
+
+def _post_op_plan_out(p: SurgicalPostOpPlan) -> dict:
+    return {
+        "id": p.id, "surgical_plan_id": p.surgical_plan_id, "patient_id": p.patient_id,
+        "monitoring_plan": p.monitoring_plan, "medications_orders": p.medications_orders,
+        "drain_wound_plan": p.drain_wound_plan, "pathology_pending": p.pathology_pending,
+        "follow_up_clinician": p.follow_up_clinician, "follow_up_timing": p.follow_up_timing,
+        "escalation_plan": p.escalation_plan, "disposition": p.disposition,
+        "pathology_review_status": p.pathology_review_status, "pathology_review_note": p.pathology_review_note,
+        "pathology_reviewed_by": p.pathology_reviewed_by,
+        "pathology_reviewed_at": p.pathology_reviewed_at.isoformat() if p.pathology_reviewed_at else None,
+        "sign_off_status": p.sign_off_status, "signed_off_by": p.signed_off_by,
+        "signed_off_at": p.signed_off_at.isoformat() if p.signed_off_at else None,
+        "created_by": p.created_by, "created_at": p.created_at.isoformat() if p.created_at else None,
+    }
+
+
+_POST_OP_PLAN_FIELDS = (
+    "monitoring_plan", "medications_orders", "drain_wound_plan", "pathology_pending",
+    "follow_up_clinician", "follow_up_timing", "escalation_plan", "disposition",
+)
+
+
+@router.get("/surgical-plans/{plan_id}/post-op-plan")
+def get_post_op_plan(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    post_op_plan = db.query(SurgicalPostOpPlan).filter(SurgicalPostOpPlan.surgical_plan_id == plan.id).first()
+    return {"post_op_plan": _post_op_plan_out(post_op_plan) if post_op_plan else None}
+
+
+@router.post("/surgical-plans/{plan_id}/post-op-plan")
+async def upsert_post_op_plan(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Get-or-create-then-update: a signed-off plan (sign_off_status="SignedOff") can no
+    longer be edited through this endpoint -- see close_post_op_plan for the terminal action."""
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    post_op_plan = db.query(SurgicalPostOpPlan).filter(SurgicalPostOpPlan.surgical_plan_id == plan.id).first()
+    if post_op_plan and post_op_plan.sign_off_status == "SignedOff":
+        raise HTTPException(409, "This post-operative plan is already signed off and cannot be edited")
+    if not post_op_plan:
+        post_op_plan = SurgicalPostOpPlan(
+            surgical_plan_id=plan.id, patient_id=plan.patient_id, created_by=_actor(current_user),
+        )
+        db.add(post_op_plan)
+    for field in _POST_OP_PLAN_FIELDS:
+        if field in body:
+            setattr(post_op_plan, field, body[field])
+    db.flush()
+    publish(
+        db, "SURGICAL_POST_OP_PLAN_UPDATED", patient_id=plan.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Post-operative plan updated", category="TREATMENT",
+        description=f"{_actor(current_user)} updated the post-operative plan.", plan_id=plan.id,
+    )
+    db.commit()
+    db.refresh(post_op_plan)
+    return {"status": "success", "post_op_plan": _post_op_plan_out(post_op_plan)}
+
+
+@router.post("/surgical-plans/{plan_id}/post-op-plan/pathology-review")
+async def review_post_op_plan_pathology(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Surfaces pending/final pathology and lets the surgeon record their clinical
+    interpretation -- distinct action from just saving the rest of the plan's content."""
+    _require_modality_signer(current_user, "surgical")
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    post_op_plan = db.query(SurgicalPostOpPlan).filter(SurgicalPostOpPlan.surgical_plan_id == plan.id).first()
+    if not post_op_plan:
+        raise HTTPException(404, "No post-operative plan exists yet for this surgical plan")
+    body = await request.json()
+    post_op_plan.pathology_review_status = "Reviewed"
+    post_op_plan.pathology_review_note = body.get("pathology_review_note")
+    post_op_plan.pathology_reviewed_by = _actor(current_user)
+    post_op_plan.pathology_reviewed_at = datetime.utcnow()
+    post_op_plan.pathology_pending = False
+    db.commit()
+    db.refresh(post_op_plan)
+    return {"status": "success", "post_op_plan": _post_op_plan_out(post_op_plan)}
+
+
+@router.post("/surgical-plans/{plan_id}/post-op-plan/sign-off")
+async def sign_off_post_op_plan(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Final surgical-episode sign-off -- a distinct, explicit action from merely saving the
+    plan's content, matching this repo's draft-vs-signed convention elsewhere. Surgeon-only,
+    same gate as reviewing/approving the SurgicalPlan itself."""
+    _require_modality_signer(current_user, "surgical")
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    post_op_plan = db.query(SurgicalPostOpPlan).filter(SurgicalPostOpPlan.surgical_plan_id == plan.id).first()
+    if not post_op_plan:
+        raise HTTPException(404, "No post-operative plan exists yet for this surgical plan")
+    if post_op_plan.sign_off_status == "SignedOff":
+        raise HTTPException(409, "This post-operative plan is already signed off")
+    post_op_plan.sign_off_status = "SignedOff"
+    post_op_plan.signed_off_by = _actor(current_user)
+    post_op_plan.signed_off_at = datetime.utcnow()
+    publish(
+        db, "SURGICAL_POST_OP_PLAN_SIGNED_OFF", patient_id=plan.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Post-operative plan signed off", category="TREATMENT",
+        description=f"{_actor(current_user)} signed off the surgical episode's post-operative plan.",
+        plan_id=plan.id,
+    )
+    db.commit()
+    db.refresh(post_op_plan)
+    return {"status": "success", "post_op_plan": _post_op_plan_out(post_op_plan)}
 
 
 # ---------------------------------------------------------------------------

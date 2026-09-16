@@ -78,6 +78,25 @@ def dense_single_page_lab_report_pdf() -> bytes:
     return _render_pdf(story)
 
 
+def medications_and_labs_report_pdf() -> bytes:
+    """One page combining a "Medications:" line with a dense lab panel -- exercises
+    ocr_service._clinical_signals's "medications" regex scan (bridged by
+    cca_engine.extract_deterministic_medication_facts) alongside the existing "lab_values" scan
+    in the same document, the way a real discharge/consult document usually has both sections
+    together. Each label line is its own Paragraph (see module docstring) so it reliably lands
+    on its own extracted line."""
+    story = [Paragraph("Consultation Summary", _HEADING_STYLE)]
+    story.append(Paragraph(
+        "Medications: Tab. Metformin 500mg BD, Tab. Atorvastatin 20mg OD, Cap. Omeprazole 20mg OD",
+        _LINE_STYLE,
+    ))
+    story.append(Spacer(1, 2))
+    for line in _LAB_LINES:
+        story.append(Paragraph(line, _LINE_STYLE))
+        story.append(Spacer(1, 2))
+    return _render_pdf(story)
+
+
 def mixed_image_and_text_pdf(text_pages: int = 2, image_pages: int = 2) -> bytes:
     """Alternates real-text pages (>=40 chars native text) with image-only pages (no extractable
     native text at all) in one document -- exercises ocr_service._extract_local's per-page
@@ -188,6 +207,7 @@ ADVERSARIAL_DOCUMENTS: dict[str, tuple[str, str]] = {
     # name -> (filename, content_type); bytes come from calling the same-named function above.
     "huge_lab_report": ("huge_lab_report.pdf", "application/pdf"),
     "dense_single_page_lab_report": ("dense_single_page_lab_report.pdf", "application/pdf"),
+    "medications_and_labs_report": ("medications_and_labs_report.pdf", "application/pdf"),
     "mixed_image_and_text": ("mixed_image_and_text.pdf", "application/pdf"),
     "password_protected": ("password_protected.pdf", "application/pdf"),
     "corrupted": ("corrupted.pdf", "application/pdf"),
@@ -200,6 +220,7 @@ ADVERSARIAL_DOCUMENTS: dict[str, tuple[str, str]] = {
 _BUILDERS = {
     "huge_lab_report": huge_lab_report_pdf,
     "dense_single_page_lab_report": dense_single_page_lab_report_pdf,
+    "medications_and_labs_report": medications_and_labs_report_pdf,
     "mixed_image_and_text": mixed_image_and_text_pdf,
     "password_protected": password_protected_pdf,
     "corrupted": corrupted_pdf,

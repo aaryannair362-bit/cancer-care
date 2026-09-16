@@ -47,6 +47,8 @@ from .models_cca_oncology_ext import (
     SurgicalStomaRecord, SurgicalComplicationRecord, SurgicalIntraOpNote, SurgicalProcedureNote,
     AnaesthesiaPreOpEvaluation, AnaesthesiaPreOpEvaluationVersion,
     AnaesthesiaIntraOpRecord, AnaesthesiaRecoveryRecord,
+    SurgicalPlan, SurgicalPlanVersion, SurgicalOperativeNote, SurgicalOperativeNoteVersion,
+    SurgicalPostOpPlan,
 )
 from .models_cca_inpatient import (
     InpatientAdmission, InpatientHistoryAndPhysical, InpatientProblemListItem,
@@ -137,6 +139,11 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # itself is a pre-existing omission from this reset (not introduced here).
             SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
             SurgicalStomaRecord, SurgicalComplicationRecord, SurgicalIntraOpNote, SurgicalProcedureNote,
+            # Surgical Oncologist missing-development round -- has its own patient_id, matching
+            # the convention above. SurgicalPlanVersion/SurgicalOperativeNoteVersion (no
+            # patient_id of their own) are deleted below via surgical_plan_ids/operative_note_ids
+            # lookups, before this loop runs.
+            SurgicalPostOpPlan,
             # R10 Anaesthetist module (Core Oncology 4 Sections + 11 Additional Modules
             # developer handoffs) -- all three have their own patient_id.
             # AnaesthesiaPreOpEvaluationVersion (no patient_id of its own) is deleted above via
@@ -337,6 +344,30 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             if anaesthesia_evaluation_ids:
                 db.query(AnaesthesiaPreOpEvaluationVersion).filter(
                     AnaesthesiaPreOpEvaluationVersion.evaluation_id.in_(anaesthesia_evaluation_ids)
+                ).delete(synchronize_session=False)
+            # SurgicalPlanVersion has no patient_id of its own -- delete it via its parent
+            # SurgicalPlan ids (surgical-oncologist missing-development round). SurgicalPlan
+            # itself is the same pre-existing reset omission noted above, so these ids are
+            # looked up directly rather than via a from-list already built by this loop.
+            surgical_plan_ids = [
+                row.id for row in db.query(SurgicalPlan.id).filter(
+                    SurgicalPlan.patient_id.in_(org_patient_ids)
+                ).all()
+            ]
+            if surgical_plan_ids:
+                db.query(SurgicalPlanVersion).filter(
+                    SurgicalPlanVersion.surgical_plan_id.in_(surgical_plan_ids)
+                ).delete(synchronize_session=False)
+            # SurgicalOperativeNoteVersion has no patient_id of its own -- delete it via its
+            # parent SurgicalOperativeNote ids, same reasoning as SurgicalPlanVersion above.
+            operative_note_ids = [
+                row.id for row in db.query(SurgicalOperativeNote.id).filter(
+                    SurgicalOperativeNote.patient_id.in_(org_patient_ids)
+                ).all()
+            ]
+            if operative_note_ids:
+                db.query(SurgicalOperativeNoteVersion).filter(
+                    SurgicalOperativeNoteVersion.operative_note_id.in_(operative_note_ids)
                 ).delete(synchronize_session=False)
             for model in child_models_by_patient:
                 db.query(model).filter(model.patient_id.in_(org_patient_ids)).delete(synchronize_session=False)

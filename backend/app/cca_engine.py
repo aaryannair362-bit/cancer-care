@@ -6,6 +6,7 @@ Strict human-in-the-loop governance:
 - Mathematical accuracy for BSA (DuBois) and BMI
 """
 
+import logging
 import math
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -24,6 +25,14 @@ from .models_cca_oncology_ext import (
 from .scribe import scribe
 from .config import settings
 from . import rate_limiter
+
+# scribe.py's own _post_with_retry/_generate_json already log Groq-level failures (auth, rate
+# limit, malformed response) -- this logger is for the fact that a SLICE's extraction was
+# dropped as a result, which extract_clinical_facts/classify_and_extract_page's `except
+# Exception: continue` previously swallowed with no trace at all. Without this, a sustained
+# Groq failure (e.g. a misconfigured GROQ_API_KEY_OCR) looked identical in the logs to a
+# document that genuinely had nothing to extract.
+logger = logging.getLogger(__name__)
 
 
 def calculate_bsa(height_cm: float, weight_kg: float, formula: str = "DuBois") -> Tuple[float, float]:
@@ -727,7 +736,7 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
 
     facts: List[Dict] = []
     seen_facts: set = set()
-    for slice_text in slices:
+    for slice_num, slice_text in enumerate(slices, start=1):
         prompt = f"Extract clinical facts from this document:\n\n{slice_text}"
         try:
             # Dedicated key/buckets (see rate_limiter.py's ocr_extraction_* comment) so a
@@ -739,10 +748,24 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
                 request_bucket=rate_limiter.ocr_extraction_request_bucket,
                 token_bucket=rate_limiter.ocr_extraction_token_bucket,
             )
-        except Exception:
+        except Exception as e:
+            # No PHI here -- slice_text/prompt are deliberately excluded, same as scribe.py's
+            # own Groq-error logging. This slice contributes zero facts (including any
+            # MEDICATION facts it held -- there's no deterministic fallback for those the way
+            # LAB_RESULT has extract_deterministic_lab_facts below), so a sustained failure
+            # here (bad GROQ_API_KEY_OCR, exhausted retries) previously looked identical in the
+            # logs to a document that genuinely had nothing to extract.
+            logger.warning(
+                "extract_clinical_facts: slice %d/%d failed, contributing 0 facts: %s",
+                slice_num, len(slices), e,
+            )
             continue
         raw_facts = result.get("facts") if isinstance(result, dict) else None
         if not isinstance(raw_facts, list):
+            logger.warning(
+                "extract_clinical_facts: slice %d/%d returned malformed JSON (no 'facts' list), "
+                "contributing 0 facts", slice_num, len(slices),
+            )
             continue
         for f in raw_facts:
             if not isinstance(f, dict):
@@ -787,6 +810,39 @@ def extract_deterministic_lab_facts(signals: Optional[Dict]) -> List[Dict]:
     return [
         {"fact_type": "LAB_RESULT", "value": entry, "verbatim": entry, "confidence": 0.95}
         for entry in (signals or {}).get("lab_values", [])
+    ]
+
+
+def extract_deterministic_medication_facts(signals: Optional[Dict]) -> List[Dict]:
+    """Same deterministic-safety-net pattern as extract_deterministic_lab_facts above, for
+    MEDICATION facts -- turns ocr_service._clinical_signals()'s "medications" scan (a regex
+    line matcher for a line starting "Medications:"/"Drugs:"/"Prescription:", no LLM call) into
+    the same fact shape, so routers/cca.py's upload_document can merge it with the AI-drafted
+    facts through the same dedup/persistence path.
+
+    Before this, MEDICATION facts came ONLY from extract_clinical_facts's LLM pass -- unlike
+    LAB_RESULT, which always had this deterministic fallback too. Confirmed live: when a
+    document-OCR extraction call fails outright (bad/rate-limited GROQ_API_KEY_OCR, exhausted
+    retries, malformed response -- see extract_clinical_facts's now-logged except block), labs
+    still appeared (this fallback) while medications silently disappeared (they had no
+    equivalent), even though the raw "Medications:" line was sitting right there in
+    _clinical_signals()'s output the whole time, just never surfaced as a fact.
+
+    Each entry is the full captured line after the "Medications:"/"Drugs:"/"Prescription:"
+    label (see ocr_service._clinical_signals's "medications" pattern) -- often several drugs in
+    one comma-separated line, not one entry per individual drug the way lab_values is one entry
+    per test. Confidence is lower than the lab fallback's 0.95: a lab_values entry is a tightly
+    parsed "<test name>: <value> <unit>" match, while a medications line is a coarser raw-text
+    capture more likely to need a clinician's read before it's trusted as-is -- still well above
+    extract_clinical_facts's 0.75 generic-LLM-fact default, since this is a verbatim quote, not
+    an inferred value.
+
+    signals may be None/missing "medications" entirely (older callers, or a signals dict built
+    before this key existed) -- returns [] in that case, same as extract_deterministic_lab_facts.
+    """
+    return [
+        {"fact_type": "MEDICATION", "value": entry, "verbatim": entry, "confidence": 0.85}
+        for entry in (signals or {}).get("medications", [])
     ]
 
 
@@ -936,7 +992,7 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
     seen_facts: set = set()
     llm_page_type = None
     llm_confidence = None
-    for slice_text in slices:
+    for slice_num, slice_text in enumerate(slices, start=1):
         prompt = f"Classify and extract clinical facts from this page:\n\n{slice_text}"
         try:
             # See extract_clinical_facts's identical comment above -- same dedicated
@@ -947,7 +1003,12 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
                 request_bucket=rate_limiter.ocr_extraction_request_bucket,
                 token_bucket=rate_limiter.ocr_extraction_token_bucket,
             )
-        except Exception:
+        except Exception as e:
+            # See extract_clinical_facts's identical comment above -- same silent-failure gap.
+            logger.warning(
+                "classify_and_extract_page: slice %d/%d failed, contributing 0 facts: %s",
+                slice_num, len(slices), e,
+            )
             continue
         if not isinstance(result, dict):
             continue

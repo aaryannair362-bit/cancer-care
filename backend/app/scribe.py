@@ -727,6 +727,40 @@ If information for a field is not present in the input above, use an empty strin
         result["dischargeSummaryFailed"] = extraction_failed
         return result
 
+    def draft_operative_note(self, dictated_text: str) -> dict:
+        """AI-assisted drafting for the Surgical Oncologist's Operative Note (missing-
+        development item) from dictated/transcribed procedure content -- surgical_oncologist's
+        draft_operative_note router endpoint is the only caller. Keys are snake_case, matching
+        SurgicalOperativeNote's own column names directly (same convention as cca_engine.py's
+        extract_clinical_facts, not scribe_transcript's camelCase OPD-note shape), since the
+        router maps this result straight onto that model with no translation layer.
+
+        Mirrors generate_discharge_summary's contract: never raises, always returns every key,
+        with an explicit failure flag distinguishing a real API failure from the model
+        legitimately finding little to report -- callers must never present an AI draft as
+        already-verified clinical fact regardless of which case this is; the router creates the
+        resulting note with note_status="AI_DRAFT", not "FINAL", either way."""
+        system = (
+            "You are drafting a surgical Operative Note from a surgeon's dictated account of a "
+            "procedure just performed. Extract ONLY what was actually said -- never invent or "
+            "assume a finding, technique detail, or complication that wasn't mentioned. Return "
+            'strict JSON of the shape {"procedure_performed": "", "findings": "", "technique": "", '
+            '"complications": "", "estimated_blood_loss": ""}. If a field was not mentioned, use '
+            'an empty string. Never include markdown or commentary outside the JSON object.'
+        )
+        prompt = f"Surgeon's dictated account of the procedure:\n\n{dictated_text}"
+        result = self._generate_json(prompt, system=system, temperature=0.3)
+        # See _generate_json's "__ai_call_failed__" sentinel comment -- same convention as
+        # generate_discharge_summary's dischargeSummaryFailed above.
+        draft_failed = result.pop("__ai_call_failed__", False)
+        default = {"procedure_performed": "", "findings": "", "technique": "", "complications": "", "estimated_blood_loss": ""}
+        for key, default_value in default.items():
+            if key not in result or result[key] is None:
+                result[key] = default_value
+        result = self._coerce_string_fields(result, tuple(default.keys()))
+        result["draftFailed"] = draft_failed
+        return result
+
     def is_available(self) -> bool:
         if not self.api_key:
             return False

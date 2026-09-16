@@ -66,6 +66,7 @@ from ..cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
     evaluate_guideline_readiness, synthesize_nexus_brief, generate_care_plan_prefill,
     classify_document, extract_clinical_facts, extract_deterministic_lab_facts,
+    extract_deterministic_medication_facts,
     build_results_from_document_facts, build_medication_lists,
 )
 from ..cca_seed import seed_cca_database, simulate_ct_result
@@ -673,6 +674,14 @@ async def capture_consent(
         if not plan:
             raise HTTPException(422, "treatment_plan_id does not reference a Treatment Plan for this patient")
 
+    # Same idea for a specific SurgicalPlan (surgical-oncology missing-development round) --
+    # optional, a generic consent still works unchanged with no surgical_plan_id.
+    surgical_plan_id = body.get("surgical_plan_id")
+    if surgical_plan_id is not None:
+        surgical_plan = db.query(SurgicalPlan).filter(SurgicalPlan.id == surgical_plan_id, SurgicalPlan.patient_id == patient_id).first()
+        if not surgical_plan:
+            raise HTTPException(422, "surgical_plan_id does not reference a Surgical Plan for this patient")
+
     actor = _actor(current_user)
     consent = CCAConsent(
         patient_id=patient_id,
@@ -680,6 +689,7 @@ async def capture_consent(
         signatory=signatory,
         signatory_reason=body.get("signatory_reason"),
         treatment_plan_id=treatment_plan_id,
+        surgical_plan_id=surgical_plan_id,
         captured_by=actor,
         status="ACTIVE",
     )
@@ -698,6 +708,7 @@ async def capture_consent(
         "consent": {
             "id": consent.id, "patient_id": consent.patient_id, "consent_types": consent.consent_types,
             "signatory": consent.signatory, "status": consent.status, "treatment_plan_id": consent.treatment_plan_id,
+            "surgical_plan_id": consent.surgical_plan_id,
             "valid_from": consent.valid_from.isoformat() if consent.valid_from else None,
         },
     }
@@ -1296,12 +1307,17 @@ async def upload_document(
     result_rows = []
     if not ocr_failed_reason:
         drafted_facts = extract_clinical_facts(ocr_text)
-        # Deterministic lab-value safety net (ocr_service._clinical_signals's "lab_values" scan,
-        # run over the FULL raw text -- see extract_deterministic_lab_facts's docstring): merged
-        # in here, deduped against what the AI pass already drafted, so the same exact lab line
-        # never becomes two ClinicalFact rows.
+        # Deterministic lab-value/medication safety nets (ocr_service._clinical_signals's
+        # "lab_values"/"medications" scans, run over the FULL raw text -- see
+        # extract_deterministic_lab_facts's and extract_deterministic_medication_facts's
+        # docstrings): merged in here, deduped against what the AI pass already drafted, so the
+        # same exact line never becomes two ClinicalFact rows.
         seen_facts = {(f["fact_type"], f["value"]) for f in drafted_facts}
-        for f in extract_deterministic_lab_facts(ocr_result.get("signals")):
+        deterministic_facts = (
+            extract_deterministic_lab_facts(ocr_result.get("signals"))
+            + extract_deterministic_medication_facts(ocr_result.get("signals"))
+        )
+        for f in deterministic_facts:
             key = (f["fact_type"], f["value"])
             if key in seen_facts:
                 continue

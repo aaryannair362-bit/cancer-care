@@ -81,6 +81,9 @@ class CCAConsent(Base):
     # tell which treatment strategy a given consent actually covers. Nullable: the generic
     # registration-time consent flow keeps working unchanged for callers that don't set it.
     treatment_plan_id = Column(Integer, ForeignKey("cca_treatment_plans.id"), nullable=True)
+    # Same idea as treatment_plan_id above, for a specific SurgicalPlan (surgical-oncology
+    # missing-development round) -- procedure-specific consent, not assumed from plan creation.
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=True)
     captured_by = Column(String(200))
     valid_from = Column(DateTime, default=datetime.utcnow)
     status = Column(String(30), default="ACTIVE")
@@ -2497,6 +2500,10 @@ class PathologySpecimenAccession(Base):
     status = Column(String(30), default="ACCEPTED")  # ACCEPTED, QUARANTINED
     received_by = Column(String(200))
     received_at = Column(DateTime, default=datetime.utcnow)
+    # Surgical-oncologist missing-development round: optional traceability link back to the
+    # OR-side SurgicalSpecimen this accession corresponds to -- see routers/cca_diagnostics.py's
+    # accession_specimen for how it's set.
+    surgical_specimen_id = Column(Integer, ForeignKey("cca_surgical_specimens.id"), nullable=True)
 
 
 # ---------------------------------------------------------------------------

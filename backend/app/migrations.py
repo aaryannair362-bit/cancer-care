@@ -267,6 +267,47 @@ ADDITIVE_COLUMNS = [
     ("cca_extravasation_events", "administration_id", "INTEGER"),
     ("cca_treatment_day_completions", "disposition_reason", "TEXT"),
     ("cca_response_assessments", "treatment_session_id", "INTEGER"),
+    # Surgical Oncologist missing-development round: SurgicalPlan pre-op diagnosis, readiness
+    # checklist, explicit review/approve sign-off, and MDT decision linkage -- see each
+    # column's docstring on SurgicalPlan (models_cca_oncology_ext.py).
+    ("cca_surgical_plans", "pre_op_diagnosis", "TEXT"),
+    ("cca_surgical_plans", "readiness_checklist", "JSON"),
+    ("cca_surgical_plans", "readiness_status", "VARCHAR(30) DEFAULT 'Pending'"),
+    ("cca_surgical_plans", "review_status", "VARCHAR(30) DEFAULT 'Pending'"),
+    ("cca_surgical_plans", "review_by", "VARCHAR(200)"),
+    ("cca_surgical_plans", "review_at", "TIMESTAMP"),
+    ("cca_surgical_plans", "review_comments", "TEXT"),
+    ("cca_surgical_plans", "mdt_decision_id", "INTEGER"),
+    # Surgical Oncologist missing-development round: SurgicalOperativeNote structured team,
+    # anaesthesia linkage, procedure timing, planned-vs-performed variance, and AI-draft/
+    # amendment status -- see each column's docstring on SurgicalOperativeNote.
+    ("cca_surgical_operative_notes", "surgical_team", "JSON"),
+    ("cca_surgical_operative_notes", "anaesthesia_intraop_record_id", "INTEGER"),
+    ("cca_surgical_operative_notes", "procedure_start_time", "TIMESTAMP"),
+    ("cca_surgical_operative_notes", "procedure_end_time", "TIMESTAMP"),
+    ("cca_surgical_operative_notes", "variance_from_plan", "BOOLEAN DEFAULT FALSE"),
+    ("cca_surgical_operative_notes", "variance_reason", "TEXT"),
+    ("cca_surgical_operative_notes", "note_status", "VARCHAR(30) DEFAULT 'FINAL'"),
+    # Surgical Oncologist missing-development round: SurgicalSpecimen operative-note linkage,
+    # laterality/orientation/clinical-question, Accepted/Exception handoff states, and
+    # pathology result linkage -- see each column's docstring on SurgicalSpecimen.
+    ("cca_surgical_specimens", "operative_note_id", "INTEGER"),
+    ("cca_surgical_specimens", "laterality", "VARCHAR(20)"),
+    ("cca_surgical_specimens", "orientation_notes", "TEXT"),
+    ("cca_surgical_specimens", "clinical_question", "TEXT"),
+    ("cca_surgical_specimens", "accepted_by", "VARCHAR(200)"),
+    ("cca_surgical_specimens", "accepted_at", "TIMESTAMP"),
+    ("cca_surgical_specimens", "exception_reason", "TEXT"),
+    ("cca_surgical_specimens", "result_id", "INTEGER"),
+    # Surgical Oncologist missing-development round: wires SurgicalSpecimen to its lab-side
+    # PathologySpecimenAccession once accessioned -- previously zero linkage existed between
+    # the two (confirmed by audit: every Pathology* model keys off cca_orders.id, never a
+    # surgical specimen).
+    ("cca_pathology_specimen_accessions", "surgical_specimen_id", "INTEGER"),
+    # Surgical Oncologist missing-development round: procedure-specific consent tracking on
+    # SurgicalPlan, reusing the existing CCAConsent model (same precedent as
+    # cca_consents.treatment_plan_id above) instead of a redundant status column on the plan.
+    ("cca_consents", "surgical_plan_id", "INTEGER"),
 ]
 
 

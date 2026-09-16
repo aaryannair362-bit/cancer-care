@@ -382,6 +382,244 @@ def test_performed_procedure_recorded_separately_from_planned_and_feeds_back_to_
 
 
 # ---------------------------------------------------------------------------
+# Surgical Oncologist missing-development round: readiness, consent status, review/approve
+# with version history, MDT decision linkage, AI-assisted operative note drafting, specimen
+# laterality/Accepted/Exception, specimen-result linkage, and the post-op plan.
+# ---------------------------------------------------------------------------
+
+def test_readiness_checklist_recomputes_status_from_items(client, auth_headers, db_session, oncologist, surg_onc):
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    plan = _create_surgical_plan(client, auth_headers(oncologist), patient_id)
+    surg_headers = auth_headers(surg_onc)
+
+    blocked = client.patch(f"/api/cca/surgical-plans/{plan['id']}/readiness", headers=surg_headers, json={
+        "checklist": [{"label": "Fitness clearance", "status": "Blocked", "note": "Cardiology pending"}]
+    })
+    assert blocked.status_code == 200
+    assert blocked.json()["surgical_plan"]["readiness_status"] == "Blocked"
+
+    ready = client.patch(f"/api/cca/surgical-plans/{plan['id']}/readiness", headers=surg_headers, json={
+        "checklist": [{"label": "Fitness clearance", "status": "Done"}, {"label": "Imaging", "status": "Done"}]
+    })
+    assert ready.status_code == 200
+    assert ready.json()["surgical_plan"]["readiness_status"] == "Ready"
+
+
+def test_consent_status_derived_from_linked_consent(client, auth_headers, db_session, oncologist, surg_onc):
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    onc_headers = auth_headers(oncologist)
+    plan = _create_surgical_plan(client, onc_headers, patient_id)
+
+    pending = client.get(f"/api/cca/surgical-plans/{plan['id']}/consent-status", headers=auth_headers(surg_onc))
+    assert pending.status_code == 200
+    assert pending.json()["consent_obtained"] is False
+
+    captured = client.post(f"/api/cca/patients/{patient_id}/consents", headers=onc_headers, json={
+        "consent_types": ["treatment"], "signatory": "Patient", "surgical_plan_id": plan["id"],
+    })
+    assert captured.status_code == 201, captured.text
+    assert captured.json()["consent"]["surgical_plan_id"] == plan["id"]
+
+    documented = client.get(f"/api/cca/surgical-plans/{plan['id']}/consent-status", headers=auth_headers(surg_onc))
+    assert documented.json()["consent_obtained"] is True
+
+
+def test_review_approve_and_return_for_changes_requires_surgeon_and_records_version(client, auth_headers, db_session, oncologist, surg_onc, rad_onc):
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    plan = _create_surgical_plan(client, auth_headers(oncologist), patient_id)
+    surg_headers = auth_headers(surg_onc)
+
+    wrong_signer = client.patch(f"/api/cca/surgical-plans/{plan['id']}/review", headers=auth_headers(rad_onc), json={"decision": "Approve"})
+    assert wrong_signer.status_code == 403
+
+    missing_comments = client.patch(f"/api/cca/surgical-plans/{plan['id']}/review", headers=surg_headers, json={"decision": "ReturnForChanges"})
+    assert missing_comments.status_code == 422
+
+    returned = client.patch(f"/api/cca/surgical-plans/{plan['id']}/review", headers=surg_headers, json={
+        "decision": "ReturnForChanges", "comments": "Anatomical site needs to specify quadrant."
+    })
+    assert returned.status_code == 200
+    assert returned.json()["surgical_plan"]["review_status"] == "ReturnedForChanges"
+
+    approved = client.patch(f"/api/cca/surgical-plans/{plan['id']}/review", headers=surg_headers, json={"decision": "Approve"})
+    assert approved.status_code == 200
+    assert approved.json()["surgical_plan"]["review_status"] == "Approved"
+
+    versions = client.get(f"/api/cca/surgical-plans/{plan['id']}/versions", headers=surg_headers)
+    assert versions.status_code == 200
+    version_rows = versions.json()["versions"]
+    assert len(version_rows) == 2
+    assert version_rows[0]["change_reason"] == "Anatomical site needs to specify quadrant."
+    assert version_rows[0]["snapshot"]["review_status"] == "Pending"  # snapshot taken BEFORE this decision applied
+
+
+def test_link_mdt_decision_on_surgical_plan_requires_approved_and_matching_patient(client, auth_headers, db_session, oncologist, surg_onc):
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    onc_headers = auth_headers(oncologist)
+    plan = _create_surgical_plan(client, onc_headers, patient_id)
+    surg_headers = auth_headers(surg_onc)
+
+    case_id = client.post("/api/cca/mdt/cases", headers=onc_headers, json={"patient_id": patient_id, "question": "Surgical approach?"}).json()["mdt_case"]["id"]
+    decision_id = client.post(f"/api/cca/mdt/cases/{case_id}/recommendation", headers=onc_headers, json={"recommendation": "Proceed with mastectomy."}).json()["decision"]["id"]
+
+    not_yet_approved = client.post(f"/api/cca/surgical-plans/{plan['id']}/link-mdt-decision", headers=surg_headers, json={"mdt_decision_id": decision_id})
+    assert not_yet_approved.status_code == 409
+
+    client.post(f"/api/cca/mdt/cases/{case_id}/approve", headers=onc_headers, json={"disposition": "ACCEPT"})
+    linked = client.post(f"/api/cca/surgical-plans/{plan['id']}/link-mdt-decision", headers=surg_headers, json={"mdt_decision_id": decision_id})
+    assert linked.status_code == 200
+    assert linked.json()["surgical_plan"]["mdt_decision_id"] == decision_id
+
+
+def test_operative_note_carries_forward_plan_pre_op_diagnosis_and_records_new_fields(client, auth_headers, db_session, oncologist, surg_onc):
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    onc_headers = auth_headers(oncologist)
+    plan = client.post("/api/cca/surgical-plans", headers=onc_headers, json={
+        "patient_id": patient_id, "procedure": "Left modified radical mastectomy",
+        "pre_op_diagnosis": "Invasive ductal carcinoma, left breast",
+    }).json()["surgical_plan"]
+    assert plan["pre_op_diagnosis"] == "Invasive ductal carcinoma, left breast"
+
+    surg_headers = auth_headers(surg_onc)
+    note = client.post(f"/api/cca/surgical-plans/{plan['id']}/operative-notes", headers=surg_headers, json={
+        "procedure_performed": "Left mastectomy", "surgical_team": [{"name": "Dr. Rao", "role": "Assistant"}],
+        "procedure_start_time": "2026-09-16T08:00:00", "procedure_end_time": "2026-09-16T10:30:00",
+        "variance_from_plan": True, "variance_reason": "Converted to full axillary clearance intra-operatively.",
+    })
+    assert note.status_code == 201, note.text
+    body = note.json()["operative_note"]
+    assert body["pre_op_diagnosis"] == "Invasive ductal carcinoma, left breast"
+    assert body["surgical_team"] == [{"name": "Dr. Rao", "role": "Assistant"}]
+    assert body["variance_from_plan"] is True
+    assert body["note_status"] == "FINAL"
+
+
+def test_operative_note_ai_draft_then_finalise_then_amend_requires_reason(client, auth_headers, db_session, oncologist, surg_onc, monkeypatch):
+    import json
+    import app.main as app_main
+
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    plan = _create_surgical_plan(client, auth_headers(oncologist), patient_id)
+    surg_headers = auth_headers(surg_onc)
+
+    monkeypatch.setattr(app_main.scribe, "_call_groq_api", lambda *a, **k: json.dumps({
+        "procedure_performed": "Left mastectomy", "findings": "2.3cm mass upper outer quadrant",
+        "technique": "Standard technique.", "complications": "None", "estimated_blood_loss": "150ml",
+    }))
+
+    drafted = client.post(f"/api/cca/surgical-plans/{plan['id']}/operative-notes/draft", headers=surg_headers, json={
+        "dictated_text": "We performed a left mastectomy, found a 2.3cm mass..."
+    })
+    assert drafted.status_code == 201, drafted.text
+    note = drafted.json()["operative_note"]
+    assert note["note_status"] == "AI_DRAFT"
+    assert note["procedure_performed"] == "Left mastectomy"
+
+    finalised = client.post(f"/api/cca/operative-notes/{note['id']}/finalise", headers=surg_headers, json={
+        "procedure_performed": "Left mastectomy with sentinel node biopsy", "surgeon": "Dr. Surg",
+    })
+    assert finalised.status_code == 200
+    assert finalised.json()["operative_note"]["note_status"] == "FINAL"
+    assert finalised.json()["operative_note"]["procedure_performed"] == "Left mastectomy with sentinel node biopsy"
+
+    missing_reason = client.post(f"/api/cca/operative-notes/{note['id']}/finalise", headers=surg_headers, json={"findings": "Updated finding"})
+    assert missing_reason.status_code == 422
+
+    amended = client.post(f"/api/cca/operative-notes/{note['id']}/finalise", headers=surg_headers, json={
+        "findings": "Updated finding after pathology correlation.", "amendment_reason": "Pathology correlation added.",
+    })
+    assert amended.status_code == 200
+    assert amended.json()["operative_note"]["note_status"] == "AMENDED"
+
+    versions = client.get(f"/api/cca/operative-notes/{note['id']}/versions", headers=surg_headers)
+    assert len(versions.json()["versions"]) == 1
+    assert versions.json()["versions"][0]["amendment_reason"] == "Pathology correlation added."
+
+
+def test_specimen_laterality_and_accepted_exception_lifecycle(client, auth_headers, db_session, oncologist, surg_onc):
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    plan = _create_surgical_plan(client, auth_headers(oncologist), patient_id)
+    surg_headers = auth_headers(surg_onc)
+
+    specimen = client.post(f"/api/cca/surgical-plans/{plan['id']}/specimens", headers=surg_headers, json={
+        "specimen_label": "Left breast mass", "laterality": "Left", "clinical_question": "Confirm margins clear.",
+    }).json()["specimen"]
+    assert specimen["laterality"] == "Left"
+
+    client.post(f"/api/cca/specimens/{specimen['id']}/event", headers=surg_headers, json={"status": "HandedOff", "handed_off_to": "Porter A"})
+    client.post(f"/api/cca/specimens/{specimen['id']}/event", headers=surg_headers, json={"status": "ReceivedByLab", "received_by_lab": "Lab Tech B"})
+
+    accepted = client.post(f"/api/cca/specimens/{specimen['id']}/event", headers=surg_headers, json={"status": "Accepted"})
+    assert accepted.status_code == 200
+    assert accepted.json()["specimen"]["status"] == "Accepted"
+
+    second_specimen = client.post(f"/api/cca/surgical-plans/{plan['id']}/specimens", headers=surg_headers, json={
+        "specimen_label": "Sentinel node", "laterality": "Left",
+    }).json()["specimen"]
+    client.post(f"/api/cca/specimens/{second_specimen['id']}/event", headers=surg_headers, json={"status": "HandedOff", "handed_off_to": "Porter A"})
+    client.post(f"/api/cca/specimens/{second_specimen['id']}/event", headers=surg_headers, json={"status": "ReceivedByLab", "received_by_lab": "Lab Tech B"})
+    missing_reason = client.post(f"/api/cca/specimens/{second_specimen['id']}/event", headers=surg_headers, json={"status": "Exception"})
+    assert missing_reason.status_code == 422
+    exception = client.post(f"/api/cca/specimens/{second_specimen['id']}/event", headers=surg_headers, json={
+        "status": "Exception", "exception_reason": "Label illegible on arrival."
+    })
+    assert exception.status_code == 200
+    assert exception.json()["specimen"]["exception_reason"] == "Label illegible on arrival."
+
+
+def test_specimen_result_linkage_requires_result_for_same_patient(client, auth_headers, db_session, oncologist, surg_onc):
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    onc_headers = auth_headers(oncologist)
+    plan = _create_surgical_plan(client, onc_headers, patient_id)
+    surg_headers = auth_headers(surg_onc)
+    specimen = client.post(f"/api/cca/surgical-plans/{plan['id']}/specimens", headers=surg_headers, json={
+        "specimen_label": "Left breast mass",
+    }).json()["specimen"]
+
+    from app.models_cca import CCAResult
+    result = CCAResult(patient_id=patient_id, result_type="PATHOLOGY", title="Invasive ductal carcinoma")
+    db_session.add(result)
+    db_session.commit()
+
+    linked = client.patch(f"/api/cca/specimens/{specimen['id']}/link-result", headers=surg_headers, json={"result_id": result.id})
+    assert linked.status_code == 200
+    assert linked.json()["specimen"]["result_id"] == result.id
+
+
+def test_post_op_plan_upsert_pathology_review_and_sign_off(client, auth_headers, db_session, oncologist, surg_onc):
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    plan = _create_surgical_plan(client, auth_headers(oncologist), patient_id)
+    surg_headers = auth_headers(surg_onc)
+
+    empty = client.get(f"/api/cca/surgical-plans/{plan['id']}/post-op-plan", headers=surg_headers)
+    assert empty.json()["post_op_plan"] is None
+
+    created = client.post(f"/api/cca/surgical-plans/{plan['id']}/post-op-plan", headers=surg_headers, json={
+        "monitoring_plan": "Hourly vitals for 4 hours then 4-hourly.", "disposition": "Ward",
+    })
+    assert created.status_code == 200
+    assert created.json()["post_op_plan"]["disposition"] == "Ward"
+    assert created.json()["post_op_plan"]["pathology_pending"] is True
+
+    reviewed = client.post(f"/api/cca/surgical-plans/{plan['id']}/post-op-plan/pathology-review", headers=surg_headers, json={
+        "pathology_review_note": "Margins clear, no further resection needed."
+    })
+    assert reviewed.status_code == 200
+    assert reviewed.json()["post_op_plan"]["pathology_review_status"] == "Reviewed"
+    assert reviewed.json()["post_op_plan"]["pathology_pending"] is False
+
+    signed_off = client.post(f"/api/cca/surgical-plans/{plan['id']}/post-op-plan/sign-off", headers=surg_headers, json={})
+    assert signed_off.status_code == 200
+    assert signed_off.json()["post_op_plan"]["sign_off_status"] == "SignedOff"
+
+    locked = client.post(f"/api/cca/surgical-plans/{plan['id']}/post-op-plan", headers=surg_headers, json={"monitoring_plan": "changed"})
+    assert locked.status_code == 409
+
+    already_signed = client.post(f"/api/cca/surgical-plans/{plan['id']}/post-op-plan/sign-off", headers=surg_headers, json={})
+    assert already_signed.status_code == 409
+
+
+# ---------------------------------------------------------------------------
 # Regimen library
 # ---------------------------------------------------------------------------
 
