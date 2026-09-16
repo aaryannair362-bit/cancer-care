@@ -1318,7 +1318,17 @@ async def upload_document(
     fact_rows = []
     result_rows = []
     if not ocr_failed_reason:
-        drafted_facts = extract_clinical_facts(ocr_text)
+        # Off the event loop, same reason extract_document() above is: gemini_client.py's
+        # rate-limit pacing (TokenBucket.consume()) and retry backoff both use real
+        # time.sleep(), which -- called directly here -- would freeze this app's single worker
+        # (WEB_CONCURRENCY=1) for everyone, not just this request, until the wait finished.
+        # Confirmed live in production: a document upload froze the whole service (Render's own
+        # health-check port scan timed out) for the duration of a rate-limit wait, right after
+        # this call was moved from Groq (proactive pacing rarely needed to actually sleep, since
+        # Groq's real 30 RPM rarely got hit) to Gemini (a real 5 RPM limit that the proactive
+        # pacer hits far more readily under any realistic multi-document usage, plus this
+        # module's own retry backoff going up to 60s/attempt instead of Groq's 20s cap).
+        drafted_facts = await run_in_threadpool(extract_clinical_facts, ocr_text)
         # Deterministic lab-value/medication safety nets (ocr_service._clinical_signals's
         # "lab_values"/"medications" scans, run over the FULL raw text -- see
         # extract_deterministic_lab_facts's and extract_deterministic_medication_facts's
