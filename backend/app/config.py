@@ -20,14 +20,27 @@ class Settings(BaseSettings):
     # already-known-too-slow qwen model with no warning. Matching the default to the real,
     # working value removes that trap regardless of the env var.
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-    # Dedicated key for PDF/document OCR AI-extraction (cca_engine.py's extract_clinical_facts /
-    # classify_and_extract_page) -- kept on its OWN Groq account/key so a multi-page document
-    # upload's token usage never competes with GROQ_API_KEY's 8000-token/minute budget for live
-    # OPD/IPD consultation scribing (see rate_limiter.py's ocr_extraction_* buckets). Falls back
-    # to GROQ_API_KEY below (post-construction) when not set, so a deployment that hasn't been
-    # given a dedicated key yet keeps working exactly as before -- both workloads sharing one
-    # budget, not a broken one.
-    GROQ_API_KEY_OCR: str = os.getenv("GROQ_API_KEY_OCR", "")
+    # Document OCR AI-extraction (extract_clinical_facts / classify_and_extract_page) moved off
+    # Groq entirely (there used to be a dedicated GROQ_API_KEY_OCR here for exactly that
+    # workload -- removed, not just unused, once nothing referenced it anymore). Groq's real
+    # 8000-token/minute account budget kept producing hard failures (413 Payload Too Large
+    # exhausting all retries, permanently dropping that slice's facts) on real multi-page
+    # documents even after repeated live-calibrated tuning attempts (byte-safe slicing,
+    # corrected token estimation, corrected RPM pacing -- see git history, all same day).
+    # Gemini's free tier (gemini_client.py) has a ~31x larger token-per-minute budget and a 1M
+    # token context window verified live to accept a whole document in one call, eliminating the
+    # slicing/rate-limit-tax problem class rather than continuing to tune around it. GROQ_API_KEY
+    # remains used ONLY by scribe.py's live OPD/IPD voice consultation drafting, which never
+    # showed this failure mode -- deliberately not migrated along with document OCR.
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    # Verified live (2026-09-16): gemini-2.5-flash is retired for new users ("no longer available
+    # to new users... use models/gemini-3.6-flash"); gemini-3.6-flash confirmed working via
+    # generateContent with schema-enforced JSON output (responseSchema), which Groq's prompt-only
+    # JSON approach never had -- eliminates the malformed-JSON-retry class of problem too, not
+    # just the size/rate-limit one. Env-overridable for the same reason GROQ_MODEL is (see that
+    # field's own comment) -- a future model retirement should be a dashboard edit, not a
+    # code deploy.
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
     # Sarvam AI's Saaras v3 (sarvam_batch_transcriber.py) -- audio transcription engine
     # purpose-built for Hindi/English medical speech and code-switching. Legacy shared
     # credential, kept only as the fallback SARVAM_OCR_API_KEY/SARVAM_STT_API_KEY use below when
@@ -37,8 +50,8 @@ class Settings(BaseSettings):
     # (Scribe's audio transcription) are billed and rate-limited independently on Sarvam's side
     # per key, so a burst on one feature can no longer exhaust the other's quota by sharing one
     # account. Each falls back to the shared SARVAM_API_KEY above (resolved post-construction
-    # below, same reason GROQ_API_KEY_OCR is) when its own dedicated key isn't set, so a
-    # deployment that hasn't been given split keys yet keeps working unchanged.
+    # below) when its own dedicated key isn't set, so a deployment that hasn't been given split
+    # keys yet keeps working unchanged.
     SARVAM_OCR_API_KEY: str = os.getenv("SARVAM_OCR_API_KEY", "")
     SARVAM_STT_API_KEY: str = os.getenv("SARVAM_STT_API_KEY", "")
     TRANSCRIPTION_PROVIDER: str = os.getenv("TRANSCRIPTION_PROVIDER", "sarvam")
@@ -55,9 +68,9 @@ class Settings(BaseSettings):
     SARVAM_OCR_LANGUAGE: str = os.getenv("SARVAM_OCR_LANGUAGE", "en-IN")
     # "sarvam" (Sarvam Document AI, see ocr_service.py) or "local" (RapidOCR, no external call).
     # Left blank by default here -- resolved below, after Settings() construction, against the
-    # already-loaded SARVAM_API_KEY (same reason GROQ_API_KEY_OCR is applied post-construction
-    # below: a bare os.getenv() at class-body-eval time can't see a key that only exists in the
-    # backend/.env file, which pydantic-settings loads later, during Settings() itself).
+    # already-loaded SARVAM_API_KEY (a bare os.getenv() at class-body-eval time can't see a key
+    # that only exists in the backend/.env file, which pydantic-settings loads later, during
+    # Settings() itself).
     OCR_PROVIDER: str = os.getenv("OCR_PROVIDER", "")
     # Allowed CORS origins. Since frontend is served by FastAPI directly, requests are
     # same-origin by default. "*" or specific domains allow external access.
@@ -95,11 +108,6 @@ class Settings(BaseSettings):
         )
 
 settings = Settings()
-# GROQ_API_KEY_OCR falls back to GROQ_API_KEY when not set, so a deployment that hasn't been
-# given a dedicated OCR key yet keeps working exactly as before (both workloads sharing one
-# budget, not a broken one).
-if not settings.GROQ_API_KEY_OCR:
-    settings.GROQ_API_KEY_OCR = settings.GROQ_API_KEY
 
 # Each dedicated Sarvam key falls back to the shared SARVAM_API_KEY when not explicitly set --
 # see the SARVAM_OCR_API_KEY/SARVAM_STT_API_KEY declarations above for why they're split.

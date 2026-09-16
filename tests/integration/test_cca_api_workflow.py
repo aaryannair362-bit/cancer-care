@@ -25,7 +25,7 @@ import pytest
 
 from app.cca_seed import seed_cca_database
 from app.models_cca import CCAPatient, CCADocument, ClinicalFact, CCAEncounter, CCAOrder, CCAContradiction
-from tests.conftest import mock_groq_json
+from tests.conftest import mock_gemini_json
 
 
 @pytest.fixture
@@ -606,7 +606,7 @@ def test_document_upload_extracts_facts_and_creates_journey_event(client, header
 
     patient_id = _demo_patient_id(db_session, doctor.organization_id)
     monkeypatch.setattr(cca_router, "extract_document", _fake_ocr_result)
-    mock_groq_json(monkeypatch, {"facts": [
+    mock_gemini_json(monkeypatch, {"facts": [
         {"fact_type": "HISTOLOGY", "value": "Invasive Ductal Carcinoma, Grade 2", "verbatim": "Diagnosis: Invasive Ductal Carcinoma, Grade 2", "confidence": 0.97}
     ]})
 
@@ -652,7 +652,7 @@ def test_document_upload_creates_a_result_from_drafted_lab_facts(client, headers
     patient_id = _demo_patient_id(db_session, doctor.organization_id)
     orders_before = client.get(f"/api/cca/patients/{patient_id}/case-summary", headers=headers).json()["orders"]
     monkeypatch.setattr(cca_router, "extract_document", _fake_lab_ocr_result)
-    mock_groq_json(monkeypatch, {"facts": [
+    mock_gemini_json(monkeypatch, {"facts": [
         {"fact_type": "LAB_RESULT", "value": "Complete Urine Examination (CUE) performed", "verbatim": "CUE performed", "confidence": 0.9},
         {"fact_type": "LAB_RESULT", "value": "Widal Test (Slide Method) performed", "verbatim": "Widal Test performed", "confidence": 0.9},
     ]})
@@ -687,7 +687,7 @@ def test_document_upload_background_page_pass_does_not_duplicate_whole_document_
 
     patient_id = _demo_patient_id(db_session, doctor.organization_id)
     monkeypatch.setattr(cca_router, "extract_document", _fake_lab_ocr_result)
-    mock_groq_json(monkeypatch, {"facts": [
+    mock_gemini_json(monkeypatch, {"facts": [
         {"fact_type": "LAB_RESULT", "value": "Hemoglobin 11.2 g/dL", "verbatim": "Hb 11.2", "confidence": 0.9},
     ]})
     monkeypatch.setattr(document_pages_module, "classify_and_extract_page", lambda *a, **k: {
@@ -725,7 +725,7 @@ def test_document_upload_rejects_disallowed_file_type_and_duplicate(client, head
     assert bad_type.status_code == 415
 
     monkeypatch.setattr(cca_router, "extract_document", _fake_ocr_result)
-    mock_groq_json(monkeypatch, {"facts": []})
+    mock_gemini_json(monkeypatch, {"facts": []})
     content = b"%PDF-1.4 duplicate report"
     first = client.post(
         f"/api/cca/documents?patient_id={patient_id}",
@@ -746,7 +746,7 @@ def test_document_upload_is_org_scoped(client, headers, auth_headers, make_user,
     other_doctor = make_user(email="other.org.uploader@rivalhosp.com", role="Doctor")
 
     monkeypatch.setattr(cca_router, "extract_document", _fake_ocr_result)
-    mock_groq_json(monkeypatch, {"facts": []})
+    mock_gemini_json(monkeypatch, {"facts": []})
     res = client.post(
         f"/api/cca/documents?patient_id={patient_id}",
         files={"file": ("x.pdf", b"%PDF-1.4 x", "application/pdf")},
@@ -767,7 +767,7 @@ def test_document_upload_is_restricted_to_front_desk_roles(client, headers, auth
         email="nurse.navigator@ccahosp.com", role="CCANurseNavigator", organization_id=doctor.organization_id,
     )
     monkeypatch.setattr(cca_router, "extract_document", _fake_ocr_result)
-    mock_groq_json(monkeypatch, {"facts": []})
+    mock_gemini_json(monkeypatch, {"facts": []})
 
     denied = client.post(
         f"/api/cca/documents?patient_id={patient_id}",

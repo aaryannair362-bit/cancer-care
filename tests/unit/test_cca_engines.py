@@ -20,7 +20,7 @@ from backend.app.cca_engine import (
     extract_clinical_facts, build_medication_lists, build_results_from_document_facts,
     _slice_text_by_bytes,
 )
-from backend.app.scribe import scribe
+from backend.app import gemini_client
 
 
 @pytest.fixture
@@ -77,28 +77,6 @@ def test_contradiction_detection_engine(db_session):
     assert fact_right.id in ctrs[0].conflicting_fact_ids
 
 
-def test_extract_clinical_facts_requests_a_higher_token_budget_than_the_generic_default(monkeypatch):
-    """Regression test for a real, reproducible bug: found by running an actual dense oncology
-    document (a CT staging report plus a full metabolic lab panel) through the live pipeline
-    repeatedly -- Groq's response was intermittently (not always -- generation-to-generation
-    non-determinism) truncated mid-JSON at _call_groq_api's 3000-token default, which
-    extract_clinical_facts() has no way to recover from (the shared _generate_json malformed-
-    JSON fallback only ever produces scribe_transcript()'s unrelated shape), silently yielding
-    zero facts despite real, extractable content. Verified fixed by requesting max_tokens=6000
-    instead and re-running the same real document 5 times with zero failures (was previously
-    ~50% failure rate on that document). This test pins the higher budget at the unit level so
-    it can't silently regress back to the shared default."""
-    captured = {}
-
-    def _fake_generate_json(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
-        captured["max_tokens"] = max_tokens
-        return {"facts": []}
-
-    monkeypatch.setattr(scribe, "_generate_json", _fake_generate_json)
-    extract_clinical_facts("Diagnosis: Breast carcinoma")
-    assert captured["max_tokens"] > 3000
-
-
 def test_slice_text_by_bytes_never_splits_a_multibyte_character():
     """Regression: this codebase explicitly handles Hindi/Devanagari content (one character = 3
     UTF-8 bytes), so a naive byte-offset cut can land mid-character and produce invalid Unicode
@@ -126,13 +104,13 @@ def test_slice_text_by_bytes_handles_empty_and_short_text():
 
 
 def test_extract_clinical_facts_parses_real_shaped_response(monkeypatch):
-    def _fake_generate_json(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
+    def _fake_generate_structured_json(prompt, system=None, response_schema=None, **kwargs):
         return {"facts": [
             {"fact_type": "PRIMARY_SITE", "value": "Breast", "verbatim": "Breast carcinoma", "confidence": 0.95},
             {"fact_type": "NOT_A_REAL_TYPE", "value": "should be dropped"},
         ]}
 
-    monkeypatch.setattr(scribe, "_generate_json", _fake_generate_json)
+    monkeypatch.setattr(gemini_client, "generate_structured_json", _fake_generate_structured_json)
     facts = extract_clinical_facts("Diagnosis: Breast carcinoma")
     assert len(facts) == 1
     assert facts[0]["fact_type"] == "PRIMARY_SITE"
@@ -146,12 +124,12 @@ def test_extract_clinical_facts_accepts_the_other_clinical_finding_fallback(monk
     fact_type to be assigned, so extraction silently dropped it even though OCR, preprocessing,
     and the model all worked correctly. OTHER_CLINICAL_FINDING closes that gap; this pins that a
     fact using it is accepted, not filtered out the way an actually-invalid type is."""
-    def _fake_generate_json(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
+    def _fake_generate_structured_json(prompt, system=None, response_schema=None, **kwargs):
         return {"facts": [
             {"fact_type": "OTHER_CLINICAL_FINDING", "value": "Appendectomy in 2018", "verbatim": "s/p appendectomy 2018", "confidence": 0.9},
         ]}
 
-    monkeypatch.setattr(scribe, "_generate_json", _fake_generate_json)
+    monkeypatch.setattr(gemini_client, "generate_structured_json", _fake_generate_structured_json)
     facts = extract_clinical_facts("Past surgical history: s/p appendectomy 2018")
     assert len(facts) == 1
     assert facts[0]["fact_type"] == "OTHER_CLINICAL_FINDING"
@@ -163,14 +141,32 @@ def test_extract_clinical_facts_prompt_instructs_the_model_not_to_drop_unfitting
     useless if the prompt never tells the model when to use it."""
     captured = {}
 
-    def _fake_generate_json(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
+    def _fake_generate_structured_json(prompt, system=None, response_schema=None, **kwargs):
         captured["system"] = system
         return {"facts": []}
 
-    monkeypatch.setattr(scribe, "_generate_json", _fake_generate_json)
+    monkeypatch.setattr(gemini_client, "generate_structured_json", _fake_generate_structured_json)
     extract_clinical_facts("Diagnosis: Breast carcinoma")
     assert "OTHER_CLINICAL_FINDING" in captured["system"]
     assert "never silently omit" in captured["system"]
+
+
+def test_extract_clinical_facts_response_schema_constrains_fact_type_enum(monkeypatch):
+    """Unlike Groq's prompt-only JSON request, Gemini's response_schema enforces fact_type
+    server-side -- pins that the schema actually passed to generate_structured_json lists every
+    FACT_TYPES value (including OTHER_CLINICAL_FINDING) as its enum, so a future FACT_TYPES edit
+    can't silently drift out of sync with what the model is constrained to return."""
+    from backend.app.cca_engine import FACT_TYPES
+    captured = {}
+
+    def _fake_generate_structured_json(prompt, system=None, response_schema=None, **kwargs):
+        captured["schema"] = response_schema
+        return {"facts": []}
+
+    monkeypatch.setattr(gemini_client, "generate_structured_json", _fake_generate_structured_json)
+    extract_clinical_facts("Diagnosis: Breast carcinoma")
+    enum = captured["schema"]["properties"]["facts"]["items"]["properties"]["fact_type"]["enum"]
+    assert set(enum) == set(FACT_TYPES)
 
 
 def test_staging_readiness_state_machine(db_session):

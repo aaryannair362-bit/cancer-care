@@ -134,12 +134,14 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
     ) -> str:
         """
         `api_key`/`request_bucket`/`token_bucket` default to this engine's own key and
-        rate_limiter's shared scribe buckets (today's behavior, unchanged for every OPD/IPD
-        scribing caller) -- cca_engine.py's document-OCR extraction calls pass GROQ_API_KEY_OCR
-        and rate_limiter.ocr_extraction_*_bucket instead, so a multi-page document upload paces
-        against (and, when GROQ_API_KEY_OCR is a genuinely separate Groq account, draws from) a
-        budget that a live consultation's own scribing calls can never be starved by. See
-        rate_limiter.py's ocr_extraction_* bucket comment for the incident this fixes.
+        rate_limiter's shared scribe buckets, and every caller now uses that default --
+        cca_engine.py's document-OCR extraction (extract_clinical_facts/
+        classify_and_extract_page) used to override these with a dedicated GROQ_API_KEY_OCR/
+        ocr_extraction_*_bucket pair, but that workload moved off Groq onto Gemini entirely (see
+        gemini_client.py and config.py's GEMINI_API_KEY comment), so these params are no longer
+        overridden by anything in this codebase. Left in place (not removed) since a caller
+        genuinely needing a different key/bucket pair in the future -- the reason they existed
+        -- is a reasonable thing to want again.
         """
         api_key = api_key or self.api_key
         request_bucket = request_bucket if request_bucket is not None else rate_limiter.request_bucket

@@ -4,11 +4,12 @@ ocr_service.py, cca_engine.py, document_pages.py) against documents the system h
 before -- see tests/doc_fixtures.py for how each one is built.
 
 Runs entirely under the normal (fast, free) pytest regime: OCR_PROVIDER is pinned to "local"
-and real Groq calls are blocked by tests/conftest.py's autouse fixtures, so every case here
-exercises real pypdf/RapidOCR extraction and the real deterministic classifier/lab-value
-scanner, with the LLM legs either mocked explicitly or (by default) failing closed -- which is
-itself part of what's under test: nothing here may ever 500 or hang regardless of whether the
-LLM call succeeds.
+and real Gemini calls (cca_engine.py's extract_clinical_facts/classify_and_extract_page --
+moved off Groq onto Gemini, see config.py's GEMINI_API_KEY comment) are blocked by
+tests/conftest.py's autouse fixtures, so every case here exercises real pypdf/RapidOCR
+extraction and the real deterministic classifier/lab-value scanner, with the LLM legs either
+mocked explicitly or (by default) failing closed -- which is itself part of what's under test:
+nothing here may ever 500 or hang regardless of whether the LLM call succeeds.
 
 Central regression this file exists to catch: classify_and_extract_page (cca_engine.py) used to
 skip fact extraction entirely whenever the deterministic keyword classifier confidently named a
@@ -179,7 +180,7 @@ def test_huge_90_page_document_extracts_lab_facts_from_pages_the_llm_pass_never_
     client, headers, patient_id, db_session,
 ):
     """extract_clinical_facts (the whole-document LLM pass) is blocked entirely in this suite
-    (real Groq calls are blocked by default -- see this file's module docstring), so it
+    (real Gemini calls are blocked by default -- see this file's module docstring), so it
     contributes nothing here regardless of document length. The deterministic scanner has no
     such dependency (it runs over the full raw OCR'd text, no LLM involved), so it must still
     find lab values placed deep in a 90-page document. This makes the test an unambiguous check
@@ -204,14 +205,18 @@ def test_confidently_classified_pages_now_get_real_fact_extraction(client, heade
     full of "Hemoglobin:", "Creatinine:" etc. -- see cca_engine._DOCUMENT_CLASS_KEYWORDS["LAB"]).
     Before this fix, classify_and_extract_page returned early with facts=[] for every one of
     these 90 pages -- zero LLM calls, zero page-attributed facts, regardless of document length.
-    This test mocks the LLM leg directly (scribe._generate_json) with a call-counting stub and
-    asserts close to 90 real calls happened -- a number that was exactly 0 before this fix."""
-    import app.scribe as scribe_module
+    This test mocks the LLM leg directly (gemini_client.generate_structured_json) with a
+    call-counting stub and asserts close to 90 real calls happened -- a number that was exactly
+    0 before this fix. Distinguishes the whole-document extract_clinical_facts call from the
+    per-page classify_and_extract_page call by response_schema shape (only the latter's schema
+    has a "page_type" property) rather than by max_tokens, which gemini_client.py's call
+    signature doesn't use."""
+    import app.gemini_client as gemini_client_module
 
     call_count = {"n": 0}
 
-    def _fake_generate_json(prompt, system=None, max_tokens=None, **kwargs):
-        if max_tokens == 6000:
+    def _fake_generate_structured_json(prompt, system=None, response_schema=None, **kwargs):
+        if "page_type" not in (response_schema or {}).get("properties", {}):
             return {"facts": []}  # the whole-document extract_clinical_facts call -- not under test here
         call_count["n"] += 1
         return {
@@ -219,7 +224,7 @@ def test_confidently_classified_pages_now_get_real_fact_extraction(client, heade
             "facts": [{"fact_type": "COMORBIDITY", "value": f"synthetic-per-chunk-marker-{call_count['n']}", "verbatim": "n/a", "confidence": 0.9}],
         }
 
-    monkeypatch.setattr(scribe_module.scribe, "_generate_json", _fake_generate_json)
+    monkeypatch.setattr(gemini_client_module, "generate_structured_json", _fake_generate_structured_json)
 
     res = _upload(client, headers, patient_id, "huge_labs.pdf", df.build("huge_lab_report"), "application/pdf")
     assert res.status_code == 201, res.text
@@ -245,44 +250,74 @@ def test_confidently_classified_pages_now_get_real_fact_extraction(client, heade
     assert max_page_number == 90, "the last page of a 90-page confidently-classified document never got its own extraction pass"
 
 
-def test_large_page_chunk_text_is_extracted_in_slices_not_truncated(monkeypatch):
-    """Regression: classify_and_extract_page used to send only text[:6000] to the LLM for a
-    single page/chunk, silently dropping the rest. This matters most for the Sarvam path, where
-    one "chunk" bundles up to 10 pages of markdown into ONE text blob (see ocr_service.
-    _SARVAM_DOC_AI_MAX_PAGES_PER_JOB) -- a dense multi-page chunk routinely exceeds 6000
-    characters, so everything past the first slice was getting zero AI-drafted facts. Pins the
-    fix directly (no upload/OCR involved): the full text is now walked in bounded slices, one
-    real extraction call per slice, with facts from every slice merged."""
-    import app.scribe as scribe_module
-    from app.cca_engine import classify_and_extract_page, _PAGE_EXTRACTION_SLICE_BYTES
+def test_large_page_text_is_sent_whole_in_one_call_not_truncated(monkeypatch):
+    """Regression (Groq era): classify_and_extract_page used to send only text[:6000] to the
+    LLM for a single page/chunk, silently dropping the rest. This matters most for the Sarvam
+    path, where one "chunk" bundles up to 10 pages of markdown into ONE text blob (see
+    ocr_service._SARVAM_DOC_AI_MAX_PAGES_PER_JOB) -- a dense multi-page chunk routinely exceeded
+    a few thousand characters, so everything past the first slice got zero AI-drafted facts.
+
+    Now pinned the other way: Gemini's 1M-token context window (verified live -- see
+    cca_engine.py's _MAX_SINGLE_CALL_BYTES comment) means a chunk this size fits in ONE call, so
+    this asserts exactly 1 call happens and the FULL text reached it (not just a truncated
+    prefix), rather than asserting multiple slice calls the way the old Groq-era version of this
+    test did."""
+    import app.gemini_client as gemini_client_module
+    from app.cca_engine import classify_and_extract_page, _MAX_SINGLE_CALL_BYTES
 
     calls = []
 
-    def _fake_generate_json(prompt, system=None, max_tokens=None, **kwargs):
+    def _fake_generate_structured_json(prompt, system=None, response_schema=None, **kwargs):
         calls.append(prompt)
-        return {
-            "page_type": "LAB_REPORT", "confidence": 0.9,
-            "facts": [{"fact_type": "LAB_RESULT", "value": f"slice-{len(calls)}-marker", "verbatim": "n/a", "confidence": 0.9}],
-        }
+        return {"page_type": "LAB_REPORT", "confidence": 0.9, "facts": []}
 
-    monkeypatch.setattr(scribe_module.scribe, "_generate_json", _fake_generate_json)
+    monkeypatch.setattr(gemini_client_module, "generate_structured_json", _fake_generate_structured_json)
 
-    # Confidently LAB-classifiable (keyword deterministic classifier), and well past two full
-    # slices of the app's own current slice size -- derived from _PAGE_EXTRACTION_SLICE_BYTES
-    # (byte-based, not character-based -- see cca_engine.py's own comment on why) rather than a
-    # hardcoded size, so this test can't silently stop exercising the multi-slice path if that
-    # constant is ever retuned again. This unit string is pure ASCII, so its byte length equals
-    # its character length -- fine for sizing purposes here, no need to encode explicitly.
+    # Confidently LAB-classifiable, and well past what the OLD Groq-era slice size (6000 chars,
+    # then 18000, then 20000 bytes) would ever have sent in one call -- but comfortably under
+    # _MAX_SINGLE_CALL_BYTES, so this exercises the routine one-call path, not the safety valve.
     unit = "Hemoglobin: 11.2 g/dL. Creatinine: 0.9 mg/dL. "
-    long_text = unit * (((_PAGE_EXTRACTION_SLICE_BYTES * 3) // len(unit)) + 1)
-    assert len(long_text) > _PAGE_EXTRACTION_SLICE_BYTES * 2
+    long_text = unit * ((100000 // len(unit)) + 1)
+    assert len(long_text.encode("utf-8")) > 90000
+    assert len(long_text.encode("utf-8")) < _MAX_SINGLE_CALL_BYTES
 
     result = classify_and_extract_page(long_text, is_image_heavy=False)
 
-    assert result["page_type"] == "LAB_REPORT"  # from the (mocked) LLM here -- see precedence test below
-    assert len(calls) >= 3, f"expected one LLM call per ~{_PAGE_EXTRACTION_SLICE_BYTES}-byte slice, got {len(calls)}"
+    assert result["page_type"] == "LAB_REPORT"
+    assert len(calls) == 1, f"expected the whole page to fit in ONE Gemini call, got {len(calls)}"
+    assert long_text in calls[0], "the full page text must reach the model, not a truncated prefix"
+
+
+def test_pathologically_large_page_still_falls_back_to_safety_valve_chunking(monkeypatch):
+    """_MAX_SINGLE_CALL_BYTES is a safety valve for a document far larger than any real one this
+    app has seen (see its own comment), not the routine path -- but the "never truncate, never
+    drop for size reasons" guarantee must still hold for that pathological case. Pins that text
+    past the threshold is still walked in full via multiple calls, with facts from every chunk
+    merged, rather than silently truncated to the first chunk."""
+    import app.gemini_client as gemini_client_module
+    from app.cca_engine import classify_and_extract_page, _MAX_SINGLE_CALL_BYTES
+
+    calls = []
+
+    def _fake_generate_structured_json(prompt, system=None, response_schema=None, **kwargs):
+        calls.append(prompt)
+        return {
+            "page_type": "LAB_REPORT", "confidence": 0.9,
+            "facts": [{"fact_type": "LAB_RESULT", "value": f"chunk-{len(calls)}-marker", "verbatim": "n/a", "confidence": 0.9}],
+        }
+
+    monkeypatch.setattr(gemini_client_module, "generate_structured_json", _fake_generate_structured_json)
+
+    unit = "Hemoglobin: 11.2 g/dL. Creatinine: 0.9 mg/dL. "
+    long_text = unit * (((_MAX_SINGLE_CALL_BYTES * 2) // len(unit)) + 1)
+    assert len(long_text.encode("utf-8")) > _MAX_SINGLE_CALL_BYTES
+
+    result = classify_and_extract_page(long_text, is_image_heavy=False)
+
+    assert result["page_type"] == "LAB_REPORT"
+    assert len(calls) >= 2, f"expected the oversized page to be walked in multiple chunks, got {len(calls)}"
     values = {f["value"] for f in result["facts"]}
-    assert len(values) == len(calls), "facts from every slice should be merged, not just the first"
+    assert len(values) == len(calls), "facts from every chunk should be merged, not just the first"
 
 
 def test_llm_classification_wins_over_deterministic_keyword_guess(monkeypatch):
@@ -291,17 +326,17 @@ def test_llm_classification_wins_over_deterministic_keyword_guess(monkeypatch):
     keyword classifier couldn't name at all. The LLM is now authoritative -- it sees the real
     page text, not a fixed keyword list -- so its answer must win even when the keyword
     classifier is ALSO confident, just about a different type."""
-    import app.scribe as scribe_module
+    import app.gemini_client as gemini_client_module
     from app.cca_engine import classify_and_extract_page
 
     # Confidently keyword-classified as LAB ("hemoglobin"/"creatinine" -- see
     # _DOCUMENT_CLASS_KEYWORDS["LAB"]), but the LLM (mocked) reads it as a pathology report.
     text = "Hemoglobin: 11.2 g/dL. Creatinine: 0.9 mg/dL. Final impression follows below."
 
-    def _fake_generate_json(prompt, system=None, max_tokens=None, **kwargs):
+    def _fake_generate_structured_json(prompt, system=None, response_schema=None, **kwargs):
         return {"page_type": "PATHOLOGY_REPORT", "confidence": 0.88, "facts": []}
 
-    monkeypatch.setattr(scribe_module.scribe, "_generate_json", _fake_generate_json)
+    monkeypatch.setattr(gemini_client_module, "generate_structured_json", _fake_generate_structured_json)
 
     result = classify_and_extract_page(text, is_image_heavy=False)
 
@@ -314,15 +349,16 @@ def test_llm_classification_wins_over_deterministic_keyword_guess(monkeypatch):
 
 def test_deterministic_classifier_is_fallback_when_llm_unavailable(monkeypatch):
     """The deterministic keyword classifier must still provide a best-effort page_type when
-    every LLM call for a page fails outright (network error, Groq outage, malformed response) --
-    AI enrichment failing must never collapse a keyword-obvious page to UNCLASSIFIED."""
-    import app.scribe as scribe_module
+    every LLM call for a page fails outright (network error, Gemini outage, malformed
+    response) -- AI enrichment failing must never collapse a keyword-obvious page to
+    UNCLASSIFIED."""
+    import app.gemini_client as gemini_client_module
     from app.cca_engine import classify_and_extract_page
 
     def _raise(*a, **k):
-        raise RuntimeError("simulated Groq outage")
+        raise RuntimeError("simulated Gemini outage")
 
-    monkeypatch.setattr(scribe_module.scribe, "_generate_json", _raise)
+    monkeypatch.setattr(gemini_client_module, "generate_structured_json", _raise)
 
     text = "Hemoglobin: 11.2 g/dL. Creatinine: 0.9 mg/dL."
     result = classify_and_extract_page(text, is_image_heavy=False)

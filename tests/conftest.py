@@ -25,6 +25,7 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB_PATH}"
 os.environ["SECRET_KEY"] = "test-secret-key-not-for-production"
 os.environ["GROQ_API_KEY"] = "test-dummy-groq-key"
 os.environ["GROQ_MODEL"] = "test-model"
+os.environ["GEMINI_API_KEY"] = "test-dummy-gemini-key"
 # Pinned regardless of the application's own default (config.py's TRANSCRIPTION_PROVIDER
 # default is "sarvam" as of this writing) -- the existing test suite's transcribe-audio
 # coverage assumes the "whisper" path throughout (test_transcribe_audio_endpoint.py,
@@ -52,6 +53,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app import main as app_main  # noqa: E402  (import must follow env-var setup above)
 from app import auth as app_auth  # noqa: E402
+from app import gemini_client as app_gemini_client  # noqa: E402
 from app.models import Base  # noqa: E402
 
 
@@ -90,6 +92,24 @@ def _no_live_groq_calls(monkeypatch):
         )
     monkeypatch.setattr(app_main.scribe, "_call_groq_api", _blocked)
     monkeypatch.setattr(app_main.scribe, "transcribe_audio", _blocked)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_gemini_calls(monkeypatch):
+    """Same safety net as _no_live_groq_calls above, for gemini_client.py -- document OCR
+    AI-extraction (cca_engine.py's extract_clinical_facts/classify_and_extract_page) moved off
+    Groq onto Gemini (see config.py's GEMINI_API_KEY comment for why). Individual tests
+    override via monkeypatch.setattr(app_gemini_client, "generate_structured_json", ...).
+    Patched on the gemini_client MODULE object itself (not e.g. app_main.gemini_client) so it
+    takes effect regardless of which module imported `from . import gemini_client` -- every
+    importer shares the same module object."""
+    def _blocked(*args, **kwargs):
+        raise RuntimeError(
+            "Test attempted a live Gemini API call without mocking "
+            "gemini_client.generate_structured_json. Mock it explicitly, or use the "
+            "llm_integration marker for intentional live calls."
+        )
+    monkeypatch.setattr(app_gemini_client, "generate_structured_json", _blocked)
 
 
 @pytest.fixture(autouse=True)
@@ -175,6 +195,10 @@ def mock_groq_json(monkeypatch, payload_or_raw):
     """
     Test helper (not a fixture): patch app_main.scribe._call_groq_api to return either a raw
     string (payload_or_raw is a str) or a dict that will be json.dumps'd as the "model output".
+    Still correct for scribe.py's own Groq-based live OPD/IPD consultation drafting/discharge
+    summaries -- see mock_gemini_json below for the document-OCR AI-extraction pipeline
+    (cca_engine.py's extract_clinical_facts/classify_and_extract_page), which moved off Groq
+    onto Gemini and is NOT controlled by this helper anymore.
     """
     import json as _json
 
@@ -187,3 +211,19 @@ def mock_groq_json(monkeypatch, payload_or_raw):
         return raw
 
     monkeypatch.setattr(app_main.scribe, "_call_groq_api", _fake)
+
+
+def mock_gemini_json(monkeypatch, payload):
+    """
+    Test helper (not a fixture): patch gemini_client.generate_structured_json to return
+    `payload` (a dict, already the equivalent of a parsed response -- generate_structured_json's
+    real contract returns a parsed dict, not a raw string the way scribe._call_groq_api does)
+    for any call. Controls cca_engine.py's extract_clinical_facts/classify_and_extract_page --
+    the document-OCR AI-extraction pipeline, which moved off Groq onto Gemini (see config.py's
+    GEMINI_API_KEY comment). mock_groq_json above is for everything else (live consultation
+    drafting, discharge summaries) that's still on Groq.
+    """
+    def _fake(prompt, system=None, response_schema=None, **kwargs):
+        return payload
+
+    monkeypatch.setattr(app_gemini_client, "generate_structured_json", _fake)

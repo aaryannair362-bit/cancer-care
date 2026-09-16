@@ -22,16 +22,14 @@ from .models_cca import (
 from .models_cca_oncology_ext import (
     CCARadiationPhase, RadiationFraction, RadiationPrescription, PalliativeTreatmentOrder,
 )
-from .scribe import scribe
-from .config import settings
-from . import rate_limiter
+from . import gemini_client
 
-# scribe.py's own _post_with_retry/_generate_json already log Groq-level failures (auth, rate
-# limit, malformed response) -- this logger is for the fact that a SLICE's extraction was
-# dropped as a result, which extract_clinical_facts/classify_and_extract_page's `except
-# Exception: continue` previously swallowed with no trace at all. Without this, a sustained
-# Groq failure (e.g. a misconfigured GROQ_API_KEY_OCR) looked identical in the logs to a
-# document that genuinely had nothing to extract.
+# gemini_client.py's own _post_with_retry/generate_structured_json already log API-level
+# failures (auth, rate limit, blocked/malformed response) -- this logger is for the fact that a
+# CHUNK's extraction was dropped as a result, which extract_clinical_facts/
+# classify_and_extract_page's `except Exception: continue` would otherwise swallow with no
+# trace at all. Without this, a sustained failure (e.g. a misconfigured GEMINI_API_KEY) looked
+# identical in the logs to a document that genuinely had nothing to extract.
 logger = logging.getLogger(__name__)
 
 
@@ -627,8 +625,10 @@ def generate_care_plan_prefill(db: Session, patient_id: int) -> Dict:
 # which was deliberately moved OFF an LLM onto a static table). Every fact this produces lands
 # with status=PROPOSED; it is never treated as ground truth until a clinician accepts it via
 # routers/cca.py's /verification/* endpoints -- this function itself never writes to the
-# database. Reuses scribe.py's proven Groq JSON-extraction plumbing (rate limiting,
-# retry-with-backoff) rather than a second bespoke implementation.
+# database. Uses gemini_client.py's schema-enforced JSON extraction (its own rate limiting,
+# retry-with-backoff) -- moved off scribe.py's Groq plumbing 2026-09-16, see gemini_client.py's
+# and config.py's GEMINI_API_KEY comments for why. scribe.py's Groq plumbing is still used
+# elsewhere in this app (live OPD/IPD voice consultation drafting), just not by this block.
 # ---------------------------------------------------------------------------
 
 _DOCUMENT_CLASS_KEYWORDS = {
@@ -687,31 +687,25 @@ FACT_TYPES = (
     "OTHER_CLINICAL_FINDING",
 )
 
-# Shared by extract_clinical_facts (below) and classify_and_extract_page (further down) -- both
-# walk their input text in slices of this size, one LLM call per slice, rather than truncating
-# to a single call's worth of text. No count ceiling on either: a real document is walked in
-# full however many calls that takes, however large it is -- see both functions' docstrings for
-# the real documents (data_insurance/) that motivated removing the truncation/ceiling this
-# constant used to have paired with it.
+# MOVED OFF GROQ ENTIRELY 2026-09-16 (fourth pass, same day): extract_clinical_facts and
+# classify_and_extract_page used to walk their input in bounded slices (6000 chars, then 18000
+# chars, then a byte-safe 20000 bytes -- see git history) because Groq's real ~8000-token/minute
+# account budget and its harder-to-pin-down request-body-size ceiling both forced a document to
+# be split into many small calls. Even the byte-safe, live-calibrated 20000-byte version kept
+# producing hard 413s in production on real documents (confirmed live: slices 2-3 of a 4-5-slice
+# document repeatedly exhausted all retries and permanently contributed zero facts for that
+# slice), despite the exact same size having been verified safe in isolated live testing --
+# strong evidence Groq's real limits are not cleanly deterministic under this account's
+# conditions, not just a miscalibration to retune again.
 #
-# FIXED PROPERLY 2026-09-16 (third pass, same day): this was CHARACTER-count slicing (6000, then
-# briefly 18000, which caused live 413s -- see git history), but Groq's real request-size
-# constraint is on BYTES, and this codebase explicitly handles Hindi/Devanagari content where one
-# character is 3 UTF-8 bytes. Character-count slicing can't bound byte size, so the exact same
-# constant produced wildly different real payload sizes depending on which script a given slice
-# happened to contain -- confirmed as the likely cause of one document's slice 2/5 hitting a hard
-# 413 while slice 1 didn't.
-#
-# Switched to BYTE-count slicing (_slice_text_by_bytes below), and the byte limit itself is
-# calibrated against REAL measurements, not a guess: deliberately over-budget calls against the
-# live API (reading Groq's own "Requested N tokens" figure back from its 429 error body, which
-# costs nothing since the call is rejected before generating anything) measured ~5.0-5.5 real
-# tokens per byte across ASCII, Devanagari, and mixed content -- byte count turns out to be a
-# stable predictor of token cost across scripts, unlike character count. 20000 bytes -> ~4000-4400
-# estimated prompt tokens (using the same conservative ~4.5 bytes/token this file's
-# estimate_tokens() now uses), leaving comfortable headroom under the account's 8000 TPM ceiling
-# even before this call's own completion tokens are added.
-_PAGE_EXTRACTION_SLICE_BYTES = 20000
+# Gemini (gemini_client.py) has a 1M-token context window -- verified live, a real 200,000-
+# character (~297,000-byte) mixed ASCII/Devanagari document, roughly a dense 50-page record,
+# fit in ONE call using 61,891 total tokens. Slicing a document at all is no longer necessary for
+# any real document this app has ever seen; _MAX_SINGLE_CALL_BYTES below is a safety valve for a
+# pathological outlier, not the routine path -- true to this constant's original "never truncate,
+# never drop for size reasons" principle, just satisfied by a single big call instead of many
+# small ones.
+_MAX_SINGLE_CALL_BYTES = 800000
 
 
 def _slice_text_by_bytes(text: str, max_bytes: int) -> List[str]:
@@ -734,48 +728,62 @@ def _slice_text_by_bytes(text: str, max_bytes: int) -> List[str]:
     return slices
 
 
+def _chunks_for_single_call_extraction(text: str) -> List[str]:
+    """Returns [text] unchanged for any real document (the common, routine case, given Gemini's
+    1M-token context window), or falls back to _slice_text_by_bytes at _MAX_SINGLE_CALL_BYTES
+    only for the pathological case of a document that large -- see _MAX_SINGLE_CALL_BYTES's own
+    comment for why this is a safety valve, not the expected path."""
+    if len(text.encode("utf-8")) <= _MAX_SINGLE_CALL_BYTES:
+        return [text]
+    return _slice_text_by_bytes(text, _MAX_SINGLE_CALL_BYTES)
+
+
+_FACTS_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "facts": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "fact_type": {"type": "STRING", "enum": list(FACT_TYPES)},
+                    "value": {"type": "STRING"},
+                    "verbatim": {"type": "STRING"},
+                    "confidence": {"type": "NUMBER"},
+                },
+                "required": ["fact_type", "value", "verbatim", "confidence"],
+            },
+        },
+    },
+    "required": ["facts"],
+}
+
+# classify_and_extract_page's response shape -- _FACTS_RESPONSE_SCHEMA's facts array plus
+# page_type/confidence, built below once PAGE_TYPES exists.
+
+
 def extract_clinical_facts(document_text: str) -> List[Dict]:
     """AI-drafts candidate (fact_type, value, verbatim, confidence) tuples from a document's
-    OCR'd text. Never raises: an extraction failure (Groq error, malformed response, wrong
-    shape) on any one slice just contributes nothing from that slice -- the document still gets
-    ingested with its raw OCR text, it just has fewer PROPOSED facts for the clinician to
-    review, rather than the request failing.
+    OCR'd text, via Gemini (gemini_client.py) with a schema-enforced JSON response (see
+    _FACTS_RESPONSE_SCHEMA) -- fact_type is constrained to FACT_TYPES server-side, not just
+    requested in a prompt. Never raises: an extraction failure (API error, blocked response,
+    malformed shape) on any one chunk just contributes nothing from that chunk -- the document
+    still gets ingested with its raw OCR text, it just has fewer PROPOSED facts for the
+    clinician to review, rather than the request failing.
 
-    Walks the ENTIRE document in bounded _PAGE_EXTRACTION_SLICE_BYTES-sized slices (one
-    extraction call per slice, merged and deduped by (fact_type, value)) rather than truncating
-    to a single call's worth of text -- this used to cap at the first 8000 characters, silently
-    making every later page of a multi-page document invisible to this pass. Verified live: a
-    single embedded page image alone (Sarvam Document AI's markdown output embeds full-res page
-    images inline as base64 -- see ocr_service._BASE64_IMAGE_PATTERN) could consume the entire
-    8000-character budget before any real page content was ever reached, on documents far short
-    of what a real multi-page hospital record (see data_insurance/) actually contains. No slice
-    count ceiling either, for the same reason -- a large real document is walked in full, however
-    many calls that takes; classify_and_extract_page's per-page/per-chunk pass already does the
-    same for the same reason (see that function's docstring point 4).
-
-    max_tokens is raised above _call_groq_api's 3000-token default deliberately: a document
-    with genuinely rich content (e.g. a full metabolic panel plus imaging findings plus staging
-    info) can need more than 3000 tokens to enumerate every fact as JSON with a verbatim quote
-    each -- verified live, the exact same real document intermittently (not always -- a
-    generation-to-generation, non-deterministic truncation) had its response cut off mid-JSON at
-    the 3000-token default. Also asking for SHORTER verbatim spans reduces the same pressure
-    further without asking the model to extract less -- both changes address the actual
-    overflow, not just its symptom. (_generate_json now also retries once and never hands this
-    call a scribe-shaped fallback it can't use -- see that function's docstring -- so a
-    malformed response degrades to {} instead of a silently wrong-shaped dict, but the token
-    headroom here still matters: fewer malformed responses in the first place beats recovering
-    from them.)"""
+    Sends the ENTIRE document in ONE call for any real document (see
+    _chunks_for_single_call_extraction/_MAX_SINGLE_CALL_BYTES) -- Gemini's 1M-token context
+    window made the multi-slice approach this function used to need for Groq's much smaller
+    account budget unnecessary; a genuinely oversized outlier still gets walked in full via the
+    same byte-safe chunking, never truncated."""
     if not document_text or not document_text.strip():
         return []
 
     system = (
         "You are a clinical document fact-extraction assistant for an oncology chart. "
         "Extract ONLY facts explicitly and literally stated in the text -- never infer, "
-        "estimate, or guess a value that is not written down. Return strict JSON of the shape "
-        '{"facts": [{"fact_type": "<one of ' + "|".join(FACT_TYPES) + '>", '
-        '"value": "<short structured value>", "verbatim": "<exact quoted source text, at most '
-        'roughly 15 words>", "confidence": <0.0-1.0>}]}. If nothing relevant is found, return '
-        '{"facts": []}. Never include markdown or commentary outside the JSON object. '
+        "estimate, or guess a value that is not written down. If nothing relevant is found, "
+        "return an empty facts array. "
         "IMPORTANT: never silently omit a clinically relevant fact just because it doesn't "
         "match one of the specific fact_type values above -- use OTHER_CLINICAL_FINDING for "
         "anything clinically relevant (surgical/family/social history, vitals, a diagnosis "
@@ -785,39 +793,31 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
         "already covers."
     )
 
-    slices = _slice_text_by_bytes(document_text, _PAGE_EXTRACTION_SLICE_BYTES)
+    chunks = _chunks_for_single_call_extraction(document_text)
 
     facts: List[Dict] = []
     seen_facts: set = set()
-    for slice_num, slice_text in enumerate(slices, start=1):
-        prompt = f"Extract clinical facts from this document:\n\n{slice_text}"
+    for chunk_num, chunk_text in enumerate(chunks, start=1):
+        prompt = f"Extract clinical facts from this document:\n\n{chunk_text}"
         try:
-            # Dedicated key/buckets (see rate_limiter.py's ocr_extraction_* comment) so a
-            # multi-page document's extraction calls can never exhaust the same per-minute
-            # budget a live doctor's consultation scribing is paced against.
-            result = scribe._generate_json(
-                prompt, system=system, max_tokens=6000,
-                api_key=settings.GROQ_API_KEY_OCR,
-                request_bucket=rate_limiter.ocr_extraction_request_bucket,
-                token_bucket=rate_limiter.ocr_extraction_token_bucket,
+            result = gemini_client.generate_structured_json(
+                prompt, system=system, response_schema=_FACTS_RESPONSE_SCHEMA,
             )
         except Exception as e:
-            # No PHI here -- slice_text/prompt are deliberately excluded, same as scribe.py's
-            # own Groq-error logging. This slice contributes zero facts (including any
-            # MEDICATION facts it held -- there's no deterministic fallback for those the way
-            # LAB_RESULT has extract_deterministic_lab_facts below), so a sustained failure
-            # here (bad GROQ_API_KEY_OCR, exhausted retries) previously looked identical in the
-            # logs to a document that genuinely had nothing to extract.
+            # No PHI here -- chunk_text/prompt are deliberately excluded, same as
+            # gemini_client.py's own error logging. This chunk contributes zero facts
+            # (including any MEDICATION facts it held -- there's no deterministic fallback for
+            # those the way LAB_RESULT has extract_deterministic_lab_facts below).
             logger.warning(
-                "extract_clinical_facts: slice %d/%d failed, contributing 0 facts: %s",
-                slice_num, len(slices), e,
+                "extract_clinical_facts: chunk %d/%d failed, contributing 0 facts: %s",
+                chunk_num, len(chunks), e,
             )
             continue
         raw_facts = result.get("facts") if isinstance(result, dict) else None
         if not isinstance(raw_facts, list):
             logger.warning(
-                "extract_clinical_facts: slice %d/%d returned malformed JSON (no 'facts' list), "
-                "contributing 0 facts", slice_num, len(slices),
+                "extract_clinical_facts: chunk %d/%d returned malformed JSON (no 'facts' list), "
+                "contributing 0 facts", chunk_num, len(chunks),
             )
             continue
         for f in raw_facts:
@@ -825,6 +825,9 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
                 continue
             fact_type = f.get("fact_type")
             value = f.get("value")
+            # Belt-and-suspenders, not the primary defense -- fact_type is already schema-
+            # constrained to FACT_TYPES server-side (unlike the old Groq prompt-only approach,
+            # where this check was the ONLY defense against a hallucinated type).
             if fact_type not in FACT_TYPES or not value:
                 continue
             value = str(value)[:500]
@@ -875,7 +878,7 @@ def extract_deterministic_medication_facts(signals: Optional[Dict]) -> List[Dict
 
     Before this, MEDICATION facts came ONLY from extract_clinical_facts's LLM pass -- unlike
     LAB_RESULT, which always had this deterministic fallback too. Confirmed live: when a
-    document-OCR extraction call fails outright (bad/rate-limited GROQ_API_KEY_OCR, exhausted
+    document-OCR extraction call fails outright (bad/rate-limited GEMINI_API_KEY, exhausted
     retries, malformed response -- see extract_clinical_facts's now-logged except block), labs
     still appeared (this fallback) while medications silently disappeared (they had no
     equivalent), even though the raw "Medications:" line was sitting right there in
@@ -963,6 +966,17 @@ _DOC_CLASS_TO_PAGE_TYPE = {
     "UNCLASSIFIED": "UNCLASSIFIED",
 }
 
+_PAGE_CLASSIFICATION_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "page_type": {"type": "STRING", "enum": list(PAGE_TYPES)},
+        "confidence": {"type": "NUMBER"},
+        "facts": _FACTS_RESPONSE_SCHEMA["properties"]["facts"],
+    },
+    "required": ["page_type", "confidence", "facts"],
+}
+
+
 def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
     """
     Per-page classifier: the LLM is authoritative for page type, with a free deterministic
@@ -971,35 +985,18 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
     1. A page ocr_service.extract_document_pages() already flagged image-heavy (an X-ray/MRI/CT
        scan photograph with little or no extractable text) is SCAN_IMAGING by construction --
        nothing to classify, no LLM call, no facts possible.
-    2. Fact extraction (and, now, classification) runs via at least one real Groq call per
-       page/chunk. Previously the deterministic keyword classifier (classify_document(),
-       extended above with PRESCRIPTION/INSURANCE buckets) took priority whenever it confidently
-       named a page's type, and even skipped fact extraction entirely for that page -- a long
-       multi-chunk document's facts then depended entirely on upload-time
-       extract_clinical_facts()'s single pass over its first ~8000 characters. Fact extraction
-       now always runs regardless (removing that length ceiling -- a 50-page document gets on
-       the order of 5 real extraction passes instead of one truncated one), and the LLM's own
-       page_type/confidence from that same call is now what's actually used: it sees the real
-       page text, not a fixed keyword list, so it wins whenever it produced a usable answer.
+    2. Fact extraction (and classification) runs via one Gemini call per page/chunk (see
+       _chunks_for_single_call_extraction -- almost always exactly one call; a chunk large
+       enough to need more is a pathological outlier, not the routine case, now that the model
+       has a 1M-token context window). Fact extraction always runs regardless of what the free
+       deterministic keyword classifier thinks the page type is, and the LLM's own
+       page_type/confidence from that same call is what's actually used: it sees the real page
+       text, not a fixed keyword list, so it wins whenever it produced a usable answer.
     3. classify_document() still runs and is kept as `fallback_page_type`/`fallback_confidence`
-       -- used ONLY when every slice's LLM call failed outright (network error, malformed
-       response, Groq unavailable), so a page still gets a best-effort page_type instead of
-       always collapsing to UNCLASSIFIED purely because AI enrichment was down. It is never
-       preferred over a real LLM answer.
-    4. Within a single page/chunk, the text itself is walked in bounded
-       _PAGE_EXTRACTION_SLICE_BYTES-sized slices, one extraction call per slice, rather than
-       truncating to whatever the first call's prompt can hold. A local-OCR page is already
-       single-page text and almost always fits in one slice (no behavior change there); a
-       Sarvam chunk bundles up to 10 pages of markdown into one blob, which can easily run past
-       one slice -- previously only the first slice's worth of a dense multi-page chunk ever
-       reached the LLM and every page after it in that chunk silently contributed zero AI-drafted
-       facts (the deterministic lab-value scanner still caught lab lines there, but nothing else
-       fact-type-wise). No cap on how many slices a chunk is walked into either (an earlier
-       30-slice/180,000-character ceiling here silently dropped anything past it, on the same
-       reasoning that removed extract_clinical_facts's own truncation -- see that function's
-       docstring): a large real chunk is walked in full, however many calls that takes. Facts
-       from every slice are merged and deduped by (fact_type, value); the page_type/confidence
-       used is from the first slice that returned a usable one.
+       -- used ONLY when the LLM call failed outright (network error, blocked response, Gemini
+       unavailable), so a page still gets a best-effort page_type instead of always collapsing
+       to UNCLASSIFIED purely because AI enrichment was down. It is never preferred over a real
+       LLM answer.
 
     Returns {"page_type": <one of PAGE_TYPES>, "confidence": float, "facts": List[Dict]}. Never
     raises -- degrades to the deterministic fallback page_type (or UNCLASSIFIED/0.0 if that also
@@ -1028,42 +1025,33 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
         "INSURANCE = an insurance/policy document; OTHER = none of the above but still "
         "relevant; UNCLASSIFIED = cannot tell). Then extract ONLY facts explicitly and "
         "literally stated in the text -- never infer, estimate, or guess a value that is not "
-        'written down. Return strict JSON of the shape {"page_type": "<one of the types '
-        'above>", "confidence": <0.0-1.0>, "facts": [{"fact_type": "<one of ' +
-        "|".join(FACT_TYPES) + '>", "value": "<short structured value>", "verbatim": "<exact '
-        'quoted source text, at most roughly 15 words>", "confidence": <0.0-1.0>}]}. If no '
-        'facts are found, return an empty "facts" array. Never include markdown or commentary '
-        "outside the JSON object. IMPORTANT: never silently omit a clinically relevant fact "
-        "just because it doesn't match one of the specific fact_type values above -- use "
-        "OTHER_CLINICAL_FINDING for anything clinically relevant (surgical/family/social "
-        "history, vitals, a diagnosis unrelated to the primary cancer, a follow-up plan or "
-        "advice, or any other real clinical content) that doesn't fit a more specific type. "
-        "Only use OTHER_CLINICAL_FINDING when no more specific type applies -- never as a "
-        "default for something a specific type already covers."
+        "written down. If no facts are found, return an empty facts array. "
+        "IMPORTANT: never silently omit a clinically relevant fact just because it doesn't "
+        "match one of the specific fact_type values above -- use OTHER_CLINICAL_FINDING for "
+        "anything clinically relevant (surgical/family/social history, vitals, a diagnosis "
+        "unrelated to the primary cancer, a follow-up plan or advice, or any other real clinical "
+        "content) that doesn't fit a more specific type. Only use OTHER_CLINICAL_FINDING when "
+        "no more specific type applies -- never as a default for something a specific type "
+        "already covers."
     )
 
-    slices = _slice_text_by_bytes(text, _PAGE_EXTRACTION_SLICE_BYTES)
+    chunks = _chunks_for_single_call_extraction(text)
 
     facts: List[Dict] = []
     seen_facts: set = set()
     llm_page_type = None
     llm_confidence = None
-    for slice_num, slice_text in enumerate(slices, start=1):
-        prompt = f"Classify and extract clinical facts from this page:\n\n{slice_text}"
+    for chunk_num, chunk_text in enumerate(chunks, start=1):
+        prompt = f"Classify and extract clinical facts from this page:\n\n{chunk_text}"
         try:
-            # See extract_clinical_facts's identical comment above -- same dedicated
-            # GROQ_API_KEY_OCR budget, kept off the live-scribing buckets.
-            result = scribe._generate_json(
-                prompt, system=system, max_tokens=4000,
-                api_key=settings.GROQ_API_KEY_OCR,
-                request_bucket=rate_limiter.ocr_extraction_request_bucket,
-                token_bucket=rate_limiter.ocr_extraction_token_bucket,
+            result = gemini_client.generate_structured_json(
+                prompt, system=system, response_schema=_PAGE_CLASSIFICATION_RESPONSE_SCHEMA,
             )
         except Exception as e:
             # See extract_clinical_facts's identical comment above -- same silent-failure gap.
             logger.warning(
-                "classify_and_extract_page: slice %d/%d failed, contributing 0 facts: %s",
-                slice_num, len(slices), e,
+                "classify_and_extract_page: chunk %d/%d failed, contributing 0 facts: %s",
+                chunk_num, len(chunks), e,
             )
             continue
         if not isinstance(result, dict):
@@ -1100,7 +1088,7 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
                 "confidence": fact_confidence if isinstance(fact_confidence, (int, float)) and 0 <= fact_confidence <= 1 else 0.75,
             })
 
-    # page_type/confidence: the LLM's own classification wins whenever any slice produced a
+    # page_type/confidence: the LLM's own classification wins whenever any chunk produced a
     # usable one -- it saw the real page text, not a fixed keyword list. The deterministic
     # keyword classifier is only a fallback for when every LLM call failed outright.
     if llm_page_type:

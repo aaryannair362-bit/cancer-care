@@ -154,47 +154,27 @@ request_bucket = TokenBucket(rate_per_sec=_REQUEST_RATE_PER_SEC, capacity=_REQUE
 token_bucket = TokenBucket(rate_per_sec=_TOKEN_RATE_PER_SEC, capacity=_TOKEN_BURST_CAPACITY)
 
 
-# CORRECTED AGAIN 2026-09-16 (later same day): GROQ_API_KEY / GROQ_API_KEY_OCR were rotated to
-# a new pair of keys ("aivana_scribe" / "aivana_ocr"), and THIS pair was verified live to be on
-# genuinely separate Groq accounts -- see the note below on why that verification needed a
-# different method than the one that (correctly, for the OLD key pair) produced the opposite
-# finding just earlier today.
+# REMOVED 2026-09-16 (later same day): this section used to hold a second, genuinely-separate-
+# account pair of buckets (ocr_extraction_request_bucket/ocr_extraction_token_bucket) dedicated
+# to document-OCR AI-extraction on its own Groq key (GROQ_API_KEY_OCR), kept apart from
+# request_bucket/token_bucket above specifically so a document-OCR burst could never starve a
+# live consultation's own budget. Deleted once cca_engine.py's extract_clinical_facts/
+# classify_and_extract_page moved off Groq onto Gemini entirely (see gemini_client.py and
+# config.py's GEMINI_API_KEY comment) -- nothing calls these anymore, and GROQ_API_KEY_OCR was
+# removed from config.py the same way.
 #
-# Verification method that actually works: a concurrent burst of 6 real-sized (~400 completion
-# token) calls on one key, immediately followed by a probe on the other key. The burst's own
-# key dropped from 7918 -> 7137 remaining tokens; the other key's remaining_tokens read exactly
-# 7918 both before and after the burst -- completely unaffected. That is only possible if the
-# two keys draw from independent 8000-token/minute budgets.
-#
-# Why the EARLIER (same-day) same-account finding for the OLD key pair used a method that is
-# actually unreliable, and shouldn't be repeated: a single small probe call on each key, read
-# sequentially, compared remaining_tokens/remaining_requests directly. Both this account's real
-# token bucket (~120-133 tokens/sec) and request bucket refill continuously and fast enough that
-# the network+inference latency between two sequential tiny calls (a "hi" prompt, max_tokens=1)
-# is enough for the budget to partially or fully refill in between -- so two calls on the SAME
-# account can easily read back identical remaining_* values, which looks IDENTICAL to two calls
-# on genuinely separate accounts each starting fresh. The two-probe method cannot tell the
-# difference; only a burst large/fast enough to outrun refill (this section's method) can. The
-# OLD key pair's same-account conclusion was NOT re-verified with the burst method before being
-# discarded (the keys were rotated out first) -- it may well have still been correct, but that
-# specific finding rests on a method now known to be unreliable. Do not reuse the simple
-# two-sequential-probe comparison to decide this again for any future key rotation; use the
-# burst-and-cross-check method above.
-#
-# Genuinely separate TokenBucket instances, now correctly reflecting two independent accounts:
-# a document-OCR burst can no longer starve a live consultation's own budget (or vice versa),
-# and this workload no longer competes with scribing for the same 8000 TPM ceiling at all.
-#
-# Same RPM-vs-RPD fix as request_bucket above applies here too -- this account is also
-# openai/gpt-oss-120b free tier (RPM 30 / RPD 1,000 / TPM 8,000), so the request side is paced
-# the same way, not the old ~60 RPM figure.
-_OCR_REQUEST_RATE_PER_SEC = 0.4
-_OCR_REQUEST_BURST_CAPACITY = 5.0
-_OCR_TOKEN_RATE_PER_SEC = 120.0
-_OCR_TOKEN_BURST_CAPACITY = 8000.0
-
-ocr_extraction_request_bucket = TokenBucket(rate_per_sec=_OCR_REQUEST_RATE_PER_SEC, capacity=_OCR_REQUEST_BURST_CAPACITY)
-ocr_extraction_token_bucket = TokenBucket(rate_per_sec=_OCR_TOKEN_RATE_PER_SEC, capacity=_OCR_TOKEN_BURST_CAPACITY)
+# One durable, generally-useful finding from calibrating that now-removed pair is worth keeping
+# even though the buckets themselves are gone: to verify whether two API keys draw from the SAME
+# account/budget or genuinely separate ones, a single small probe call on each key, read
+# sequentially, is NOT reliable -- both a token bucket (~120-133 tokens/sec) and a request bucket
+# refill continuously and fast enough that the network+inference latency between two sequential
+# tiny calls (e.g. a "hi" prompt, max_tokens=1) is enough for the budget to partially or fully
+# refill in between, so two calls on the SAME account can read back identical remaining_* values
+# -- indistinguishable from two calls on genuinely separate accounts each starting fresh. What
+# actually works: a concurrent BURST of several real-sized calls on one key, immediately
+# followed by a probe on the other -- if the other key's remaining budget is untouched, the
+# accounts are genuinely separate; if it dropped too, they share one budget. Use the burst
+# method, not the sequential-probe method, for any future key-account verification.
 
 
 # Calibrated against Sarvam's own documented rate limit for Document Intelligence / Vision
@@ -215,6 +195,48 @@ _SARVAM_DOC_AI_REQUEST_BURST_CAPACITY = 8.0
 sarvam_doc_ai_request_bucket = TokenBucket(
     rate_per_sec=_SARVAM_DOC_AI_REQUEST_RATE_PER_SEC, capacity=_SARVAM_DOC_AI_REQUEST_BURST_CAPACITY
 )
+
+
+# Gemini (gemini_client.py) -- document OCR AI-extraction's replacement for Groq (see
+# config.py's GEMINI_API_KEY comment for why). Calibrated against a live 429 response body on
+# this exact free-tier project/model, not a guess or a generic web figure: "Quota exceeded for
+# metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 5,
+# model: gemini-3.6-flash" -- confirmed the REAL free-tier request limit for this model is 5
+# requests/minute, notably lower than a generic "Gemini 3 Flash" figure found via web search
+# (10 RPM) for what turned out to be a different point release. Paced at 4/min, not the full 5,
+# for the same reason every other bucket in this file leaves headroom rather than pacing right
+# at a documented ceiling.
+#
+# This is the PRIMARY throttle for this workload, unlike Groq's buckets where the TOKEN budget
+# was the real bottleneck -- Gemini's 1M-token context window means a whole document (verified
+# live: a real 200,000-character, ~62,000-token mixed-script document) fits in ONE call, so
+# request COUNT, not token volume, is what a multi-document burst actually competes over.
+_GEMINI_REQUEST_RATE_PER_SEC = 4.0 / 60.0
+_GEMINI_REQUEST_BURST_CAPACITY = 2.0
+# Token side is a generous safety backstop, not a tightly-calibrated throttle the way Groq's
+# was -- real free-tier TPM for this model wasn't independently confirmed (RPM=5 is the binding
+# constraint at any realistic single-document call size, so a precise TPM figure matters far
+# less here). 200,000/min gives wide headroom above the one real large-document measurement
+# (61,891 total tokens for a single call) without ever meaningfully throttling ahead of the
+# request-count bucket above.
+_GEMINI_TOKEN_RATE_PER_SEC = 3333.0
+_GEMINI_TOKEN_BURST_CAPACITY = 200000.0
+
+gemini_request_bucket = TokenBucket(rate_per_sec=_GEMINI_REQUEST_RATE_PER_SEC, capacity=_GEMINI_REQUEST_BURST_CAPACITY)
+gemini_token_bucket = TokenBucket(rate_per_sec=_GEMINI_TOKEN_RATE_PER_SEC, capacity=_GEMINI_TOKEN_BURST_CAPACITY)
+
+
+def estimate_gemini_tokens(text: str) -> float:
+    """Bytes/4.5 estimate for Gemini prompt cost -- same reasoning and same conservative margin
+    as estimate_tokens() above (see its docstring): live-measured ~4.8 real bytes/token on a
+    200,000-character mixed ASCII/Devanagari document (296,762 bytes -> 61,309 prompt tokens),
+    close enough to Groq's own separately-measured ~5.0-6.2 bytes/token that the same formula
+    and margin apply. Only estimates the PROMPT side -- unlike Groq's estimate_tokens(), there's
+    no separate completion-token term to add here, since Gemini's structured-output schema
+    (responseSchema) bounds the completion shape far more tightly than a free-text JSON prompt
+    ever could, and completion cost is comparatively small next to a large document's prompt
+    cost anyway."""
+    return len(text.encode("utf-8")) / 4.5
 
 
 def estimate_tokens(prompt: str, max_tokens: int) -> float:
