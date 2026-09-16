@@ -78,6 +78,30 @@ def _post_with_retry(url: str, api_key: str, payload: dict, _retry: int = 0) -> 
     except requests.exceptions.RequestException as e:
         logger.error("Gemini API error: %s", e)
         if hasattr(e, "response") and e.response is not None:
+            status_code = e.response.status_code
+            # Same PHI convention as scribe.py's Groq _post_with_retry (see
+            # tests/unit/test_scribe_audio_transcription.py::
+            # test_transcribe_audio_error_logs_generic_message_not_response_body and this
+            # module's own docstring): an upstream error body CAN echo request content back
+            # (a 400 schema-validation error, for instance, may quote the offending field's
+            # value), so the raw body stays DEBUG-only -- unchanged below. What's new here is
+            # pulling out ONLY `error.status`, one of a small fixed set of Google RPC enum
+            # strings (e.g. "PERMISSION_DENIED", "RESOURCE_EXHAUSTED") that is never derived
+            # from our request content, so it's safe to surface at ERROR without the PHI risk
+            # of the message/body around it.
+            reason = None
+            try:
+                reason = (e.response.json().get("error") or {}).get("status")
+            except Exception:
+                pass
+            logger.error("Gemini API error response: status_code=%s reason=%s", status_code, reason)
+            if status_code == 403:
+                logger.error(
+                    "Gemini 403 Forbidden is not this app's rate limiter (that would be a 429, "
+                    "logged separately, and would reset on process restart) -- check the "
+                    "GEMINI_API_KEY project in Google AI Studio/Cloud Console for exhausted "
+                    "daily quota, billing status, or a revoked/restricted key."
+                )
             logger.debug("Response body: %s", e.response.text)
         raise
 
