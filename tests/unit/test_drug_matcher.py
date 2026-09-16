@@ -310,6 +310,38 @@ class TestBareNameCorrection:
         result = drug_matcher._find_bare_name_correction("Azithromycin")
         assert result is not None and "azithromycin" in result.lower()
 
+    def test_vitamin_d3_resolves_to_a_real_vitamin_d3_product_not_a_different_vitamin(self):
+        """
+        Real reported bug, live-verified against production data: bare "Vitamin D3" (no real
+        standalone "Vitamin D3" entry existed in medicine_names.csv -- the only row containing
+        that string was a "Atorvastatin+Vitamin D3" COMBINATION product, already excluded by
+        _adds_unstated_combination_ingredient) fuzzy-matched "Vitamin A 100000IU Syrup" via this
+        unguarded path: the shared "vitamin " prefix alone was enough to clear
+        BARE_NAME_NOISE_FLOOR, silently substituting a chemically unrelated vitamin. Fixed two
+        ways: (1) _mismatched_vitamin_letter hard-rejects any "Vitamin <letter>" candidate whose
+        letter/number code differs from the query's (defense-in-depth for every vitamin letter
+        the dataset has -- A/B6/C/D3 as of this writing -- not just this one pair); (2) real
+        "Vitamin D3 60000IU ..." entries were added to custom_medicines.csv (the same "admin adds
+        a real medicine the bulk dataset is missing" mechanism this module already documents),
+        since (1) alone only stops the WRONG vitamin match, it doesn't by itself make a RIGHT one
+        exist to match instead -- confirmed live that blocking the Vitamin A match without adding
+        a real entry just fell through to a second, unrelated wrong match ("Talmin D...").
+        """
+        result = drug_matcher._find_bare_name_correction("Vitamin D3")
+        assert result is not None
+        assert "vitamin d3" in result.lower()
+
+    def test_vitamin_letter_mismatch_blocks_cross_vitamin_correction_even_with_no_dataset_gap(self):
+        """Pins down the safety filter itself (_mismatched_vitamin_letter), independent of
+        whether a real matching entry exists: a bare "Vitamin C" query must never resolve to
+        the unrelated "Vitamin A"/"Vitamin D3" entries just because they share a "vitamin "
+        prefix -- it has its own real dataset entry ("Vitamin C Injection") to match instead."""
+        result = drug_matcher._find_bare_name_correction("Vitamin C")
+        assert result is not None
+        assert "vitamin c" in result.lower()
+        assert "vitamin a" not in result.lower()
+        assert "vitamin d3" not in result.lower()
+
     def test_noise_floor_rejects_input_unrelated_to_anything_in_the_dataset(self):
         assert drug_matcher._find_bare_name_correction("Xyzzyxqqqq") is None
 

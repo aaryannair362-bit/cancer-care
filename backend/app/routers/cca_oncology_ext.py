@@ -662,6 +662,16 @@ def radiation_phase_worklist(
 
     Radiation missing-development round, Batch 4 -- priority/mine filters and due-date
     ordering (both PDFs' "Make It Actionable" sections), on top of the existing status filter."""
+    if not (
+        is_cca_radiation_technologist(current_user) or is_cca_radiation_physicist(current_user)
+        or is_cca_radiation_oncologist(current_user) or is_admin(current_user)
+    ):
+        # Real, currently-shipping gap found cross-referencing the Radiation Technologist
+        # "Missing Development" report: this cross-patient worklist had no role check at all
+        # beyond org-scoping -- any authenticated org member could read every radiation phase
+        # across the whole organization's caseload. Gated to the same three clinical roles that
+        # already write to CCARadiationPhase elsewhere in this file, plus Admin.
+        raise HTTPException(403, "Only the Radiation team may view the radiation phase worklist")
     org_id = _org_id(current_user)
     q = (
         db.query(CCARadiationPhase, RadiationPrescription, CCAPatient)

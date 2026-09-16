@@ -187,13 +187,24 @@ def test_scribe_transcript_chunks_very_long_transcripts_instead_of_truncating(en
         return json.dumps({"chiefComplaint": "fever"})
 
     engine._call_groq_api = _fake
+
+    # Fixed per-call prompt overhead (everything in the prompt except the transcript itself) --
+    # measured live here rather than hardcoded, so this safety-margin check can't silently go
+    # stale the next time a field is added to the note schema. That's exactly what happened to
+    # the previous hardcoded "+2000" margin: Scribe Phase 2's biomarkers/imagingFindings/
+    # comorbidities/existingResultsReviewed additions grew the real overhead from ~1375 to
+    # ~2860 chars, and the hardcoded margin silently stopped covering it.
+    engine._extract_note_fields("")
+    fixed_overhead = prompt_lens.pop()
+
     long_transcript = "Doctor: how are you feeling today. Patient: not well. " * 1000  # far over one chunk's cap
     result = engine.scribe_transcript(long_transcript)
 
     from app.scribe import _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING
     assert len(prompt_lens) > 1  # more than one Groq call -- chunked, not a single truncated call
     for prompt_len in prompt_lens:
-        assert prompt_len < _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING + 2000  # each call's own chunk + prompt overhead
+        # +500 slack for sentence-boundary chunk alignment landing slightly under the cap.
+        assert prompt_len < _MAX_TRANSCRIPT_CHARS_FOR_SCRIBING + fixed_overhead + 500
     assert result["transcriptChunked"] is True
     assert result["chiefComplaint"] == "fever"
 
@@ -557,3 +568,146 @@ def test_is_available_false_on_request_exception(monkeypatch, engine):
     monkeypatch.setattr("app.scribe.requests.get", _raise)
     engine.api_key = "some-key"
     assert engine.is_available() is False
+
+
+# ---------------------------------------------------------------------------
+# Scribe Phase 2: biomarkers/imagingFindings/comorbidities/existingResultsReviewed. Live-
+# verified gap (feeding a clean, translated oncology consultation script into scribe_transcript):
+# ER/PR/Ki-67/exact HER2 score, MRI/CT measurements, and an entire diabetes/HbA1c comorbidity
+# thread were silently dropped even from perfect input text, because the schema had no field
+# for any of them. Purely additive -- this schema/prompt is SHARED with the general hospital's
+# non-oncology OPD scribe, so a consultation with nothing relevant for these fields must behave
+# exactly as before.
+# ---------------------------------------------------------------------------
+
+NEW_SCHEMA_ARRAY_KEYS = {"biomarkers", "imagingFindings", "comorbidities", "existingResultsReviewed"}
+
+
+def test_scribe_transcript_backfills_new_fields_to_empty_when_absent(engine):
+    """The exact scenario every OTHER existing scribe test in this suite already relies on: a
+    model response that says nothing about these new fields (the overwhelming majority of real
+    General Medicine consultations) must produce empty arrays, not raise, not omit the keys."""
+    _stub_call(engine, raw_return=json.dumps({"chiefComplaint": "sore throat"}))
+    result = engine.scribe_transcript("some transcript text long enough")
+    for key in NEW_SCHEMA_ARRAY_KEYS:
+        assert result[key] == []
+
+
+def test_scribe_transcript_extracts_biomarkers_and_imaging_findings(engine):
+    _stub_call(engine, raw_return=json.dumps({
+        "chiefComplaint": "Lump in the left breast",
+        "biomarkers": [
+            {"marker": "ER", "result": "<1%, negative"},
+            {"marker": "HER2", "result": "IHC 3+, positive"},
+        ],
+        "imagingFindings": [
+            {"study": "MRI breast", "finding": "5.4 cm irregular enhancing lesion, 2 o'clock position"},
+        ],
+    }))
+    result = engine.scribe_transcript("some transcript text long enough")
+    assert result["biomarkers"] == [
+        {"marker": "ER", "result": "<1%, negative"},
+        {"marker": "HER2", "result": "IHC 3+, positive"},
+    ]
+    assert result["imagingFindings"] == [
+        {"study": "MRI breast", "finding": "5.4 cm irregular enhancing lesion, 2 o'clock position"},
+    ]
+
+
+def test_scribe_transcript_extracts_comorbidities_and_existing_results_reviewed(engine):
+    _stub_call(engine, raw_return=json.dumps({
+        "comorbidities": ["Type 2 diabetes mellitus, ~12 years, HbA1c 8.3%"],
+        "existingResultsReviewed": ["MRI breast", "CT chest/abdomen/pelvis"],
+        "labTests": ["Baseline blood work"],
+    }))
+    result = engine.scribe_transcript("some transcript text long enough")
+    assert result["comorbidities"] == ["Type 2 diabetes mellitus, ~12 years, HbA1c 8.3%"]
+    assert result["existingResultsReviewed"] == ["MRI breast", "CT chest/abdomen/pelvis"]
+    # The already-reviewed studies must never also leak into labTests (new-order-only).
+    assert result["labTests"] == ["Baseline blood work"]
+
+
+def test_scribe_transcript_coerces_wrong_shaped_new_fields_to_empty_list(engine):
+    """Groq's prompt-only JSON gives no schema enforcement -- a model returning a bare string
+    instead of an array for one of these fields must degrade to [], never reach the frontend
+    as a wrong-typed value that would crash a .map()/.forEach() over it."""
+    _stub_call(engine, raw_return=json.dumps({
+        "biomarkers": "ER negative, HER2 positive",
+        "comorbidities": "diabetes",
+    }))
+    result = engine.scribe_transcript("some transcript text long enough")
+    assert result["biomarkers"] == []
+    assert result["comorbidities"] == []
+
+
+def test_scribe_transcript_dedupes_biomarkers_across_chunks(engine):
+    """Long transcripts get split into chunks (_split_transcript_into_chunks) and independently
+    extracted -- the same biomarker mentioned in two chunks (e.g. stated once, then referenced
+    again later in the same consultation) must collapse to one entry. Distinguishes the
+    per-chunk extraction calls from _merge_chunk_drafts' own narrative-consolidation call by
+    prompt content (that call's prompt always starts "Partial drafts...") rather than assuming
+    an exact chunk count, since _split_transcript_into_chunks' sentence-boundary alignment makes
+    the exact number of chunks for a given repeated-text length an implementation detail."""
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
+        if prompt.startswith("Partial drafts"):
+            return json.dumps({})
+        return json.dumps({"biomarkers": [{"marker": "HER2", "result": "IHC 3+, positive"}]})
+
+    engine._call_groq_api = _fake
+    long_transcript = "Doctor: how are you feeling today. Patient: not well. " * 1000
+    result = engine.scribe_transcript(long_transcript)
+    assert result["transcriptChunked"] is True
+    assert result["biomarkers"] == [{"marker": "HER2", "result": "IHC 3+, positive"}]
+
+
+def test_scribe_transcript_prompt_asks_for_new_fields_with_exact_value_fidelity(engine):
+    captured = {}
+
+    def _fake(prompt, system=None, temperature=0.3, max_tokens=3000, **kwargs):
+        captured["prompt"] = prompt
+        return json.dumps({})
+
+    engine._call_groq_api = _fake
+    engine.scribe_transcript("some transcript text long enough")
+    prompt = captured["prompt"]
+    assert "biomarkers" in prompt
+    assert "imagingFindings" in prompt
+    assert "comorbidities" in prompt
+    assert "existingResultsReviewed" in prompt
+    assert "Never round" in prompt
+
+
+def test_system_prompt_distinguishes_existing_results_from_new_orders(engine):
+    """Real documented gap: MRI/CT results being reviewed were wrongly appearing as new orders
+    in the downstream UI. The system prompt must explicitly instruct the model not to conflate
+    the two."""
+    lower = engine.system_prompt.lower()
+    assert "existingresultsreviewed" in lower
+    assert "labtests" in lower
+
+
+def test_system_prompt_forbids_inferring_a_stage_not_explicitly_stated_for_this_patient(engine):
+    """Real live-confirmed over-inference: feeding a clean transcript into scribe_transcript
+    produced 'Colon adenocarcinoma (stage III, right-sided)' in primaryDiagnosis, even though
+    the transcript only ever mentioned 'stage III' generically while explaining why a treatment
+    is commonly used for that category of cancer -- never as a stated fact about this specific
+    patient. The system prompt must explicitly guard against copying a general teaching
+    statement into this patient's own diagnosis."""
+    lower = engine.system_prompt.lower()
+    assert "stage" in lower
+    assert "this patient" in lower
+
+
+def test_translate_prescription_backfills_new_fields_when_translation_omits_them(engine):
+    _stub_call(engine, raw_return=json.dumps({"chiefComplaint": "बुखार"}))
+    draft = {
+        "chiefComplaint": "fever",
+        "biomarkers": [{"marker": "ER", "result": "negative"}],
+        "comorbidities": ["diabetes"],
+    }
+    result = engine.translate_prescription(draft, "Hindi")
+    for key in NEW_SCHEMA_ARRAY_KEYS:
+        assert key in result
+    # Translation response omitted these entirely -- backfilled to empty, not crashed on.
+    assert result["biomarkers"] == []
+    assert result["comorbidities"] == []

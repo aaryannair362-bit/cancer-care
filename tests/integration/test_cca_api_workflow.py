@@ -797,3 +797,269 @@ def test_document_upload_is_restricted_to_front_desk_roles(client, headers, auth
         headers=auth_headers(front_desk),
     )
     assert allowed_front_desk.status_code == 201
+
+
+# ---------------------------------------------------------------------------
+# OCR gap review Phase 1: document-upload patient-identity validation. Real motivating case,
+# live-verified against a 14-page test bundle: a multi-page upload that also contains an
+# unrelated patient's report(s) was silently merged into the wrong chart with no warning.
+# ---------------------------------------------------------------------------
+
+def test_document_upload_flags_identity_mismatch_and_withholds_facts(client, headers, db_session, doctor, monkeypatch):
+    """The demo patient here is "Meera S. Nair" (see _demo_patient_id) -- a document whose text
+    also names an unrelated "Kavita Rao" must be held for review, not silently merged: no
+    ClinicalFact/CCAResult rows drafted, no background per-page pass scheduled, status set to
+    IDENTITY_REVIEW_REQUIRED."""
+    from app.routers import cca as cca_router
+    from app.models_cca import ClinicalFact, CCAResult
+
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    monkeypatch.setattr(cca_router, "extract_document", _fake_ocr_result)
+    mock_gemini_json(monkeypatch, {
+        "facts": [{"fact_type": "HISTOLOGY", "value": "IDC", "verbatim": "IDC", "confidence": 0.9}],
+        "patient_names_mentioned": ["Kavita Rao"],
+    })
+
+    res = client.post(
+        f"/api/cca/documents?patient_id={patient_id}",
+        files={"file": ("mixed_bundle.pdf", b"%PDF-1.4 mixed patient bundle", "application/pdf")},
+        headers=headers,
+    )
+    assert res.status_code == 201, res.text
+    body = res.json()
+    assert body["document"]["status"] == "IDENTITY_REVIEW_REQUIRED"
+    assert body["document"]["identity_mismatch_names"] == ["Kavita Rao"]
+    assert body["facts_drafted"] == 0
+    assert body["results_recorded"] == 0
+
+    doc_id = body["document"]["id"]
+    assert db_session.query(ClinicalFact).filter(ClinicalFact.document_id == doc_id).count() == 0
+    assert db_session.query(CCAResult).filter(CCAResult.document_id == doc_id).count() == 0
+
+    # No page rows either -- the background per-page pass must not have been scheduled.
+    from app.models_cca import CCADocumentPage
+    assert db_session.query(CCADocumentPage).filter(CCADocumentPage.document_id == doc_id).count() == 0
+
+
+def test_document_upload_unaffected_when_no_identity_mismatch(client, headers, db_session, doctor, monkeypatch):
+    """A document whose only detected patient name matches the target patient (or names none at
+    all) must behave exactly as before this feature -- pinned explicitly since upload_document's
+    control flow was restructured to compute this check up front."""
+    from app.routers import cca as cca_router
+
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    monkeypatch.setattr(cca_router, "extract_document", _fake_ocr_result)
+    mock_gemini_json(monkeypatch, {
+        "facts": [{"fact_type": "HISTOLOGY", "value": "IDC", "verbatim": "IDC", "confidence": 0.9}],
+        "patient_names_mentioned": ["Meera S. Nair"],
+    })
+
+    res = client.post(
+        f"/api/cca/documents?patient_id={patient_id}",
+        files={"file": ("own_report.pdf", b"%PDF-1.4 own report", "application/pdf")},
+        headers=headers,
+    )
+    assert res.status_code == 201, res.text
+    body = res.json()
+    assert body["document"]["status"] == "EXTRACTED"
+    assert body["document"]["identity_mismatch_names"] is None
+    assert body["facts_drafted"] == 1
+
+
+def test_resolve_identity_review_confirmed_same_patient_drafts_withheld_facts(client, headers, db_session, doctor, monkeypatch):
+    from app.routers import cca as cca_router
+
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    monkeypatch.setattr(cca_router, "extract_document", _fake_ocr_result)
+    mock_gemini_json(monkeypatch, {
+        "facts": [{"fact_type": "HISTOLOGY", "value": "IDC", "verbatim": "IDC", "confidence": 0.9}],
+        "patient_names_mentioned": ["Kavita Rao"],
+    })
+    upload = client.post(
+        f"/api/cca/documents?patient_id={patient_id}",
+        files={"file": ("mixed_bundle.pdf", b"%PDF-1.4 mixed patient bundle", "application/pdf")},
+        headers=headers,
+    )
+    doc_id = upload.json()["document"]["id"]
+    assert upload.json()["document"]["status"] == "IDENTITY_REVIEW_REQUIRED"
+
+    # Re-mock for the resolve endpoint's own re-extraction call (a clean facts-only response --
+    # patient_names_mentioned is irrelevant here, this path calls extract_clinical_facts).
+    mock_gemini_json(monkeypatch, {"facts": [
+        {"fact_type": "HISTOLOGY", "value": "IDC", "verbatim": "IDC", "confidence": 0.9},
+    ]})
+
+    resolved = client.post(
+        f"/api/cca/documents/{doc_id}/identity-review/resolve",
+        json={"decision": "CONFIRMED_SAME_PATIENT", "notes": "Verified against original -- OCR misread the referring doctor's note."},
+        headers=headers,
+    )
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()["document"]["status"] == "EXTRACTED"
+    assert resolved.json()["document"]["identity_review_resolution"] == "CONFIRMED_SAME_PATIENT"
+    assert resolved.json()["facts_drafted"] == 1
+
+    listing = client.get(f"/api/cca/documents?patient_id={patient_id}", headers=headers).json()["documents"]
+    resolved_doc = next(d for d in listing if d["id"] == doc_id)
+    assert resolved_doc["fact_count"] == 1
+
+
+def test_resolve_identity_review_excluded_never_drafts_facts(client, headers, db_session, doctor, monkeypatch):
+    from app.routers import cca as cca_router
+    from app.models_cca import ClinicalFact
+
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    monkeypatch.setattr(cca_router, "extract_document", _fake_ocr_result)
+    mock_gemini_json(monkeypatch, {"facts": [], "patient_names_mentioned": ["Kavita Rao"]})
+    upload = client.post(
+        f"/api/cca/documents?patient_id={patient_id}",
+        files={"file": ("mixed_bundle.pdf", b"%PDF-1.4 mixed patient bundle", "application/pdf")},
+        headers=headers,
+    )
+    doc_id = upload.json()["document"]["id"]
+
+    resolved = client.post(
+        f"/api/cca/documents/{doc_id}/identity-review/resolve",
+        json={"decision": "EXCLUDED"},
+        headers=headers,
+    )
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()["document"]["status"] == "EXCLUDED"
+    assert resolved.json()["document"]["identity_review_resolution"] == "EXCLUDED"
+    assert resolved.json()["facts_drafted"] == 0
+    assert db_session.query(ClinicalFact).filter(ClinicalFact.document_id == doc_id).count() == 0
+
+
+def test_resolve_identity_review_rejects_invalid_decision(client, headers, db_session, doctor, monkeypatch):
+    from app.routers import cca as cca_router
+
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    monkeypatch.setattr(cca_router, "extract_document", _fake_ocr_result)
+    mock_gemini_json(monkeypatch, {"facts": [], "patient_names_mentioned": ["Kavita Rao"]})
+    upload = client.post(
+        f"/api/cca/documents?patient_id={patient_id}",
+        files={"file": ("x.pdf", b"%PDF-1.4 x", "application/pdf")},
+        headers=headers,
+    )
+    doc_id = upload.json()["document"]["id"]
+
+    bad = client.post(
+        f"/api/cca/documents/{doc_id}/identity-review/resolve",
+        json={"decision": "MAYBE"},
+        headers=headers,
+    )
+    assert bad.status_code == 422
+
+
+def test_resolve_identity_review_rejects_a_document_not_pending_review(client, headers, db_session, doctor, monkeypatch):
+    """Resolving a normal (never-flagged) document, or one already resolved, must 409 -- this
+    action only makes sense against a document currently in IDENTITY_REVIEW_REQUIRED."""
+    from app.routers import cca as cca_router
+
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    monkeypatch.setattr(cca_router, "extract_document", _fake_ocr_result)
+    mock_gemini_json(monkeypatch, {"facts": []})
+    upload = client.post(
+        f"/api/cca/documents?patient_id={patient_id}",
+        files={"file": ("normal.pdf", b"%PDF-1.4 normal", "application/pdf")},
+        headers=headers,
+    )
+    doc_id = upload.json()["document"]["id"]
+    assert upload.json()["document"]["status"] == "EXTRACTED"
+
+    denied = client.post(
+        f"/api/cca/documents/{doc_id}/identity-review/resolve",
+        json={"decision": "EXCLUDED"},
+        headers=headers,
+    )
+    assert denied.status_code == 409
+
+
+def test_resolve_identity_review_denied_for_front_desk(client, headers, auth_headers, make_user, db_session, doctor, monkeypatch):
+    """Deliberately NOT Front Desk -- they already made the upload-time filing call that turned
+    out ambiguous; a review is meant to be a second, different person's judgment."""
+    from app.routers import cca as cca_router
+
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    monkeypatch.setattr(cca_router, "extract_document", _fake_ocr_result)
+    mock_gemini_json(monkeypatch, {"facts": [], "patient_names_mentioned": ["Kavita Rao"]})
+    upload = client.post(
+        f"/api/cca/documents?patient_id={patient_id}",
+        files={"file": ("mixed_bundle.pdf", b"%PDF-1.4 mixed patient bundle", "application/pdf")},
+        headers=headers,
+    )
+    doc_id = upload.json()["document"]["id"]
+
+    front_desk = make_user(email="frontdesk2@ccahosp.com", role="CCAFrontDesk", organization_id=doctor.organization_id)
+    denied = client.post(
+        f"/api/cca/documents/{doc_id}/identity-review/resolve",
+        json={"decision": "CONFIRMED_SAME_PATIENT"},
+        headers=auth_headers(front_desk),
+    )
+    assert denied.status_code == 403
+
+
+def test_document_upload_still_succeeds_when_gemini_never_returns_patient_names(client, headers, db_session, doctor, monkeypatch):
+    """Sanity check for the exact scenario every OTHER existing document-upload test in this
+    file already relies on: a mocked Gemini response with no "patient_names_mentioned" key at
+    all must never crash or mis-flag a document -- see cca_engine's own defensive .get() handling."""
+    from app.routers import cca as cca_router
+
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    monkeypatch.setattr(cca_router, "extract_document", _fake_ocr_result)
+    mock_gemini_json(monkeypatch, {"facts": [
+        {"fact_type": "HISTOLOGY", "value": "IDC", "verbatim": "IDC", "confidence": 0.9},
+    ]})
+
+    res = client.post(
+        f"/api/cca/documents?patient_id={patient_id}",
+        files={"file": ("legacy_shape.pdf", b"%PDF-1.4 legacy", "application/pdf")},
+        headers=headers,
+    )
+    assert res.status_code == 201, res.text
+    assert res.json()["document"]["status"] == "EXTRACTED"
+
+
+def test_list_documents_reports_page_type_sections(client, headers, db_session, doctor, monkeypatch):
+    """OCR gap review P0: a multi-page upload must be represented as the sections it actually
+    contains, not a flat "Documents on file: 1" -- see cca_engine.group_document_pages_into_sections."""
+    from app.routers import cca as cca_router
+    from app import document_pages as document_pages_module
+
+    def _fake_two_page_ocr_result(*_a, **_k):
+        return {
+            "text": "Referral Letter\n\nComplete Urine Examination (CUE) performed",
+            "pages": [
+                {"page": 1, "text": "Referral Letter", "method": "embedded_text"},
+                {"page": 2, "text": "Complete Urine Examination (CUE) performed", "method": "embedded_text"},
+            ],
+            "page_count": 2, "engine": "pypdf",
+            "signals": {"diagnoses": [], "medications": [], "allergies": [], "investigations": [], "procedures": [], "dates_mentioned": [], "text_preview": ""},
+            "processed_at": datetime.utcnow(),
+        }
+
+    patient_id = _demo_patient_id(db_session, doctor.organization_id)
+    monkeypatch.setattr(cca_router, "extract_document", _fake_two_page_ocr_result)
+    mock_gemini_json(monkeypatch, {"facts": []})
+    call_count = {"n": 0}
+
+    def _fake_classify_and_extract_page(*_a, **_k):
+        call_count["n"] += 1
+        page_type = "CASE_DETAILS" if call_count["n"] == 1 else "LAB_REPORT"
+        return {"page_type": page_type, "confidence": 0.9, "facts": []}
+
+    monkeypatch.setattr(document_pages_module, "classify_and_extract_page", _fake_classify_and_extract_page)
+
+    res = client.post(
+        f"/api/cca/documents?patient_id={patient_id}",
+        files={"file": ("multi_section.pdf", b"%PDF-1.4 multi section", "application/pdf")},
+        headers=headers,
+    )
+    doc_id = res.json()["document"]["id"]
+
+    listing = client.get(f"/api/cca/documents?patient_id={patient_id}", headers=headers).json()["documents"]
+    doc_entry = next(d for d in listing if d["id"] == doc_id)
+    assert doc_entry["sections"] == [
+        {"page_type": "CASE_DETAILS", "start_page": 1, "end_page": 1, "page_count": 1},
+        {"page_type": "LAB_REPORT", "start_page": 2, "end_page": 2, "page_count": 1},
+    ]

@@ -38,6 +38,7 @@ from ..models_cca import (
 )
 from ..events import publish
 from ..cca_product_decisions import EXTERNAL_SPECIALIST_CAN_SIGN_RECOMMENDATIONS
+from ..rbac_projection import project_financial_case
 from .cca import get_cca_db, _org_id, _actor, _get_org_patient, _check_patient_in_org
 
 router = APIRouter(prefix="/api/cca", tags=["CCA Coordination & Ops"])
@@ -586,7 +587,10 @@ def financial_queue(db: Session = Depends(get_cca_db), current_user: dict = Depe
     rows = db.query(CCAFinancialCase, CCAPatient).join(CCAPatient, CCAFinancialCase.patient_id == CCAPatient.id).filter(
         CCAPatient.organization_id == org_id
     ).order_by(CCAFinancialCase.created_at.desc()).all()
-    return {"queue": [{**_financial_out(f), "patient_name": p.name, "patient_mrn": p.mrn} for f, p in rows]}
+    return {"queue": [
+        {**project_financial_case(_financial_out(f), current_user), "patient_name": p.name, "patient_mrn": p.mrn}
+        for f, p in rows
+    ]}
 
 
 @router.post("/financial/cases", status_code=201)
@@ -609,9 +613,12 @@ async def create_financial_case(request: Request, db: Session = Depends(get_cca_
 @router.get("/financial/cases/{case_id}")
 def get_financial_case(case_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     """Read access is intentionally broader than write -- Patient Liaison/oncologists need
-    'limited visibility/handoff only' (13_Patient_Liaison...pdf) into financial status."""
+    'limited visibility/handoff only' (13_Patient_Liaison...pdf) into financial status. That
+    intent is now actually enforced via rbac_projection.project_financial_case (previously this
+    returned the full payload -- counselling_notes, estimate, insurance/scheme status -- to ANY
+    authenticated org member regardless of role)."""
     case = _get_org_financial_case(db, case_id, _org_id(current_user))
-    return {"case": _financial_out(case)}
+    return {"case": project_financial_case(_financial_out(case), current_user)}
 
 
 @router.patch("/financial/cases/{case_id}/counselling")

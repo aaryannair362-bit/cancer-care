@@ -348,6 +348,17 @@ ADDITIVE_COLUMNS = [
     ("cca_radiation_equipment_issues", "verified_at", "TIMESTAMP"),
     ("cca_radiation_equipment_issues", "closed_by", "VARCHAR(200)"),
     ("cca_radiation_equipment_issues", "closed_at", "TIMESTAMP"),
+    # OCR gap review Phase 1: document-upload patient-identity validation -- see each column's
+    # docstring on CCADocument (models_cca.py).
+    ("cca_documents", "identity_mismatch_names", "JSON"),
+    ("cca_documents", "identity_reviewed_by", "VARCHAR(200)"),
+    ("cca_documents", "identity_reviewed_at", "TIMESTAMP"),
+    ("cca_documents", "identity_review_resolution", "VARCHAR(30)"),
+    # OCR gap review P0: source-date tracking -- see each column's docstring in models_cca.py
+    # (CCADocument.document_date, ClinicalFact.source_date, CCAResult.source_date).
+    ("cca_documents", "document_date", "DATE"),
+    ("cca_clinical_facts", "source_date", "DATE"),
+    ("cca_results", "source_date", "DATE"),
 ]
 
 

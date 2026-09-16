@@ -175,6 +175,42 @@ def test_financial_counselling_full_flow(client, auth_headers, db_session, oncol
     assert denied_write.status_code == 403
 
 
+def test_financial_case_read_is_projected_by_role_not_returned_in_full_to_everyone(
+    client, auth_headers, db_session, oncologist, financial_counsellor, patient_liaison, mdt_coordinator,
+):
+    """Real, currently-shipping over-exposure gap found cross-referencing the Patient Liaison
+    Missing Development report: GET /financial/cases/{id} and GET /financial/queue had NO
+    role-based field projection at all (unlike CarePlan/TreatmentPlan/TreatmentOrder elsewhere in
+    this codebase) -- ANY authenticated org member, including a role with no documented need for
+    financial detail (e.g. MDT Coordinator here), could read the full counselling_notes/estimate/
+    insurance_status payload. Financial Counsellor keeps full access; Patient Liaison gets a
+    named LIMITED subset (status/next-action, per the endpoint's own stated intent); everyone
+    else gets a near-empty MINIMAL projection -- see rbac_projection.FINANCIAL_CASE_TIER_FIELDS."""
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    fc_headers = auth_headers(financial_counsellor)
+    create = client.post("/api/cca/financial/cases", headers=fc_headers, json={"patient_id": patient_id})
+    case_id = create.json()["case"]["id"]
+    client.patch(f"/api/cca/financial/cases/{case_id}/counselling", headers=fc_headers, json={
+        "counselling_status": "Completed", "counselling_notes": "Sensitive counselling detail.",
+        "patient_decision": "Proceeding",
+    })
+
+    full = client.get(f"/api/cca/financial/cases/{case_id}", headers=fc_headers).json()["case"]
+    assert full["counselling_notes"] == "Sensitive counselling detail."
+
+    liaison = client.get(f"/api/cca/financial/cases/{case_id}", headers=auth_headers(patient_liaison)).json()["case"]
+    assert "counselling_notes" not in liaison
+    assert liaison["counselling_status"] == "Completed"  # LIMITED tier still carries status for handoff
+
+    unrelated = client.get(f"/api/cca/financial/cases/{case_id}", headers=auth_headers(mdt_coordinator)).json()["case"]
+    assert "counselling_notes" not in unrelated
+    assert "counselling_status" not in unrelated  # MDT Coordinator has no documented need for this either
+    assert unrelated["id"] == case_id
+
+    queue_unrelated = client.get("/api/cca/financial/queue", headers=auth_headers(mdt_coordinator)).json()["queue"]
+    assert queue_unrelated and "counselling_notes" not in queue_unrelated[0]
+
+
 def test_care_coordination_milestones_and_barriers(client, auth_headers, db_session, oncologist, patient_liaison):
     patient_id = _patient_id(db_session, oncologist.organization_id)
     liaison_headers = auth_headers(patient_liaison)

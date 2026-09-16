@@ -328,6 +328,46 @@ def _adds_unstated_combination_ingredient(query_name: str, candidate_full_name: 
     return "+" in candidate_full_name and "+" not in query_name
 
 
+# Matches "Vitamin" followed immediately (after optional whitespace) by exactly one letter and
+# optional digits, then a real word boundary -- i.e. a vitamin letter/number code (A, B6, C, D3,
+# K2, ...), never a following form word: "Vitamin Syrup"/"Vitamin Tablet" can never match here,
+# because the single captured letter ("s"/"t") is immediately followed by more letters with no
+# boundary in between (see _mismatched_vitamin_letter's docstring for why this matters).
+_VITAMIN_LETTER_RE = re.compile(r"\bvitamin\s*([a-z]\d*)\b", re.IGNORECASE)
+
+
+def _mismatched_vitamin_letter(query_name: str, candidate_full_name: str) -> bool:
+    """
+    True if both the query and a candidate name a "Vitamin <letter>" product (A/B6/C/D3/...)
+    but state a DIFFERENT letter/number code -- these are chemically unrelated substances, not
+    spelling variants of each other, so no fuzz.ratio score however high should ever justify
+    substituting one for another.
+
+    Verified live as a real bug, not hypothetical: a correctly-spelled bare "Vitamin D3" query
+    (no real "Vitamin D3" dataset entry exists -- the only dataset row containing that string is
+    a StayHappi "Atorvastatin+Vitamin D3" COMBINATION product, already excluded separately by
+    _adds_unstated_combination_ingredient) fuzzy-matched "Vitamin A 100000IU Syrup" via the
+    unguarded bare-name path (_find_bare_name_correction) -- the shared "vitamin " prefix alone
+    was enough to clear BARE_NAME_NOISE_FLOOR, silently substituting a chemically unrelated
+    vitamin into the patient's medication list. The dataset also has a "Vitamin B6" and a
+    "Vitamin C" entry, so the same collision risk exists for any vitamin letter, not just D3/A.
+
+    Same shape of protection as _adds_unstated_combination_ingredient above: a hard pre-filter,
+    not a threshold tweak -- per this module's own extensively-documented reasoning, no
+    fuzz.ratio threshold can distinguish "genuine typo" from "coincidentally similar unrelated
+    product" once similarity is this high (the two strings differ only in the single letter/
+    digit right after "vitamin "). Operates on the RAW (unstripped) name strings, not the
+    stripped "base" _find_correction/_find_bare_name_correction score against -- _strip_to_base's
+    dose-number regex would otherwise eat the distinguishing digit out of "D3"/"B6" before this
+    check ever saw it.
+    """
+    q = _VITAMIN_LETTER_RE.search(query_name)
+    c = _VITAMIN_LETTER_RE.search(candidate_full_name)
+    if not q or not c:
+        return False
+    return q.group(1).lower() != c.group(1).lower()
+
+
 def _disambiguate_tied_candidates(tied: list, full_names: list, drug_name: str, dose) -> str:
     """
     Among dataset entries that tied on base-name similarity (and, if the query stated a form,
@@ -440,6 +480,7 @@ def _find_correction(drug_name: str, dose=None, threshold: float = DEFAULT_MATCH
     # "325"). Preferring a dose-matching candidate only AMONG genuine ties has no equivalent
     # failure mode.
     matches = [m for m in matches if not _adds_unstated_combination_ingredient(drug_name, full_names[m[2]])]
+    matches = [m for m in matches if not _mismatched_vitamin_letter(drug_name, full_names[m[2]])]
     if not matches:
         return None
 
@@ -526,6 +567,7 @@ def _find_bare_name_correction(drug_name: str, dose=None, threshold: float = BAR
     # existed. Dose safety is handled via tie-break preference below, not a hard filter here --
     # see the comment in _find_correction for why a hard dose filter was tried and reverted.
     matches = [m for m in matches if not _adds_unstated_combination_ingredient(drug_name, full_names[m[2]])]
+    matches = [m for m in matches if not _mismatched_vitamin_letter(drug_name, full_names[m[2]])]
     if not matches:
         return None
 

@@ -1024,6 +1024,7 @@
                 document.getElementById('consult-advice').value = note.advice || '';
                 lastScribeMedications = note.medications || [];
                 renderDetectedMedications(lastScribeMedications);
+                lastExistingResultsReviewed = note.existingResultsReviewed || [];
                 renderDetectedLabTests(note.labTests || [], note.primaryDiagnosis || note.chiefComplaint || '');
                 if (note.noteExtractionFailed) {
                     // scribe_transcript() never raises -- a genuine Groq API failure (retries
@@ -1046,6 +1047,11 @@
         }
 
         let lastDetectedLabTests = [];
+        // Scribe Phase 2: tests/reports the doctor discussed as ALREADY DONE during the consult
+        // (an existing biopsy/MRI/CT being reviewed, not newly ordered) -- kept separate so
+        // renderDetectedLabTests can warn if a detected "lab test" name looks like one of
+        // these, instead of letting it silently pre-check as a new order.
+        let lastExistingResultsReviewed = [];
 
         function renderDetectedMedications(medications) {
             if (medications) lastScribeMedications = medications;
@@ -1128,18 +1134,36 @@
             const container = document.getElementById('order-detected-tests');
             if (!container) return;
 
+            // Scribe Phase 2: a test/report the doctor discussed as ALREADY reviewed (an
+            // existing biopsy/MRI/CT result, not something being newly ordered) should never
+            // quietly pre-check as a new order just because its detected name also loosely
+            // matches a labTests entry -- scribe.py's own prompt already tells the model to keep
+            // these two lists mutually exclusive, but this is a last-line UI safety net, not a
+            // substitute for that (a fuzzy substring match here can't be perfectly reliable
+            // either way, so it unchecks + warns rather than silently removing the item).
+            const alreadyReviewed = (name) => (lastExistingResultsReviewed || []).some(r => {
+                const a = String(name).toLowerCase(), b = String(r).toLowerCase();
+                return a && b && (a.includes(b) || b.includes(a));
+            });
+
             let html = '';
             if (!lastDetectedLabTests.length) {
                 html = '<p style="color:var(--ink-500); font-size:12.5px; margin:0 0 10px 0;">No lab tests detected in transcript yet.</p>';
             } else {
                 html = '<div style="font-size:12px; color:var(--ink-600); margin-bottom:8px;">Checked lab tests below will be raised when you click Raise Order:</div>' +
                     '<div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:12px;">' +
-                    lastDetectedLabTests.map((t, i) => `
-                        <label style="display:inline-flex; align-items:center; gap:5px; background:#EFF6FF; border:1px solid var(--blue-badge-bg); border-radius:999px; padding:5px 12px; cursor:pointer;">
-                            <input type="checkbox" class="detected-lab-test-checkbox" value="${escapeHtml(t)}" checked onchange="suggestOrderType()" />
-                            ${escapeHtml(t)}
+                    lastDetectedLabTests.map((t, i) => {
+                        const flagged = alreadyReviewed(t);
+                        return `
+                        <label style="display:inline-flex; align-items:center; gap:5px; background:${flagged ? '#FEF3C7' : '#EFF6FF'}; border:1px solid ${flagged ? '#F59E0B' : 'var(--blue-badge-bg)'}; border-radius:999px; padding:5px 12px; cursor:pointer;" ${flagged ? 'title="This looks like a result the transcript describes as already reviewed, not newly ordered -- verify before raising this order."' : ''}>
+                            <input type="checkbox" class="detected-lab-test-checkbox" value="${escapeHtml(t)}" ${flagged ? '' : 'checked'} onchange="suggestOrderType()" />
+                            ${escapeHtml(t)}${flagged ? ' ⚠️' : ''}
                         </label>
-                    `).join('') + '</div>';
+                    `;
+                    }).join('') + '</div>';
+            }
+            if ((lastExistingResultsReviewed || []).length) {
+                html += `<div style="font-size:11.5px; color:var(--ink-500); margin-bottom:10px;">Reviewed as existing during this consult (not raised as new orders): ${lastExistingResultsReviewed.map(r => escapeHtml(r)).join(', ')}</div>`;
             }
             html += '<button type="button" class="btn-outline" style="font-size:12px; padding:6px 12px;" onclick="addManualLabTest()">➕ Add Manual Lab Test</button>';
             container.innerHTML = html;

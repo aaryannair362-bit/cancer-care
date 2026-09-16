@@ -4,6 +4,7 @@ Implements the complete Section 46 API surface and AI service governance.
 """
 
 import hashlib
+import logging
 import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -65,8 +66,9 @@ from ..models_cca import (
 from ..cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
     evaluate_guideline_readiness, synthesize_nexus_brief, generate_care_plan_prefill,
-    classify_document, extract_clinical_facts, extract_deterministic_lab_facts,
-    extract_deterministic_medication_facts,
+    classify_document, extract_clinical_facts, extract_clinical_facts_with_identity,
+    check_patient_identity_mismatch, group_document_pages_into_sections,
+    extract_deterministic_lab_facts, extract_deterministic_medication_facts,
     build_results_from_document_facts, build_medication_lists,
 )
 from ..cca_seed import seed_cca_database, simulate_ct_result
@@ -79,6 +81,7 @@ from ..rbac_projection import (
 )
 
 router = APIRouter(prefix="/api/cca", tags=["CCA Oncology OS"])
+logger = logging.getLogger(__name__)
 ALLOWED_DOCUMENT_TYPES = {"application/pdf", "image/jpeg", "image/png", "image/tiff"}
 
 def get_cca_db():
@@ -924,6 +927,13 @@ def get_patient_summary(
         CCAContradiction.patient_id == patient_id,
         CCAContradiction.status == "OPEN"
     ).all()
+    # Split by rule_id -- `contradictions` used to only ever hold laterality (CTR-01) rows, so
+    # the laterality_site block below could safely treat "any open contradiction" as "laterality
+    # is contradicted". Now that detect_contradictions also raises CTR-02:<marker> (biomarker)
+    # and CTR-03:<fact_type> (grade) rows, that would wrongly mark laterality contradicted by an
+    # unrelated biomarker conflict -- each block must only look at its own rule's rows.
+    laterality_contradictions = [c for c in contradictions if c.rule_id == "CTR-01"]
+    biomarker_contradictions = [c for c in contradictions if c.rule_id.startswith("CTR-02:")]
 
     intake = db.query(CCAIntakeAssessment).filter(
         CCAIntakeAssessment.patient_id == patient_id
@@ -944,10 +954,10 @@ def get_patient_summary(
             "tier": 1,
             "title": "Primary Site & Laterality",
             "value": (
-                f"[CONTRADICTED: {contradictions[0].description}]" if contradictions
+                f"[CONTRADICTED: {laterality_contradictions[0].description}]" if laterality_contradictions
                 else (fact_dict["LATERALITY"].value if "LATERALITY" in fact_dict else "[NOT_RECORDED]")
             ),
-            "absenceState": "CONTRADICTED" if contradictions else ("NORMAL" if "LATERALITY" in fact_dict else "NOT_RECORDED"),
+            "absenceState": "CONTRADICTED" if laterality_contradictions else ("NORMAL" if "LATERALITY" in fact_dict else "NOT_RECORDED"),
             "contentClass": "OBSERVATION",
             "provenance": {"fact_id": fact_dict["LATERALITY"].id, "doc_id": fact_dict["LATERALITY"].document_id} if "LATERALITY" in fact_dict else None
         },
@@ -966,8 +976,16 @@ def get_patient_summary(
             "key": "biomarkers",
             "tier": 1,
             "title": "Biomarker Profile",
-            "value": ", ".join([f.value for f in facts if f.fact_type == "BIOMARKER_RESULT"]) or "[NOT_TESTED]",
-            "absenceState": "NORMAL" if any(f.fact_type == "BIOMARKER_RESULT" for f in facts) else "NOT_RECORDED",
+            "value": (
+                ", ".join([f.value for f in facts if f.fact_type == "BIOMARKER_RESULT"]) or "[NOT_TESTED]"
+            ) + (
+                f" [CONTRADICTED: {'; '.join(c.description for c in biomarker_contradictions)}]"
+                if biomarker_contradictions else ""
+            ),
+            "absenceState": (
+                "CONTRADICTED" if biomarker_contradictions
+                else ("NORMAL" if any(f.fact_type == "BIOMARKER_RESULT" for f in facts) else "NOT_RECORDED")
+            ),
             "contentClass": "OBSERVATION"
         },
         {
@@ -1025,6 +1043,18 @@ def get_case_summary(
     scan_pages = db.query(CCADocumentPage).join(CCADocument).filter(
         CCADocument.patient_id == patient_id, CCADocumentPage.page_type == "SCAN_IMAGING"
     ).order_by(CCADocumentPage.created_at.desc()).all()
+    # ALL pages (not just SCAN_IMAGING) across every one of this patient's documents, one query
+    # -- OCR gap review P0: lets "documents" below show the logical sections a multi-page upload
+    # actually contains instead of "Documents on file: 1" (see
+    # cca_engine.group_document_pages_into_sections). Grouped by document_id in Python rather
+    # than one query per document.
+    sections_by_document_id: Dict[int, list] = {}
+    for p in db.query(CCADocumentPage.document_id, CCADocumentPage.page_number, CCADocumentPage.page_type).join(
+        CCADocument
+    ).filter(CCADocument.patient_id == patient_id):
+        sections_by_document_id.setdefault(p.document_id, []).append(
+            {"page_number": p.page_number, "page_type": p.page_type}
+        )
     docs_by_id = {d.id: d for d in docs}
     # Radiation therapy summary (Oncology Review Results PDF item 5) -- pulled straight from
     # the recorded course/phase/fraction records, same data source as the NEXUS brief's own
@@ -1157,6 +1187,12 @@ def get_case_summary(
                 "excerpt": strip_markup_for_display(d.ocr_text or "")[:400],
                 "fact_count": facts_per_document.get(d.id, 0),
                 "file_url": f"/api/cca/patients/{patient_id}/documents/{d.id}/file" if d.file_content else None,
+                "sections": group_document_pages_into_sections(sections_by_document_id.get(d.id, [])),
+                "identity_mismatch_names": d.identity_mismatch_names,
+                "identity_review_resolution": d.identity_review_resolution,
+                # OCR gap review P0: the report's own date (None if not found in the text) --
+                # distinct from uploaded_at above, which is always ingestion time.
+                "document_date": d.document_date.isoformat() if d.document_date else None,
             }
             for d in docs
         ],
@@ -1247,6 +1283,63 @@ def _can_upload_cca_document(user: dict) -> bool:
     return is_admin(user) or is_nursing_station(user) or is_cca_front_desk(user) or is_doctor(user)
 
 
+def _merge_deterministic_facts(drafted_facts: list, signals: Optional[dict]) -> list:
+    """Merges ocr_service._clinical_signals()'s deterministic lab-value/medication scan into an
+    already AI-drafted facts list, deduped by (fact_type, value) so the same line never becomes
+    two ClinicalFact rows. Mutates and returns `drafted_facts`. Shared by upload_document's
+    common (no identity concern) path and resolve_document_identity_review's
+    CONFIRMED_SAME_PATIENT path, so the two can never silently drift in what counts as "this
+    document's facts"."""
+    seen_facts = {(f["fact_type"], f["value"]) for f in drafted_facts}
+    deterministic_facts = (
+        extract_deterministic_lab_facts(signals) + extract_deterministic_medication_facts(signals)
+    )
+    for f in deterministic_facts:
+        key = (f["fact_type"], f["value"])
+        if key in seen_facts:
+            continue
+        seen_facts.add(key)
+        drafted_facts.append(f)
+    return drafted_facts
+
+
+def _persist_document_facts(db: Session, doc: CCADocument, drafted_facts: list) -> tuple:
+    """Persists an already-merged/deduped facts list (see _merge_deterministic_facts) as
+    PROPOSED ClinicalFact rows, plus any derived LAB/IMAGING CCAResult rows (see
+    build_results_from_document_facts). Shared by upload_document and
+    resolve_document_identity_review -- see _merge_deterministic_facts' docstring for why this
+    split exists. Returns (fact_rows, result_rows); callers own db.flush()/commit() and any
+    post-processing (detect_contradictions)."""
+    fact_rows = []
+    for f in drafted_facts:
+        fact = ClinicalFact(
+            # page_number=None (not 1): this pass runs over the WHOLE document's concatenated
+            # text, so it genuinely doesn't know which page a fact came from -- see
+            # document_pages.py's per-page pass, which fills in the real page number for any
+            # fact it independently rediscovers.
+            patient_id=doc.patient_id, document_id=doc.id, fact_type=f["fact_type"], value=f["value"],
+            verbatim_span=f["verbatim"], page_number=None, confidence=f["confidence"], status="PROPOSED",
+            # OCR gap review P0: the source document's own date, if one was found -- see
+            # CCADocument.document_date's docstring. None when the document's date is unknown.
+            source_date=doc.document_date,
+        )
+        db.add(fact)
+        fact_rows.append(fact)
+    # Surfaces a document's own lab/imaging findings straight into Patient History's "Results"
+    # section -- see build_results_from_document_facts's docstring for why this doesn't also
+    # synthesize a CCAOrder.
+    result_rows = []
+    for r in build_results_from_document_facts(drafted_facts, doc.filename):
+        result = CCAResult(
+            patient_id=doc.patient_id, document_id=doc.id, result_type=r["result_type"],
+            title=r["title"], findings_text=r["findings_text"], status="NEW",
+            source_date=doc.document_date,
+        )
+        db.add(result)
+        result_rows.append(result)
+    return fact_rows, result_rows
+
+
 @router.post("/documents", status_code=201)
 async def upload_document(
     background_tasks: BackgroundTasks,
@@ -1287,6 +1380,9 @@ async def upload_document(
     actor = _actor(current_user)
     ocr_failed_reason = None
     ocr_failed_pages: list[int] = []
+    ocr_result = None
+    identity_mismatch_names: list = []
+    document_date = None
     try:
         # Off the event loop: docTR inference is the heaviest blocking call in this app
         # (~11s/page) -- run inline inside this async handler, it would freeze the single event
@@ -1306,17 +1402,7 @@ async def upload_document(
         ocr_failed_reason = str(exc)
         ocr_text, page_count, doc_class, confidence = None, 1, None, None
 
-    doc = CCADocument(
-        patient_id=patient_id, filename=filename, mime_type=content_type, page_count=page_count,
-        file_hash=digest, file_content=content, document_type=document_type,
-        classification_class=doc_class, classification_confidence=confidence, ocr_text=ocr_text,
-        uploaded_by=actor, status="OCR_FAILED" if ocr_failed_reason else "EXTRACTED",
-    )
-    db.add(doc)
-    db.flush()
-
-    fact_rows = []
-    result_rows = []
+    drafted_facts: list = []
     if not ocr_failed_reason:
         # Off the event loop, same reason extract_document() above is: gemini_client.py's
         # rate-limit pacing (TokenBucket.consume()) and retry backoff both use real
@@ -1328,40 +1414,48 @@ async def upload_document(
         # Groq's real 30 RPM rarely got hit) to Gemini (a real 5 RPM limit that the proactive
         # pacer hits far more readily under any realistic multi-document usage, plus this
         # module's own retry backoff going up to 60s/attempt instead of Groq's 20s cap).
-        drafted_facts = await run_in_threadpool(extract_clinical_facts, ocr_text)
-        # Deterministic lab-value/medication safety nets (ocr_service._clinical_signals's
-        # "lab_values"/"medications" scans, run over the FULL raw text -- see
-        # extract_deterministic_lab_facts's and extract_deterministic_medication_facts's
-        # docstrings): merged in here, deduped against what the AI pass already drafted, so the
-        # same exact line never becomes two ClinicalFact rows.
-        seen_facts = {(f["fact_type"], f["value"]) for f in drafted_facts}
-        deterministic_facts = (
-            extract_deterministic_lab_facts(ocr_result.get("signals"))
-            + extract_deterministic_medication_facts(ocr_result.get("signals"))
+        #
+        # ONE call does both fact-drafting AND patient-identity extraction (see
+        # extract_clinical_facts_with_identity's docstring) -- OCR gap review P0: a multi-page
+        # upload that also contains an unrelated patient's report(s) must not be silently
+        # merged into this chart. Computed BEFORE the CCADocument row is even created below, so
+        # its status can be set correctly in one shot rather than created then mutated.
+        extraction = await run_in_threadpool(extract_clinical_facts_with_identity, ocr_text)
+        drafted_facts = extraction["facts"]
+        identity_mismatch_names = check_patient_identity_mismatch(
+            extraction["patient_names_mentioned"], patient.name,
         )
-        for f in deterministic_facts:
-            key = (f["fact_type"], f["value"])
-            if key in seen_facts:
-                continue
-            seen_facts.add(key)
-            drafted_facts.append(f)
-        for f in drafted_facts:
-            fact = ClinicalFact(
-                patient_id=patient_id, document_id=doc.id, fact_type=f["fact_type"], value=f["value"],
-                verbatim_span=f["verbatim"], page_number=1, confidence=f["confidence"], status="PROPOSED",
-            )
-            db.add(fact)
-            fact_rows.append(fact)
-        # Surfaces a document's own lab/imaging findings straight into Patient History's
-        # "Results" section on upload -- see build_results_from_document_facts's docstring for
-        # why this doesn't also synthesize a CCAOrder.
-        for r in build_results_from_document_facts(drafted_facts, filename):
-            result = CCAResult(
-                patient_id=patient_id, document_id=doc.id, result_type=r["result_type"],
-                title=r["title"], findings_text=r["findings_text"], status="NEW",
-            )
-            db.add(result)
-            result_rows.append(result)
+        # OCR gap review P0: captured here (a property of the document itself) regardless of
+        # identity-review outcome below -- even a document pending identity review has a real
+        # report date worth recording on the CCADocument row for audit.
+        document_date = extraction["document_date"]
+
+    if ocr_failed_reason:
+        doc_status = "OCR_FAILED"
+    elif identity_mismatch_names:
+        doc_status = "IDENTITY_REVIEW_REQUIRED"
+    else:
+        doc_status = "EXTRACTED"
+
+    doc = CCADocument(
+        patient_id=patient_id, filename=filename, mime_type=content_type, page_count=page_count,
+        file_hash=digest, file_content=content, document_type=document_type,
+        classification_class=doc_class, classification_confidence=confidence, ocr_text=ocr_text,
+        uploaded_by=actor, status=doc_status,
+        identity_mismatch_names=identity_mismatch_names or None,
+        document_date=document_date,
+    )
+    db.add(doc)
+    db.flush()
+
+    fact_rows = []
+    result_rows = []
+    if doc_status == "EXTRACTED":
+        # Deterministic lab-value/medication safety nets merged in here -- see
+        # _merge_deterministic_facts' docstring. Not run at all for IDENTITY_REVIEW_REQUIRED:
+        # nothing about this document is trusted enough to draft facts from yet.
+        drafted_facts = _merge_deterministic_facts(drafted_facts, ocr_result.get("signals"))
+        fact_rows, result_rows = _persist_document_facts(db, doc, drafted_facts)
         db.flush()
         detect_contradictions(db, patient_id)
 
@@ -1374,18 +1468,27 @@ async def upload_document(
         pages = ", ".join(str(p) for p in ocr_failed_pages)
         partial_ocr_warning = f"page(s) {pages} could not be read by OCR -- verify against the original document"
 
+    if ocr_failed_reason:
+        journey_description = f"{actor} uploaded {filename}, but text extraction failed ({ocr_failed_reason}). Saved for manual review."
+    elif identity_mismatch_names:
+        names = ", ".join(identity_mismatch_names)
+        journey_description = (
+            f"{actor} uploaded {filename}, but it also names {names} -- a different patient than "
+            f"this chart ({patient.name}). Held for identity review; no facts/results were drafted."
+        )
+    else:
+        journey_description = (
+            f"{actor} uploaded {filename}, classified as {doc_class}. {len(fact_rows)} candidate fact(s) drafted for review."
+            + (f" {len(result_rows)} result(s) recorded." if result_rows else "")
+            + (f" Note: {partial_ocr_warning}." if partial_ocr_warning else "")
+        )
+
     j_ev = CCAJourneyEvent(
         patient_id=patient_id,
         event_type="DOC_INGESTION",
         event_title=f"Document Ingested: {filename}",
         event_category="INVESTIGATION",
-        description=(
-            f"{actor} uploaded {filename}, but text extraction failed ({ocr_failed_reason}). Saved for manual review."
-            if ocr_failed_reason else
-            f"{actor} uploaded {filename}, classified as {doc_class}. {len(fact_rows)} candidate fact(s) drafted for review."
-            + (f" {len(result_rows)} result(s) recorded." if result_rows else "")
-            + (f" Note: {partial_ocr_warning}." if partial_ocr_warning else "")
-        ),
+        description=journey_description,
         actor_name=actor,
         actor_role=current_user.get("role"),
         provenance_doc_id=doc.id,
@@ -1394,10 +1497,13 @@ async def upload_document(
     db.commit()
     db.refresh(doc)
 
-    if not ocr_failed_reason:
+    if doc_status == "EXTRACTED":
         # True per-page classification (Patient History's "Scans" section, page-attributed
         # facts) runs after the response is sent -- see document_pages.py's module docstring
-        # for why this can't happen inline within the upload request.
+        # for why this can't happen inline within the upload request. Not scheduled for
+        # OCR_FAILED (nothing to classify) or IDENTITY_REVIEW_REQUIRED (nothing about this
+        # document is trusted enough to draft page-level facts from yet either -- the resolve
+        # endpoint schedules this itself once/if a clinician confirms it's the right patient).
         background_tasks.add_task(process_document_pages, doc.id, content, content_type, ocr_result)
 
     return {
@@ -1405,11 +1511,107 @@ async def upload_document(
         "document": {
             "id": doc.id, "filename": doc.filename, "classification": doc.classification_class,
             "confidence": doc.classification_confidence, "page_count": doc.page_count,
-            "status": doc.status,
+            "status": doc.status, "identity_mismatch_names": doc.identity_mismatch_names,
+            "document_date": doc.document_date.isoformat() if doc.document_date else None,
         },
         "facts_drafted": len(fact_rows),
         "results_recorded": len(result_rows),
         "ocr_warning": ocr_failed_reason or partial_ocr_warning,
+    }
+
+
+@router.post("/documents/{document_id}/identity-review/resolve")
+async def resolve_document_identity_review(
+    document_id: int, request: Request, db: Session = Depends(get_cca_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Clinician decision closing out a document flagged IDENTITY_REVIEW_REQUIRED by
+    upload_document. CONFIRMED_SAME_PATIENT retroactively runs the fact/result extraction that
+    was withheld at upload time -- the AI fact-drafting call is repeated (that result was never
+    persisted anywhere in the withheld state) against the ALREADY-STORED ocr_text (no re-OCR for
+    that part), but a second full OCR pass over the ORIGINAL stored file bytes is also needed to
+    recover the true per-page/chunk structure for the background per-page pass (see the `else`
+    branch below for why doc.ocr_text alone isn't enough for that half). EXCLUDED marks the
+    document terminally excluded -- the file/OCR text stays on record for audit, but it never
+    contributes facts/results. Gated to clinician roles, deliberately NOT Front Desk (who
+    already made the upload-time filing call that turned out ambiguous) -- an identity review is
+    meant to be a second, different person's judgment.
+    """
+    if not (is_doctor(current_user) or is_cca_oncologist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only a treating clinician or Admin may resolve an identity review")
+    org_id = _org_id(current_user)
+    doc = db.query(CCADocument).filter(CCADocument.id == document_id).first()
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    _get_org_patient(db, doc.patient_id, org_id)
+    if doc.status != "IDENTITY_REVIEW_REQUIRED":
+        raise HTTPException(409, f"Document is not pending identity review (status={doc.status})")
+
+    body = await request.json()
+    decision = body.get("decision")
+    if decision not in ("CONFIRMED_SAME_PATIENT", "EXCLUDED"):
+        raise HTTPException(422, "decision must be CONFIRMED_SAME_PATIENT or EXCLUDED")
+    notes = (body.get("notes") or "").strip()[:2000] or None
+
+    actor = _actor(current_user)
+    doc.identity_reviewed_by = actor
+    doc.identity_reviewed_at = datetime.utcnow()
+    doc.identity_review_resolution = decision
+
+    fact_rows, result_rows = [], []
+    if decision == "EXCLUDED":
+        doc.status = "EXCLUDED"
+        description = f"{actor} reviewed the identity-mismatch flag on {doc.filename} and excluded it -- confirmed as a different patient's document."
+    else:
+        # Re-run extract_document() on the ORIGINAL stored bytes (unchanged since upload) to
+        # get a real, correctly-shaped ocr_result (pages/engine/signals) -- doc.ocr_text alone
+        # is just the flattened whole-document string; the true per-page/chunk structure
+        # (needed below to run the withheld background pass) was never persisted anywhere, and
+        # fabricating a fake one would silently break the Sarvam per-page path (it reuses the
+        # ALREADY-PAID-FOR chunk jobs' own pages list, not a re-derivation -- see
+        # ocr_service.extract_document_pages's docstring). One extra OCR call is an acceptable
+        # cost here: this is a rare, one-off, human-triggered action, not the routine upload path.
+        real_ocr_result = await run_in_threadpool(extract_document, doc.file_content, doc.mime_type)
+        drafted_facts = await run_in_threadpool(extract_clinical_facts, doc.ocr_text)
+        drafted_facts = _merge_deterministic_facts(drafted_facts, real_ocr_result.get("signals"))
+        doc.status = "EXTRACTED"
+        fact_rows, result_rows = _persist_document_facts(db, doc, drafted_facts)
+        db.flush()
+        detect_contradictions(db, doc.patient_id)
+        description = (
+            f"{actor} reviewed the identity-mismatch flag on {doc.filename} and confirmed it belongs to this "
+            f"patient. {len(fact_rows)} candidate fact(s) drafted for review."
+            + (f" {len(result_rows)} result(s) recorded." if result_rows else "")
+        )
+    if notes:
+        description += f" Notes: {notes}"
+
+    j_ev = CCAJourneyEvent(
+        patient_id=doc.patient_id, event_type="DOC_IDENTITY_REVIEW_RESOLVED",
+        event_title=f"Identity Review Resolved: {doc.filename}", event_category="INVESTIGATION",
+        description=description, actor_name=actor, actor_role=current_user.get("role"),
+        provenance_doc_id=doc.id,
+    )
+    db.add(j_ev)
+    db.commit()
+    db.refresh(doc)
+
+    if doc.status == "EXTRACTED" and doc.file_content:
+        try:
+            # Runs directly (awaited), not scheduled via BackgroundTasks -- there is no live
+            # request/response cycle left to attach a background task to once this endpoint's
+            # own response is what we're building (this is a standalone resolve action, not a
+            # continuation of upload_document's request). Reuses real_ocr_result computed
+            # above, so this costs zero extra OCR calls beyond the one already paid for.
+            await run_in_threadpool(process_document_pages, doc.id, doc.file_content, doc.mime_type, real_ocr_result)
+        except Exception:
+            logger.exception("post-resolve process_document_pages failed for document %d", doc.id)
+
+    return {
+        "status": "success",
+        "document": {"id": doc.id, "status": doc.status, "identity_review_resolution": doc.identity_review_resolution},
+        "facts_drafted": len(fact_rows),
+        "results_recorded": len(result_rows),
     }
 
 
@@ -1428,6 +1630,17 @@ def list_documents(
             ClinicalFact.document_id == d.id,
             ClinicalFact.status == "VERIFIED"
         ).count()
+        # OCR gap review P0: represent a multi-page upload as the multiple logical sections it
+        # actually contains, not "Documents on file: 1" -- see
+        # cca_engine.group_document_pages_into_sections's docstring. Empty for a document whose
+        # async per-page pass hasn't populated CCADocumentPage rows yet (OCR failure, pending
+        # identity review, or simply not-yet-run) -- never invented from nothing.
+        page_rows = db.query(CCADocumentPage.page_number, CCADocumentPage.page_type).filter(
+            CCADocumentPage.document_id == d.id
+        ).all()
+        sections = group_document_pages_into_sections(
+            [{"page_number": p.page_number, "page_type": p.page_type} for p in page_rows]
+        )
         results.append({
             "id": d.id,
             "filename": d.filename,
@@ -1436,7 +1649,14 @@ def list_documents(
             "status": d.status,
             "fact_count": fact_count,
             "verified_count": verified_count,
-            "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None
+            "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
+            "sections": sections,
+            # Identity-review surface (see routers/cca.py's upload_document/
+            # resolve_document_identity_review): non-null only while status is
+            # IDENTITY_REVIEW_REQUIRED or after it's been resolved.
+            "identity_mismatch_names": d.identity_mismatch_names,
+            "identity_review_resolution": d.identity_review_resolution,
+            "document_date": d.document_date.isoformat() if d.document_date else None,
         })
     return {"documents": results}
 
@@ -2432,10 +2652,35 @@ def action_complete_result(
 # told" -- generic on CCAResult so it covers pathology, radiology and lab alike.
 # ---------------------------------------------------------
 
+# Real, currently-shipping gap found cross-referencing the Radiology Coordinator "Missing
+# Development" report: notify_critical_result/escalate_critical_result had NO role check
+# whatsoever beyond org-scoping -- any authenticated org member, including a purely
+# administrative/scheduling/financial role with no clinical function, could record themselves
+# as having notified/escalated a critical clinical result. Deliberately a BLOCKLIST, not an
+# allowlist: only the roles confirmed by this repo's own frontend (pathologist.html,
+# radiologist.html) and tests to have zero legitimate reason to touch a critical-result
+# communication are excluded, so every currently-working clinical/diagnostic caller (Doctor,
+# every CCA clinician role, Pathologist, Radiologist, Lab/Phlebotomy, Radiology Coordinator,
+# Nurse, Admin) keeps exactly the access it has today -- a full allowlist redesign is a bigger,
+# more deliberate decision than this pass should make blind.
+_CRITICAL_RESULT_COMMUNICATION_EXCLUDED_ROLES = {
+    "CCAFrontDesk", "CCAPatientLiaison", "CCAFinancialCounsellor", "CCABiller",
+    "CCAPatientRelationsExecutive",
+}
+
+
+def _require_clinical_result_communication_role(current_user: dict) -> None:
+    if is_admin(current_user):
+        return
+    if current_user.get("role") in _CRITICAL_RESULT_COMMUNICATION_EXCLUDED_ROLES:
+        raise HTTPException(403, "This role cannot notify or escalate a critical clinical result")
+
+
 @router.post("/results/{id}/notify-critical")
 async def notify_critical_result(
     id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
 ):
+    _require_clinical_result_communication_role(current_user)
     result = db.query(CCAResult).filter(CCAResult.id == id).first()
     if not result:
         raise HTTPException(404, "Result not found")
@@ -2474,6 +2719,7 @@ async def notify_critical_result(
 async def escalate_critical_result(
     id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)
 ):
+    _require_clinical_result_communication_role(current_user)
     result = db.query(CCAResult).filter(CCAResult.id == id).first()
     if not result:
         raise HTTPException(404, "Result not found")
@@ -7486,7 +7732,8 @@ def search_patient_records_and_knowledge(
                 _add("CLINICAL_FACT", f.id, f"{f.fact_type}: {f.value}",
                      f.created_at, f.verified_by or "AI-extracted (unverified)", f.status,
                      f"/api/cca/patients/{patient_id}/documents/{f.document_id}" if f.document_id else None,
-                     f"Fact #{f.id} (Doc #{f.document_id or 'Manual'}, Page {f.page_number})")
+                     f"Fact #{f.id} (Doc #{f.document_id or 'Manual'}, "
+                     f"Page {f.page_number if f.page_number is not None else 'unknown'})")
 
         for d in db.query(MDTDecision).filter(MDTDecision.patient_id == patient_id).all():
             if q in f"{d.recommendation or ''} {d.rationale or ''} {d.modality_direction or ''}".lower():

@@ -74,6 +74,47 @@ TREATMENT_PLAN_TIER_FIELDS: Dict[str, Optional[Set[str]]] = {
     "NONE": {"id", "status"},
 }
 
+_FINANCIAL_CASE_FULL_ACCESS_ROLES = {"CCAFinancialCounsellor", "CCABiller"}
+
+# Real, currently-shipping gap found cross-referencing the Patient Liaison "Missing Development"
+# report: unlike CarePlan/TreatmentPlan/TreatmentOrder above, CCAFinancialCase had NO
+# field-projection tier at all -- routers/cca_coordination.py's GET /financial/cases/{id} and
+# GET /financial/queue returned the full payload (counselling_notes, estimate, insurance/scheme
+# status, financial_clearance_status) to ANY authenticated org member, regardless of role. The
+# endpoint's own code comment already states the intent ("Patient Liaison/oncologists need
+# 'limited visibility/handoff only'") -- this tier system is what actually enforces it.
+FINANCIAL_CASE_TIER_FIELDS: Dict[str, Optional[Set[str]]] = {
+    "FULL": None,
+    # Patient Liaison: enough to know whether a patient's financial workup is progressing/cleared
+    # and who owns the next step for handoff purposes -- never the counselling notes, cash
+    # estimate, or insurance/scheme detail behind it.
+    "LIMITED": {
+        "id", "patient_id", "counselling_status", "financial_clearance_status",
+        "next_action", "next_action_owner", "next_action_due", "created_at",
+    },
+    # Every other role (Lab/Phlebotomy, Radiology Coordinator, MDT Coordinator, Pharmacist, ...):
+    # none of these has any documented need for financial detail -- same near-zero visibility
+    # Front Desk gets on Treatment Plan above, rather than the full payload every non-financial
+    # role was silently getting before this existed.
+    "MINIMAL": {"id", "patient_id", "financial_clearance_status"},
+}
+
+
+def financial_case_tier(current_user: dict) -> str:
+    if is_admin(current_user) or is_doctor(current_user) or is_cca_oncologist(current_user):
+        return "FULL"
+    role = current_user.get("role")
+    if role in _FINANCIAL_CASE_FULL_ACCESS_ROLES:
+        return "FULL"
+    if role == "CCAPatientLiaison":
+        return "LIMITED"
+    return "MINIMAL"
+
+
+def project_financial_case(data: dict, current_user: dict) -> dict:
+    return _project(data, FINANCIAL_CASE_TIER_FIELDS[financial_case_tier(current_user)])
+
+
 TREATMENT_ORDER_TIER_FIELDS: Dict[str, Optional[Set[str]]] = {
     "FULL": None,
     # Everyone else: an order's `instructions` (exact drug/dose/route) is more sensitive than

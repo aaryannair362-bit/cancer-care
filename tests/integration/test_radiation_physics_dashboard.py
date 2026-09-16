@@ -52,6 +52,16 @@ def rtt_headers(auth_headers, rtt):
 
 
 @pytest.fixture
+def front_desk(make_user, oncologist):
+    return make_user(email="frontdesk@rt-dashboard-test.com", role="CCAFrontDesk", organization_id=oncologist.organization_id)
+
+
+@pytest.fixture
+def fd_headers(auth_headers, front_desk):
+    return auth_headers(front_desk)
+
+
+@pytest.fixture
 def patient(db_session, oncologist):
     p = CCAPatient(mrn="RT-DASH-0001", name="RT Dashboard Test Patient", age=63, sex="Male", organization_id=oncologist.organization_id)
     db_session.add(p)
@@ -107,6 +117,20 @@ def test_worklist_filters_by_priority_and_mine(client, onc_headers, physicist_he
 
     other_mine = client.get("/api/cca/radiation-phases/worklist", headers=other_physicist_headers, params={"mine": True}).json()["worklist"]
     assert not any(p["id"] == urgent_id for p in other_mine)
+
+
+def test_worklist_denied_for_a_role_with_no_radiation_function(client, fd_headers, rtt_headers, onc_headers, patient):
+    """Real, currently-shipping gap: this cross-patient worklist had no role check at all
+    beyond org-scoping -- any authenticated org member could read every radiation phase across
+    the whole organization's caseload. Now gated to the three clinical roles that actually
+    write CCARadiationPhase data (Technologist/Physicist/Radiation Oncologist) plus Admin;
+    everyone else, e.g. Front Desk here, is denied. RTT and the Radiation Oncologist fixture
+    (onc_headers, role=CCARadiationOncologist in this file) must still be let through."""
+    denied = client.get("/api/cca/radiation-phases/worklist", headers=fd_headers)
+    assert denied.status_code == 403
+
+    assert client.get("/api/cca/radiation-phases/worklist", headers=rtt_headers).status_code == 200
+    assert client.get("/api/cca/radiation-phases/worklist", headers=onc_headers).status_code == 200
 
 
 def test_release_readiness_reflects_actual_signals(client, onc_headers, physicist_headers, patient):

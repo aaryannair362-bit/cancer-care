@@ -6,8 +6,10 @@ Strict human-in-the-loop governance:
 - Mathematical accuracy for BSA (DuBois) and BMI
 """
 
+import difflib
 import logging
 import math
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from sqlalchemy.orm import Session
@@ -53,34 +55,101 @@ def calculate_bsa(height_cm: float, weight_kg: float, formula: str = "DuBois") -
     return bsa, bmi
 
 
+def _biomarker_marker_key(value: str) -> str:
+    """Extracts and normalizes the marker name from a BIOMARKER_RESULT fact's "Marker: Result"
+    value string (e.g. "ER: Positive (80%, Allred 8/8)" -> "ER") for grouping same-marker
+    results together regardless of how the result itself is phrased -- see cca_seed.py's own
+    seed data for the "Marker: Result" convention this parses. Falls back to the whole
+    (stripped, upper-cased) value when there's no colon, so a malformed/unexpected value never
+    crashes grouping -- it just ends up in its own single-item group, which can never conflict
+    with anything. Truncated to 40 chars -- this feeds into CCAContradiction.rule_id
+    (VARCHAR(50), "CTR-02:" prefix), and while a real marker name is always short (ER, HER2,
+    Ki-67, PD-L1, ...), the no-colon fallback above could otherwise carry the fact's full
+    500-char value straight into a column that would reject or truncate it at the DB level
+    (silently on SQLite, but not on this app's real Postgres)."""
+    return (value.split(":", 1)[0] if ":" in value else value).strip().upper()[:40]
+
+
+# Single-value fact types checked for a same-patient conflict the same way biomarkers are below
+# -- deliberately just GRADE, not every FACT_TYPES entry: T/N/M_EVIDENCE and ECOG can
+# legitimately carry multiple different values over a patient's real course of
+# treatment/restaging, so flagging every distinct value as a "conflict" would be noise, not
+# signal. GRADE (and biomarkers, handled separately below) were the two cases named in the OCR
+# gap review as chips shown with no indication two documents actually disagree.
+_CONFLICT_CHECKED_SINGLE_VALUE_FACT_TYPES = ("GRADE",)
+
+
+def _flag_distinct_value_conflict(
+    db: Session, patient_id: int, rule_id: str, label: str, group_facts: list, contradictions: list
+) -> None:
+    """Shared create-or-reuse logic for a CCAContradiction keyed on `rule_id` -- reuses an
+    existing row for this exact rule_id if one already exists (including a previously
+    RESOLVED/ACCEPTED_VARIATION one, matching the laterality check's own long-standing behavior
+    of never silently re-opening a disposed contradiction), otherwise creates a new OPEN one
+    naming every distinct reported value. No-ops when `group_facts` doesn't actually disagree
+    (0 or 1 distinct value)."""
+    distinct_values = sorted({f.value for f in group_facts})
+    if len(distinct_values) < 2:
+        return
+    existing = db.query(CCAContradiction).filter(
+        CCAContradiction.patient_id == patient_id, CCAContradiction.rule_id == rule_id
+    ).first()
+    if existing:
+        contradictions.append(existing)
+        return
+    ctr = CCAContradiction(
+        patient_id=patient_id,
+        rule_id=rule_id,
+        description=(
+            f"{label} conflict detected: {len(distinct_values)} different reported value(s) "
+            f"found across this patient's documents ({'; '.join(distinct_values)}). Requires "
+            f"clinician disposition."
+        ),
+        conflicting_fact_ids=[f.id for f in group_facts],
+        status="OPEN",
+    )
+    db.add(ctr)
+    db.commit()
+    db.refresh(ctr)
+    contradictions.append(ctr)
+
+
 def detect_contradictions(db: Session, patient_id: int) -> List[CCAContradiction]:
     """
-    Deterministic contradiction detector. Cross-references facts (e.g. Laterality Left vs Right).
+    Deterministic contradiction detector. Cross-references facts for conflicts a clinician must
+    disposition before they can be verified/relied on (see routers/cca.py's fact-verification
+    endpoints, which already block accepting a fact that's party to an OPEN contradiction):
+    - CTR-01: Laterality (e.g. Left vs Right).
+    - CTR-02:<marker>: two documents reporting different values for the SAME biomarker (e.g.
+      "ER: Positive (80%)" vs "ER: Negative (<1%)") -- OCR gap review finding: these previously
+      sat as undifferentiated chips with nothing marking them as disagreeing.
+    - CTR-03:<fact_type>: same idea for GRADE -- see _CONFLICT_CHECKED_SINGLE_VALUE_FACT_TYPES's
+      comment for why this isn't extended to every fact type.
     """
     facts = db.query(ClinicalFact).filter(
         ClinicalFact.patient_id == patient_id,
         ClinicalFact.status.in_(["PROPOSED", "VERIFIED"])
     ).all()
-    
+
     laterality_facts = [f for f in facts if f.fact_type == "LATERALITY"]
     contradictions = []
-    
+
     # Check for laterality conflicts (e.g. Left vs Right)
     left_facts = [f for f in laterality_facts if "left" in f.value.lower()]
     right_facts = [f for f in laterality_facts if "right" in f.value.lower()]
-    
+
     if left_facts and right_facts:
         existing = db.query(CCAContradiction).filter(
             CCAContradiction.patient_id == patient_id,
             CCAContradiction.rule_id == "CTR-01"
         ).first()
-        
+
         conflict_ids = [f.id for f in left_facts + right_facts]
         desc = (
             f"Laterality contradiction detected: {len(left_facts)} document(s) state 'Left' "
             f"while {len(right_facts)} document(s) state 'Right'. Requires clinician disposition."
         )
-        
+
         if not existing:
             ctr = CCAContradiction(
                 patient_id=patient_id,
@@ -95,7 +164,26 @@ def detect_contradictions(db: Session, patient_id: int) -> List[CCAContradiction
             contradictions.append(ctr)
         else:
             contradictions.append(existing)
-            
+
+    # Biomarker conflicts: group by the marker name parsed out of each BIOMARKER_RESULT fact's
+    # "Marker: Result" value, then flag any marker with more than one distinct reported value.
+    by_marker: Dict[str, List[ClinicalFact]] = {}
+    for f in facts:
+        if f.fact_type != "BIOMARKER_RESULT":
+            continue
+        by_marker.setdefault(_biomarker_marker_key(f.value), []).append(f)
+    for marker, marker_facts in by_marker.items():
+        _flag_distinct_value_conflict(
+            db, patient_id, f"CTR-02:{marker}", f"{marker} biomarker", marker_facts, contradictions
+        )
+
+    # Single-value fact-type conflicts (currently just GRADE -- see the constant's own comment).
+    for fact_type in _CONFLICT_CHECKED_SINGLE_VALUE_FACT_TYPES:
+        type_facts = [f for f in facts if f.fact_type == fact_type]
+        _flag_distinct_value_conflict(
+            db, patient_id, f"CTR-03:{fact_type}", fact_type.title(), type_facts, contradictions
+        )
+
     return contradictions
 
 
@@ -266,8 +354,13 @@ def synthesize_nexus_brief(db: Session, patient_id: int) -> Dict:
         CCACancerDiagnosis.patient_id == patient_id
     ).order_by(CCACancerDiagnosis.created_at.desc()).first()
     
+    # RESULTED only -- a PENDING/INSUFFICIENT biomarker's result_as_reported defaults to a
+    # placeholder string ("Pending"), which read inline here (see the biomarker-profile section
+    # below) as e.g. "HER2: Pending" with no visual distinction from a real, final result. This
+    # brief is meant to be relied on for clinical decision support; an unresulted test must never
+    # look interchangeable with a resulted one.
     biomarkers = db.query(CCABiomarkerResult).filter(
-        CCABiomarkerResult.patient_id == patient_id
+        CCABiomarkerResult.patient_id == patient_id, CCABiomarkerResult.status == "RESULTED"
     ).all()
 
     staging = evaluate_staging_readiness(db, patient_id)
@@ -546,8 +639,11 @@ def generate_care_plan_prefill(db: Session, patient_id: int) -> Dict:
         MDTDecision.status == "FINAL"
     ).order_by(MDTDecision.recorded_at.desc()).first()
 
+    # RESULTED only -- same reasoning as synthesize_nexus_brief's identical filter: a
+    # PENDING/INSUFFICIENT biomarker's placeholder result_as_reported must never read as an
+    # interchangeable final value in a care-plan prefill a clinician may act on.
     biomarkers = db.query(CCABiomarkerResult).filter(
-        CCABiomarkerResult.patient_id == patient_id
+        CCABiomarkerResult.patient_id == patient_id, CCABiomarkerResult.status == "RESULTED"
     ).all()
 
     bm_str = ", ".join([f"{b.marker_name}: {b.result_as_reported}" for b in biomarkers]) or "[NOT_RECORDED]"
@@ -754,15 +850,62 @@ _FACTS_RESPONSE_SCHEMA = {
                 "required": ["fact_type", "value", "verbatim", "confidence"],
             },
         },
+        # OCR gap review P0 (document-upload patient-identity validation): every distinct
+        # person the model finds explicitly named as THE PATIENT of any report/record in the
+        # text -- added alongside `facts` in the SAME call/schema rather than a second Gemini
+        # call, to detect a wrong-patient page (e.g. a multi-page upload that also contains
+        # another patient's report) at zero extra API cost/latency over what this call already
+        # paid. See check_patient_identity_mismatch, which consumes this list.
+        "patient_names_mentioned": {"type": "ARRAY", "items": {"type": "STRING"}},
+        # OCR gap review P0 (source-date tracking): the document/report's OWN date -- a sample
+        # collection date, report/finalized date, or study date stated IN the text -- as
+        # opposed to CCADocument.uploaded_at/ClinicalFact.created_at/CCAResult.resulted_at,
+        # which only ever record when THIS APP ingested the document, not when the underlying
+        # clinical event happened. Without this, a report from 2019 and one from today read as
+        # equally "current" everywhere in the app. Normalized to YYYY-MM-DD by the model itself
+        # (never guessed/completed server-side -- see extract_clinical_facts_with_identity's
+        # parsing, which discards anything that doesn't parse as a real calendar date rather
+        # than coercing it).
+        "document_date": {"type": "STRING"},
     },
-    "required": ["facts"],
+    "required": ["facts", "patient_names_mentioned", "document_date"],
 }
 
 # classify_and_extract_page's response shape -- _FACTS_RESPONSE_SCHEMA's facts array plus
 # page_type/confidence, built below once PAGE_TYPES exists.
 
+_PATIENT_IDENTITY_PROMPT_INSTRUCTION = (
+    "ALSO identify every DISTINCT person explicitly named as THE PATIENT of any report/record "
+    "in this text -- the person a lab/scan/prescription/pathology result belongs to (e.g. "
+    "following a 'Patient Name:'/'Name:' label, or 'Mr./Mrs./Ms. <name>, age/sex' at the top of "
+    "a report). This document may be a bundle containing reports for more than one patient -- "
+    "list every distinct patient name found, not just the first one encountered. Do NOT include "
+    "referring/consulting doctors, hospital staff, or family members/next-of-kin mentioned only "
+    "as contacts. Return patient_names_mentioned as an empty array if no patient name is stated "
+    "anywhere in the text."
+)
+
+_DOCUMENT_DATE_PROMPT_INSTRUCTION = (
+    "ALSO find the date this document/report itself is FROM -- a sample collection date, a "
+    "report/finalized/signed date, or a study/procedure date stated in the text (e.g. after "
+    "'Date:', 'Collected on', 'Reported on', 'Date of Study'). If a document states more than "
+    "one such date, prefer the report/finalized date over a collection date. Return it as "
+    "document_date in strict YYYY-MM-DD format (convert whatever format it's written in -- e.g. "
+    "'12/03/2024', '3rd March 2024', '05-Mar-24' -- to that format yourself). Return "
+    "document_date as an empty string if no such date is stated anywhere in the text -- never "
+    "guess, estimate, or default to today's date."
+)
+
 
 def extract_clinical_facts(document_text: str) -> List[Dict]:
+    """Thin backward-compatible wrapper: every existing caller/test of this function only ever
+    wanted the facts list, not the patient-identity data extract_clinical_facts_with_identity
+    now also returns from the same underlying call -- see that function's docstring for the
+    real implementation."""
+    return extract_clinical_facts_with_identity(document_text)["facts"]
+
+
+def extract_clinical_facts_with_identity(document_text: str) -> Dict:
     """AI-drafts candidate (fact_type, value, verbatim, confidence) tuples from a document's
     OCR'd text, via Gemini (gemini_client.py) with a schema-enforced JSON response (see
     _FACTS_RESPONSE_SCHEMA) -- fact_type is constrained to FACT_TYPES server-side, not just
@@ -775,9 +918,21 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
     _chunks_for_single_call_extraction/_MAX_SINGLE_CALL_BYTES) -- Gemini's 1M-token context
     window made the multi-slice approach this function used to need for Groq's much smaller
     account budget unnecessary; a genuinely oversized outlier still gets walked in full via the
-    same byte-safe chunking, never truncated."""
+    same byte-safe chunking, never truncated.
+
+    Returns {"facts": List[Dict], "patient_names_mentioned": List[str], "document_date":
+    Optional[date]} -- "patient_names_mentioned" is every distinct patient name the model found
+    explicitly stated as the subject of some report in the text (deduped case-insensitively),
+    for routers/cca.py's upload_document to compare against the target patient before trusting
+    this document's content (see check_patient_identity_mismatch). "document_date" is the
+    document/report's own date as stated in the text (None if not stated or unparseable --
+    never guessed) -- the FIRST validly-parsed one found across chunks wins, since a genuinely
+    multi-report bundle with different dates per section is a further refinement this doesn't
+    attempt (see group_document_pages_into_sections' docstring for the same kind of deliberate
+    whole-document-level scoping). Callers that only want `facts` should use
+    extract_clinical_facts above rather than reaching into this dict directly."""
     if not document_text or not document_text.strip():
-        return []
+        return {"facts": [], "patient_names_mentioned": [], "document_date": None}
 
     system = (
         "You are a clinical document fact-extraction assistant for an oncology chart. "
@@ -790,13 +945,17 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
         "unrelated to the primary cancer, a follow-up plan or advice, or any other real clinical "
         "content) that doesn't fit a more specific type. Only use OTHER_CLINICAL_FINDING when "
         "no more specific type applies -- never as a default for something a specific type "
-        "already covers."
+        "already covers. "
+        + _PATIENT_IDENTITY_PROMPT_INSTRUCTION + " " + _DOCUMENT_DATE_PROMPT_INSTRUCTION
     )
 
     chunks = _chunks_for_single_call_extraction(document_text)
 
     facts: List[Dict] = []
     seen_facts: set = set()
+    patient_names: List[str] = []
+    seen_names: set = set()
+    document_date = None
     for chunk_num, chunk_text in enumerate(chunks, start=1):
         prompt = f"Extract clinical facts from this document:\n\n{chunk_text}"
         try:
@@ -842,7 +1001,99 @@ def extract_clinical_facts(document_text: str) -> List[Dict]:
                 "verbatim": str(f.get("verbatim") or "")[:1000],
                 "confidence": confidence if isinstance(confidence, (int, float)) and 0 <= confidence <= 1 else 0.75,
             })
-    return facts
+        # Defensive on absence, not just wrong type: every EXISTING mocked test (predating this
+        # field) returns a bare {"facts": [...]} with no "patient_names_mentioned" key at all --
+        # .get(...) returning None here (not a missing-key exception) is exactly what keeps
+        # every one of those tests, and any real Gemini response shape drift, degrading to "no
+        # names found" rather than raising.
+        raw_names = result.get("patient_names_mentioned") if isinstance(result, dict) else None
+        if isinstance(raw_names, list):
+            for n in raw_names:
+                if not isinstance(n, str):
+                    continue
+                n = n.strip()[:200]
+                key_n = n.lower()
+                if not n or key_n in seen_names:
+                    continue
+                seen_names.add(key_n)
+                patient_names.append(n)
+        # Same defensive .get(...)-returns-None-not-KeyError treatment as patient_names_mentioned
+        # above, for the same reason (existing mocked tests/response-shape drift). First validly-
+        # parsed date across chunks wins -- see this function's docstring for why later chunks'
+        # dates aren't considered.
+        if document_date is None:
+            raw_date = result.get("document_date") if isinstance(result, dict) else None
+            if isinstance(raw_date, str) and raw_date.strip():
+                try:
+                    parsed_date = datetime.strptime(raw_date.strip(), "%Y-%m-%d").date()
+                except ValueError:
+                    parsed_date = None
+                    logger.warning(
+                        "extract_clinical_facts: chunk %d/%d returned an unparseable "
+                        "document_date %r, discarding rather than guessing", chunk_num, len(chunks), raw_date,
+                    )
+                # A future date is never a real report date -- almost always the model
+                # defaulting to "today" despite the prompt's explicit instruction not to.
+                if parsed_date is not None and parsed_date <= datetime.utcnow().date():
+                    document_date = parsed_date
+    return {"facts": facts, "patient_names_mentioned": patient_names, "document_date": document_date}
+
+
+def _normalize_person_name(name: str) -> str:
+    """Lowercases and strips everything but letters/whitespace -- collapses common OCR/AI-
+    extraction noise (stray digits, punctuation, extra spaces) before comparing two names,
+    without attempting any fuzzier phonetic correction (see check_patient_identity_mismatch's
+    docstring for why a generous-but-simple comparison is the deliberate choice here)."""
+    return re.sub(r"[^a-z\s]", "", (name or "").lower()).strip()
+
+
+def _name_similarity(a: str, b: str) -> float:
+    """0.0-1.0 similarity between two person names, robust to minor OCR noise AND to the two
+    names' words appearing in a different order (e.g. "Sharma Meera" vs "Meera Sharma" --
+    difflib's SequenceMatcher alone is order-sensitive and can under-score a genuine same-
+    person reordering; token-set overlap catches that case, whole-string ratio catches a
+    within-word spelling variation token overlap would miss entirely). Returns 0.0 if either
+    name is empty after normalization."""
+    na, nb = _normalize_person_name(a), _normalize_person_name(b)
+    if not na or not nb:
+        return 0.0
+    ratio = difflib.SequenceMatcher(None, na, nb).ratio()
+    tokens_a, tokens_b = set(na.split()), set(nb.split())
+    token_overlap = (
+        len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+        if tokens_a and tokens_b else 0.0
+    )
+    return max(ratio, token_overlap)
+
+
+# Deliberately generous (favors NOT flagging a same-person OCR/spelling glitch as a mismatch)
+# -- this drives a human-review trigger, not an automated, no-appeal block. A false MISMATCH
+# costs a clinician one extra confirmation click on a document that was actually fine; a false
+# MATCH risks a different patient's clinical content silently entering the wrong chart. Between
+# those two failure costs, this module leans toward over-flagging every time it's ambiguous.
+_PATIENT_NAME_MATCH_THRESHOLD = 0.6
+
+
+def check_patient_identity_mismatch(detected_names: List[str], patient_name: str) -> List[str]:
+    """
+    Returns the subset of `detected_names` (as extracted by
+    extract_clinical_facts_with_identity) that do NOT plausibly refer to `patient_name` -- i.e.
+    a name explicitly stated in an uploaded document as the subject of some report, but which
+    looks like a DIFFERENT person than the patient the document is being filed under.
+
+    Empty result means every name found in the document is consistent with the target patient
+    -- including the common, expected case where `detected_names` is empty: never manufacture a
+    mismatch from the absence of any name in the text (most real documents, e.g. a lab slip with
+    no header, state no patient name at all, and that must not itself be treated as suspicious).
+
+    Real motivating case (OCR gap review P0, live-verified against a 14-page test bundle that
+    deliberately mixed 10 pages of one patient with 4 pages of an unrelated patient, "Kavita
+    Rao"): the pipeline's whole-document classification/extraction silently merged all 14 pages
+    into one chart with no warning. This function is what upload_document calls to decide
+    whether to block that silent merge and route the document to a clinician for review instead
+    -- see routers/cca.py's IDENTITY_REVIEW_REQUIRED handling.
+    """
+    return [name for name in detected_names if _name_similarity(name, patient_name) < _PATIENT_NAME_MATCH_THRESHOLD]
 
 
 def extract_deterministic_lab_facts(signals: Optional[Dict]) -> List[Dict]:
@@ -1099,3 +1350,39 @@ def classify_and_extract_page(text: str, is_image_heavy: bool) -> Dict:
         page_type, page_confidence = "UNCLASSIFIED", 0.0
 
     return {"page_type": page_type, "confidence": page_confidence, "facts": facts}
+
+
+def group_document_pages_into_sections(pages: List[Dict]) -> List[Dict]:
+    """Groups a document's per-page/chunk classifications (CCADocumentPage rows, already
+    ordered by page_number, each as a plain dict with at least "page_number" and "page_type")
+    into consecutive runs of the same page_type -- e.g. a 10-page bundle typed [CASE_DETAILS,
+    CASE_DETAILS, LAB_REPORT, PATHOLOGY_REPORT, PATHOLOGY_REPORT, SCAN_IMAGING, SCAN_IMAGING,
+    ...] becomes multiple sections, not one.
+
+    Fixes the OCR gap review's P0 "entire PDF shown as one document/one classification"
+    finding -- live-verified against a real 14-page test bundle, whose whole-document
+    classify_document() call collapsed everything to a single "PATHOLOGY" label purely because
+    IHC/histopathology keywords happened to win the whole-file keyword vote. A real multi-page
+    upload is virtually never a single logical document; showing it as one throws away
+    everything but whichever category won that vote.
+
+    Deliberately coarse: a run of consecutive same-page_type pages becomes one section even if
+    they're actually two separate real-world reports of the same TYPE (e.g. a real MRI report
+    and a duplicate MRI report both classified SCAN_IMAGING back-to-back would be one section,
+    not two) -- true report-boundary detection within a same-typed run (title/header/date
+    changes) is a further refinement this does not attempt; collapsing "one document, one
+    label" down to "one document, N type-runs" is what closes the core finding, not perfect
+    per-report boundaries. Never invents page data -- returns [] for a document with no page
+    rows at all (OCR failed, identity review still pending, or the async per-page pass hasn't
+    run yet -- see routers/cca.py's upload_document for when CCADocumentPage rows exist)."""
+    sections: List[Dict] = []
+    for p in sorted(pages, key=lambda p: p["page_number"]):
+        if sections and sections[-1]["page_type"] == p["page_type"]:
+            sections[-1]["end_page"] = p["page_number"]
+            sections[-1]["page_count"] += 1
+        else:
+            sections.append({
+                "page_type": p["page_type"], "start_page": p["page_number"],
+                "end_page": p["page_number"], "page_count": 1,
+            })
+    return sections

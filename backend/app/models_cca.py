@@ -256,7 +256,38 @@ class CCADocument(Base):
     file_content = Column(LargeBinary, nullable=True)
     uploaded_by = Column(String(200))
     uploaded_at = Column(DateTime, default=datetime.utcnow)
-    status = Column(String(30), default="EXTRACTED")  # UPLOADED, OCR_COMPLETE, CLASSIFIED, EXTRACTED, VERIFIED
+    # UPLOADED, OCR_COMPLETE, CLASSIFIED, EXTRACTED, VERIFIED, OCR_FAILED, IDENTITY_REVIEW_REQUIRED,
+    # EXCLUDED (see identity_review_resolution below for the last two)
+    status = Column(String(30), default="EXTRACTED")
+    # Patient-identity validation (OCR gap review P0 -- a real test bundle deliberately mixed
+    # 10 pages of one patient with 4 pages of an unrelated patient, "Kavita Rao", and the
+    # pipeline previously merged all of it into one chart with no warning). Populated
+    # synchronously at upload time from the same Gemini call extract_clinical_facts_with_identity
+    # already makes -- no extra API cost. identity_mismatch_names holds whichever name(s)
+    # extracted from the document text did NOT plausibly match this row's own patient_id's
+    # CCAPatient.name (cca_engine.check_patient_identity_mismatch) -- null/empty means either no
+    # mismatch was found, or OCR failed before a check could run (status distinguishes these).
+    # When non-empty at upload time, status is forced to IDENTITY_REVIEW_REQUIRED and NO
+    # ClinicalFact/CCAResult rows are drafted from this document until a clinician resolves it
+    # (POST .../identity-review/resolve) -- see routers/cca.py's upload_document.
+    identity_mismatch_names = Column(JSON, nullable=True)
+    identity_reviewed_by = Column(String(200), nullable=True)
+    identity_reviewed_at = Column(DateTime, nullable=True)
+    # CONFIRMED_SAME_PATIENT (false positive -- e.g. an OCR/AI misread of the real patient's own
+    # name; the withheld fact/result extraction is then run retroactively) or EXCLUDED (a
+    # genuinely different patient's content -- the file/OCR text stays on record for audit, but
+    # never contributes facts/results, and `status` becomes the terminal "EXCLUDED"). Null until
+    # a document with status=IDENTITY_REVIEW_REQUIRED is resolved.
+    identity_review_resolution = Column(String(30), nullable=True)
+    # OCR gap review P0 (source-date tracking): the document/report's OWN date (sample
+    # collection, report/finalized, or study date) as stated in its own text -- distinct from
+    # uploaded_at, which only ever records when THIS APP ingested it. Populated from the same
+    # extract_clinical_facts_with_identity call (see cca_engine.py's "document_date" schema
+    # field) -- null when no such date was stated in the text or it didn't parse as a real
+    # calendar date, never guessed/defaulted. Propagated to ClinicalFact.source_date/
+    # CCAResult.source_date for facts/results drafted from this document (see routers/cca.py's
+    # _persist_document_facts).
+    document_date = Column(Date, nullable=True)
 
 class CCADocumentPage(Base):
     """
@@ -305,6 +336,10 @@ class ClinicalFact(Base):
     verified_by = Column(String(200), nullable=True)
     verified_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # OCR gap review P0: the source document's own date (see CCADocument.document_date's
+    # docstring) -- null for a manually-entered fact (no document_id) or a document whose own
+    # date couldn't be determined. Distinct from created_at, which is always ingestion time.
+    source_date = Column(Date, nullable=True)
 
 class CCAContradiction(Base):
     __tablename__ = "cca_contradictions"
@@ -480,6 +515,13 @@ class CCAResult(Base):
     acknowledged_by = Column(String(200), nullable=True)
     acknowledged_at = Column(DateTime, nullable=True)
     resulted_at = Column(DateTime, default=datetime.utcnow)
+    # OCR gap review P0: for a result built from an uploaded historical document (see
+    # routers/cca.py's build_results_from_document_facts/_persist_document_facts), the source
+    # document's own date (CCADocument.document_date) -- null for a result generated any other
+    # way, or when the source document's date couldn't be determined. Distinct from
+    # resulted_at, which is always this row's creation time in THIS app, not when the
+    # underlying test/study actually happened.
+    source_date = Column(Date, nullable=True)
     # Structured report fields (Radiologist/Pathologist Reports screens). `structured_report`
     # holds specialty-varying sub-fields as JSON (e.g. radiology: measurements/lesion sites;
     # pathology: gross/microscopic description, histologic type/grade, margins, lymph nodes) --

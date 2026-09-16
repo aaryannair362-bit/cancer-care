@@ -56,10 +56,14 @@ def process_document_pages(document_id: int, content: bytes, content_type: str, 
         # exists for this document up front keeps the genuinely useful case (a page/chunk boundary
         # the whole-document pass sliced differently, contributing a fact phrased/rounded slightly
         # differently) while dropping true repeats.
-        existing_facts = {
-            (f.fact_type, f.value)
-            for f in db.query(ClinicalFact.fact_type, ClinicalFact.value)
-            .filter(ClinicalFact.document_id == document_id)
+        # Maps (fact_type, value) -> the existing ClinicalFact ROW OBJECT (not just a marker),
+        # so a fact whose page_number is still None (the whole-document pass no longer claims a
+        # false "page 1" -- see upload_document's own comment) can be updated in place with the
+        # real page number once this per-page pass independently rediscovers it, instead of the
+        # dedup below silently discarding that strictly-better information forever.
+        existing_facts: dict[tuple[str, str], ClinicalFact] = {
+            (f.fact_type, f.value): f
+            for f in db.query(ClinicalFact).filter(ClinicalFact.document_id == document_id)
         }
 
         for page in pages:
@@ -84,14 +88,23 @@ def process_document_pages(document_id: int, content: bytes, content_type: str, 
 
             for fact in classification["facts"]:
                 key = (fact["fact_type"], fact["value"])
-                if key in existing_facts:
+                existing = existing_facts.get(key)
+                if existing is not None:
+                    # Same fact already on record from the whole-document pass. That pass can
+                    # only ever leave page_number unset (None) since it never knew the true
+                    # page -- if that's still the case here, this per-page pass DOES know it, so
+                    # fill it in rather than silently keeping an unknown page forever. Never
+                    # overwrites a page_number some earlier pass already set to a real value.
+                    if existing.page_number is None:
+                        existing.page_number = page["page"]
                     continue
-                existing_facts.add(key)
-                db.add(ClinicalFact(
+                new_fact = ClinicalFact(
                     patient_id=doc.patient_id, document_id=document_id, fact_type=fact["fact_type"],
                     value=fact["value"], verbatim_span=fact["verbatim"], page_number=page["page"],
                     confidence=fact["confidence"], status="PROPOSED",
-                ))
+                )
+                db.add(new_fact)
+                existing_facts[key] = new_fact
 
         db.commit()
     except Exception:

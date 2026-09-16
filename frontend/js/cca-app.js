@@ -339,24 +339,94 @@ async function loadCensusQueue() {
 }
 
 // 4b. Ingested Documents screen -- upload + list (Front Desk registration / referral upload)
+// Roles allowed to resolve an identity-review flag (mirrors backend's
+// resolve_document_identity_review gate) -- Front Desk deliberately excluded, since it already
+// made the upload-time filing call that turned out ambiguous; a review is meant to be a second,
+// different person's judgment.
+const CCA_IDENTITY_REVIEW_ROLES = ['Doctor', 'CCAMedicalOncologist', 'CCASurgicalOncologist', 'CCARadiationOncologist', 'Admin'];
+
 async function loadDocumentsList() {
     try {
         const data = await Api.get(`${CCA_API_BASE}/documents?patient_id=${currentPatientId}`);
         const tbody = document.getElementById('documents-list-body');
         if (tbody) {
-            tbody.innerHTML = data.documents.map(d => `
+            const canResolveIdentity = CCA_IDENTITY_REVIEW_ROLES.includes(ccaCurrentUser.role);
+            tbody.innerHTML = data.documents.map(d => {
+                // OCR gap review P0: a multi-page upload is virtually never a single logical
+                // document -- show every detected section, not just the whole-file label.
+                const sections = d.sections || [];
+                const sectionsTitle = sections.map(s =>
+                    `${s.page_type}${s.end_page > s.start_page ? ` (p${s.start_page}-${s.end_page})` : ` (p${s.start_page})`}`
+                ).join(', ');
+                const sectionsNote = sections.length > 1
+                    ? ` <span style="font-size:10px;color:var(--text-secondary);" title="${escapeHtml(sectionsTitle)}">(${sections.length} sections)</span>`
+                    : '';
+                let identityBadge = '';
+                if (d.status === 'IDENTITY_REVIEW_REQUIRED') {
+                    const names = (d.identity_mismatch_names || []).join(', ');
+                    identityBadge = `<span class="badge-pill badge-warning" title="Also names: ${escapeHtml(names)}">⚠️ Identity Review Needed</span>`;
+                    if (canResolveIdentity) {
+                        identityBadge += ` <button class="btn-cca btn-outline" style="font-size:10px;padding:2px 6px;" onclick='openIdentityReviewModal(${Number(d.id)}, ${JSON.stringify(d.identity_mismatch_names || [])})'>Review</button>`;
+                    }
+                } else if (d.identity_review_resolution) {
+                    identityBadge = `<span class="badge-pill" style="opacity:0.7;font-size:10px;">Identity: ${escapeHtml(d.identity_review_resolution)}</span>`;
+                }
+                return `
                 <tr>
                     <td>${escapeHtml(d.filename)}</td>
-                    <td><span class="badge-pill badge-stage">${escapeHtml(d.classification)}</span></td>
+                    <td><span class="badge-pill badge-stage">${escapeHtml(d.classification)}</span>${sectionsNote} ${identityBadge}</td>
                     <td>${d.confidence != null ? Math.round(d.confidence * 100) + '%' : '-'}</td>
                     <td>${Number(d.fact_count)}</td>
                     <td>${Number(d.verified_count)}</td>
+                    <td>${d.document_date ? escapeHtml(d.document_date) : '<span style="color:var(--text-secondary);" title="No date found in the document text">-</span>'}</td>
                     <td>${escapeHtml(d.uploaded_at ? new Date(d.uploaded_at).toLocaleString() : '-')}</td>
                 </tr>
-            `).join('') || '<tr><td colspan="6">No documents uploaded yet.</td></tr>';
+            `;
+            }).join('') || '<tr><td colspan="7">No documents uploaded yet.</td></tr>';
         }
     } catch (err) {
         console.error("Error loading documents:", err);
+    }
+}
+
+// Modal: resolve a document flagged IDENTITY_REVIEW_REQUIRED (OCR gap review P0 -- a multi-page
+// upload whose text also named a different patient than this chart must never be silently
+// merged in; see routers/cca.py's upload_document/resolve_document_identity_review).
+function openIdentityReviewModal(docId, mismatchNames) {
+    openModal(`
+        <div class="card-header">
+            <div class="card-title" style="color:#fb7185;">⚠️ Patient Identity Review</div>
+            <button onclick="closeModal()" style="background:transparent;border:none;color:var(--text-secondary);font-size:20px;cursor:pointer;">&times;</button>
+        </div>
+        <p style="font-size:13px;color:var(--text-secondary);line-height:1.5;margin-bottom:16px;">
+            This document's text also names <strong style="color:#fb7185;">${escapeHtml((mismatchNames || []).join(', ') || 'a different patient')}</strong>,
+            which does not appear to match this patient. No clinical facts or results have been drafted from it yet.
+            Please verify against the original file before deciding.
+        </p>
+        <div style="margin-bottom:12px;">
+            <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">Notes (optional)</label>
+            <textarea id="identity-review-notes" rows="2" style="width:100%;padding:8px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:6px;color:var(--text-primary);margin-top:4px;"></textarea>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:10px;">
+            <button class="btn-cca btn-outline" onclick="closeModal()">Cancel</button>
+            <button class="btn-cca btn-outline" style="border-color:#f43f5e;color:#f43f5e;" onclick="submitIdentityReviewResolution(${Number(docId)}, 'EXCLUDED')">Exclude -- Different Patient</button>
+            <button class="btn-cca btn-primary" onclick="submitIdentityReviewResolution(${Number(docId)}, 'CONFIRMED_SAME_PATIENT')">Confirm -- Same Patient</button>
+        </div>
+    `);
+}
+
+async function submitIdentityReviewResolution(docId, decision) {
+    try {
+        const notes = document.getElementById('identity-review-notes')?.value || '';
+        await Api.post(`${CCA_API_BASE}/documents/${docId}/identity-review/resolve`, { decision, notes });
+        closeModal();
+        toast(decision === 'EXCLUDED' ? 'Document excluded.' : 'Confirmed -- facts are being drafted for review.', 'success');
+        await loadDocumentsList();
+        await loadVerificationWorkspace();
+        await loadJourneyTimeline();
+    } catch (err) {
+        console.error("Error resolving identity review:", err);
+        toast(apiErrorMessage(err), 'error');
     }
 }
 
@@ -369,7 +439,10 @@ async function submitDocumentUpload() {
     statusEl.textContent = 'Uploading and extracting...';
     try {
         const data = await Api.upload(`${CCA_API_BASE}/documents?patient_id=${currentPatientId}`, formData);
-        if (data?.document?.status === 'OCR_FAILED' || data?.ocr_warning) {
+        if (data?.document?.status === 'IDENTITY_REVIEW_REQUIRED') {
+            const names = (data.document.identity_mismatch_names || []).join(', ');
+            statusEl.textContent = `⚠️ Saved, but this document also names ${names} — held for clinician identity review before any facts are drafted.`;
+        } else if (data?.document?.status === 'OCR_FAILED' || data?.ocr_warning) {
             statusEl.textContent = `⚠️ Saved, but OCR could not fully read this file${data.ocr_warning ? ` (${data.ocr_warning})` : ''} — try a clearer scan or a text-based PDF.`;
         } else {
             statusEl.textContent = `✅ Classified as ${data.document.classification}. ${data.facts_drafted} candidate fact(s) drafted for verification.`;
@@ -748,7 +821,7 @@ async function openProvenanceDrawer(factId) {
                     "${escapeHtml(data.verbatim_span)}"
                 </p>
                 <div style="margin-top:8px;font-size:11px;color:var(--text-secondary);">
-                    Confidence: <strong>${escapeHtml((data.confidence * 100).toFixed(0))}%</strong> • Page: <strong>${Number(data.page_number)}</strong>
+                    Confidence: <strong>${escapeHtml((data.confidence * 100).toFixed(0))}%</strong> • Page: <strong>${data.page_number != null ? Number(data.page_number) : 'Unknown'}</strong>
                 </div>
             </div>
 

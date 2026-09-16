@@ -133,3 +133,64 @@ def test_encounter_second_finalise_requires_amendment_reason_and_snapshots(clien
     assert case_summary.status_code == 200
     enc_row = next(e for e in case_summary.json()["encounters"] if e["id"] == encounter_id)
     assert enc_row["visit_type"] == "NEW_CONSULTATION"
+
+
+def test_encounter_note_draft_persists_scribe_phase_2_fields(client, onc_headers, patient, monkeypatch):
+    """POST /encounters/{id}/note/draft (the CCA oncology consumer of scribe.scribe_transcript,
+    per its own docstring: "mirrors Doctor OPD's POST /api/scribe") had no test coverage at all
+    before this. Confirms the Scribe Phase 2 fields (biomarkers/imagingFindings/comorbidities/
+    existingResultsReviewed) reach CCAEncounter.note_content end-to-end through the real
+    endpoint, not just scribe.py's own unit tests -- this JSON column is what actually persists
+    them for the oncology flow (unlike the general Consultation table's fixed columns)."""
+    from tests.conftest import mock_groq_json
+
+    encounter = client.post(f"/api/cca/patients/{patient.id}/encounters", headers=onc_headers, json={
+        "specialty": "Medical Oncology", "encounter_type": "OPD_CONSULTATION",
+    })
+    encounter_id = encounter.json()["encounter"]["id"]
+
+    mock_groq_json(monkeypatch, {
+        "chiefComplaint": "Lump in the left breast",
+        "biomarkers": [{"marker": "HER2", "result": "IHC 3+, positive"}],
+        "imagingFindings": [{"study": "MRI breast", "finding": "5.4 cm lesion, 2 o'clock position"}],
+        "comorbidities": ["Type 2 diabetes mellitus, ~12 years, HbA1c 8.3%"],
+        "existingResultsReviewed": ["MRI breast", "CT chest/abdomen/pelvis"],
+    })
+
+    draft = client.post(f"/api/cca/encounters/{encounter_id}/note/draft", headers=onc_headers, json={
+        "transcript": "Doctor and patient discuss a breast lump, biomarker results, and imaging findings at length.",
+    })
+    assert draft.status_code == 200, draft.text
+    note = draft.json()["note_content"]
+    assert note["biomarkers"] == [{"marker": "HER2", "result": "IHC 3+, positive"}]
+    assert note["imagingFindings"] == [{"study": "MRI breast", "finding": "5.4 cm lesion, 2 o'clock position"}]
+    assert note["comorbidities"] == ["Type 2 diabetes mellitus, ~12 years, HbA1c 8.3%"]
+    assert note["existingResultsReviewed"] == ["MRI breast", "CT chest/abdomen/pelvis"]
+
+
+def test_encounter_note_draft_new_fields_are_persisted_to_the_db(client, onc_headers, patient, db_session, monkeypatch):
+    """Same real endpoint as above, but confirms the new fields are actually persisted on
+    CCAEncounter.note_content (a JSON column, unlike the general Consultation table's fixed
+    columns -- see that model's docstring) rather than only present in the immediate response.
+    Note: GET .../case-summary's own "encounters" projection does NOT surface note_content at
+    all (a pre-existing, unrelated gap -- it only ever reads a few specific snake_case keys that
+    don't match scribe_transcript's camelCase AI_DRAFT output), so persistence is checked
+    directly against the row instead."""
+    from tests.conftest import mock_groq_json
+    from app.models_cca import CCAEncounter
+
+    encounter = client.post(f"/api/cca/patients/{patient.id}/encounters", headers=onc_headers, json={
+        "specialty": "Medical Oncology", "encounter_type": "OPD_CONSULTATION",
+    })
+    encounter_id = encounter.json()["encounter"]["id"]
+
+    mock_groq_json(monkeypatch, {
+        "biomarkers": [{"marker": "ER", "result": "<1%, negative"}],
+    })
+    client.post(f"/api/cca/encounters/{encounter_id}/note/draft", headers=onc_headers, json={
+        "transcript": "Doctor and patient discuss biomarker results at length.",
+    })
+
+    db_session.expire_all()
+    row = db_session.query(CCAEncounter).filter(CCAEncounter.id == encounter_id).first()
+    assert row.note_content["biomarkers"] == [{"marker": "ER", "result": "<1%, negative"}]

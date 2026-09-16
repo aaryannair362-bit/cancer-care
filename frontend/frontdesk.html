@@ -1502,7 +1502,15 @@
                     // the file is still saved, but it won't contribute anything to the Patient
                     // History summary until it's re-scanned. Front desk needs to know that now,
                     // not discover it later when a doctor asks why a report isn't showing up.
-                    if (result?.ocr_warning || result?.document?.status === 'OCR_FAILED') {
+                    if (result?.document?.status === 'IDENTITY_REVIEW_REQUIRED') {
+                        // OCR gap review P0: this file's text also names a different patient --
+                        // no facts/results were drafted from it. Held for a clinician to review
+                        // (Doctor/Oncologist/Admin, not Front Desk -- see routers/cca.py's
+                        // resolve_document_identity_review), not something to resolve here.
+                        ocrFailures++;
+                        const names = (result.document.identity_mismatch_names || []).join(', ');
+                        toast(`${doc.file.name} was saved, but it also names ${names} — held for a clinician's identity review before use`, 'error');
+                    } else if (result?.ocr_warning || result?.document?.status === 'OCR_FAILED') {
                         ocrFailures++;
                         toast(`${doc.file.name} was saved, but OCR could not read it — try a clearer scan or a text-based PDF`, 'error');
                     }

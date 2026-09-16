@@ -17,10 +17,13 @@ from backend.app.models_cca_oncology_ext import PalliativeTreatmentOrder
 from backend.app.cca_engine import (
     calculate_bsa, detect_contradictions, evaluate_staging_readiness,
     evaluate_guideline_readiness, synthesize_nexus_brief, generate_care_plan_prefill,
-    extract_clinical_facts, build_medication_lists, build_results_from_document_facts,
-    _slice_text_by_bytes,
+    extract_clinical_facts, extract_clinical_facts_with_identity, check_patient_identity_mismatch,
+    group_document_pages_into_sections,
+    build_medication_lists, build_results_from_document_facts,
+    _slice_text_by_bytes, _biomarker_marker_key,
 )
 from backend.app import gemini_client
+from datetime import date, timedelta
 
 
 @pytest.fixture
@@ -75,6 +78,100 @@ def test_contradiction_detection_engine(db_session):
     assert ctrs[0].status == "OPEN"
     assert fact_left.id in ctrs[0].conflicting_fact_ids
     assert fact_right.id in ctrs[0].conflicting_fact_ids
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("ER: Positive (80%, Allred 8/8)", "ER"),
+    ("HER2/neu: Negative (1+)", "HER2/NEU"),
+    ("ki-67: 18%", "KI-67"),
+    ("no colon at all here", "NO COLON AT ALL HERE"),  # malformed value never crashes grouping
+])
+def test_biomarker_marker_key_parses_and_normalizes(value, expected):
+    assert _biomarker_marker_key(value) == expected
+
+
+def test_biomarker_marker_key_truncates_to_fit_the_rule_id_column():
+    """rule_id is VARCHAR(50) ("CTR-02:" + this key) -- a malformed value with no colon must
+    never carry the fact's full (up to 500-char) value straight into it."""
+    key = _biomarker_marker_key("x" * 500)
+    assert len(f"CTR-02:{key}") <= 50
+
+
+def test_contradiction_detection_flags_biomarker_conflict(db_session):
+    """OCR gap review P0: two documents reporting different values for the SAME biomarker (e.g.
+    ER positive from one report, ER negative from another) must be flagged for a clinician to
+    reconcile, not sit as two undifferentiated chips."""
+    patient = CCAPatient(mrn="TEST-MRN-02", name="Test Patient", age=55, sex="F", organization_id=1)
+    db_session.add(patient)
+    db_session.commit()
+
+    er_positive = ClinicalFact(
+        patient_id=patient.id, fact_type="BIOMARKER_RESULT",
+        value="ER: Positive (80%, Allred 8/8)", status="VERIFIED",
+    )
+    er_negative = ClinicalFact(
+        patient_id=patient.id, fact_type="BIOMARKER_RESULT",
+        value="ER: Negative (<1%)", status="PROPOSED",
+    )
+    pr_positive = ClinicalFact(  # a different, non-conflicting marker must never be swept in
+        patient_id=patient.id, fact_type="BIOMARKER_RESULT",
+        value="PR: Positive (65%, Allred 7/8)", status="VERIFIED",
+    )
+    db_session.add_all([er_positive, er_negative, pr_positive])
+    db_session.commit()
+
+    ctrs = detect_contradictions(db_session, patient.id)
+    er_ctrs = [c for c in ctrs if c.rule_id == "CTR-02:ER"]
+    assert len(er_ctrs) == 1
+    assert er_ctrs[0].status == "OPEN"
+    assert set(er_ctrs[0].conflicting_fact_ids) == {er_positive.id, er_negative.id}
+    assert not any(c.rule_id == "CTR-02:PR" for c in ctrs)
+
+
+def test_contradiction_detection_does_not_flag_agreeing_biomarker_facts(db_session):
+    patient = CCAPatient(mrn="TEST-MRN-03", name="Test Patient", age=55, sex="F", organization_id=1)
+    db_session.add(patient)
+    db_session.commit()
+    db_session.add_all([
+        ClinicalFact(patient_id=patient.id, fact_type="BIOMARKER_RESULT", value="HER2: Negative (1+)", status="VERIFIED"),
+        ClinicalFact(patient_id=patient.id, fact_type="BIOMARKER_RESULT", value="HER2: Negative (1+)", status="PROPOSED"),
+    ])
+    db_session.commit()
+    ctrs = detect_contradictions(db_session, patient.id)
+    assert not any(c.rule_id.startswith("CTR-02:") for c in ctrs)
+
+
+def test_contradiction_detection_flags_grade_conflict(db_session):
+    patient = CCAPatient(mrn="TEST-MRN-04", name="Test Patient", age=55, sex="F", organization_id=1)
+    db_session.add(patient)
+    db_session.commit()
+    fact_g2 = ClinicalFact(patient_id=patient.id, fact_type="GRADE", value="Grade 2", status="VERIFIED")
+    fact_g3 = ClinicalFact(patient_id=patient.id, fact_type="GRADE", value="Grade 3", status="PROPOSED")
+    db_session.add_all([fact_g2, fact_g3])
+    db_session.commit()
+
+    ctrs = detect_contradictions(db_session, patient.id)
+    grade_ctrs = [c for c in ctrs if c.rule_id == "CTR-03:GRADE"]
+    assert len(grade_ctrs) == 1
+    assert set(grade_ctrs[0].conflicting_fact_ids) == {fact_g2.id, fact_g3.id}
+
+
+def test_contradiction_detection_reuses_existing_biomarker_conflict_row(db_session):
+    """Matches CTR-01's own long-standing behavior: calling detect_contradictions again must
+    reuse the existing row for the same rule_id, not create a duplicate."""
+    patient = CCAPatient(mrn="TEST-MRN-05", name="Test Patient", age=55, sex="F", organization_id=1)
+    db_session.add(patient)
+    db_session.commit()
+    db_session.add_all([
+        ClinicalFact(patient_id=patient.id, fact_type="BIOMARKER_RESULT", value="Ki-67: 18%", status="VERIFIED"),
+        ClinicalFact(patient_id=patient.id, fact_type="BIOMARKER_RESULT", value="Ki-67: 45%", status="VERIFIED"),
+    ])
+    db_session.commit()
+
+    first_pass = [c.id for c in detect_contradictions(db_session, patient.id) if c.rule_id == "CTR-02:KI-67"]
+    second_pass = [c.id for c in detect_contradictions(db_session, patient.id) if c.rule_id == "CTR-02:KI-67"]
+    assert first_pass == second_pass
+    assert len(first_pass) == 1
 
 
 def test_slice_text_by_bytes_never_splits_a_multibyte_character():
@@ -167,6 +264,201 @@ def test_extract_clinical_facts_response_schema_constrains_fact_type_enum(monkey
     extract_clinical_facts("Diagnosis: Breast carcinoma")
     enum = captured["schema"]["properties"]["facts"]["items"]["properties"]["fact_type"]["enum"]
     assert set(enum) == set(FACT_TYPES)
+
+
+# ---------------------------------------------------------------------------
+# OCR gap review Phase 1: document-upload patient-identity validation
+# ---------------------------------------------------------------------------
+
+def test_extract_clinical_facts_with_identity_returns_both_facts_and_names(monkeypatch):
+    def _fake_generate_structured_json(prompt, system=None, response_schema=None, **kwargs):
+        return {
+            "facts": [{"fact_type": "PRIMARY_SITE", "value": "Breast", "verbatim": "Breast", "confidence": 0.9}],
+            "patient_names_mentioned": ["Meera Sharma", "Kavita Rao", "Meera Sharma"],
+        }
+    monkeypatch.setattr(gemini_client, "generate_structured_json", _fake_generate_structured_json)
+    result = extract_clinical_facts_with_identity("some document text")
+    assert len(result["facts"]) == 1
+    # deduped case-insensitively -- "Meera Sharma" appeared twice in the raw response
+    assert result["patient_names_mentioned"] == ["Meera Sharma", "Kavita Rao"]
+
+
+def test_extract_clinical_facts_with_identity_defaults_names_to_empty_when_absent(monkeypatch):
+    """Every EXISTING test/caller (predating this field) mocks a bare {"facts": [...]} with no
+    "patient_names_mentioned" key at all -- this must degrade to an empty list, never raise,
+    so every one of those tests keeps working unchanged."""
+    def _fake_generate_structured_json(prompt, system=None, response_schema=None, **kwargs):
+        return {"facts": []}
+    monkeypatch.setattr(gemini_client, "generate_structured_json", _fake_generate_structured_json)
+    result = extract_clinical_facts_with_identity("some document text")
+    assert result["patient_names_mentioned"] == []
+
+
+def test_extract_clinical_facts_backward_compatible_wrapper_ignores_names(monkeypatch):
+    """extract_clinical_facts (the pre-existing function every other caller/test already
+    depends on) must keep returning exactly the facts list, dropping patient_names_mentioned
+    entirely -- it is a thin wrapper over extract_clinical_facts_with_identity now."""
+    def _fake_generate_structured_json(prompt, system=None, response_schema=None, **kwargs):
+        return {
+            "facts": [{"fact_type": "HISTOLOGY", "value": "IDC", "verbatim": "IDC", "confidence": 0.9}],
+            "patient_names_mentioned": ["Someone Else"],
+        }
+    monkeypatch.setattr(gemini_client, "generate_structured_json", _fake_generate_structured_json)
+    facts = extract_clinical_facts("some document text")
+    assert facts == [{"fact_type": "HISTOLOGY", "value": "IDC", "verbatim": "IDC", "confidence": 0.9}]
+
+
+def test_extract_clinical_facts_schema_requires_patient_names_mentioned(monkeypatch):
+    from backend.app.cca_engine import _FACTS_RESPONSE_SCHEMA
+    captured = {}
+
+    def _fake_generate_structured_json(prompt, system=None, response_schema=None, **kwargs):
+        captured["schema"] = response_schema
+        captured["system"] = system
+        return {"facts": [], "patient_names_mentioned": []}
+
+    monkeypatch.setattr(gemini_client, "generate_structured_json", _fake_generate_structured_json)
+    extract_clinical_facts_with_identity("Diagnosis: Breast carcinoma")
+    assert "patient_names_mentioned" in captured["schema"]["properties"]
+    assert "patient_names_mentioned" in captured["schema"]["required"]
+    assert captured["schema"] is _FACTS_RESPONSE_SCHEMA
+    assert "THE PATIENT" in captured["system"]
+
+
+@pytest.mark.parametrize("detected,patient_name,expect_mismatch", [
+    # The real reported case: a 14-page bundle mixing two patients.
+    (["Kavita Rao"], "Meera Sharma", True),
+    (["Meera Sharma", "Kavita Rao"], "Meera Sharma", True),  # one matches, one doesn't -> still flagged
+    (["Meera Sharma"], "Meera Sharma", False),
+    ([], "Meera Sharma", False),  # nothing to compare -- never manufacture a mismatch from silence
+    (["Meera Sharma3"], "Meera Sharma", False),  # OCR noise (stray digit) on the real patient's own name
+    (["Sharma Meera"], "Meera Sharma", False),  # word-order variation, same person
+    (["Mera Sharma"], "Meera Sharma", False),  # minor OCR spelling drift
+])
+def test_check_patient_identity_mismatch(detected, patient_name, expect_mismatch):
+    result = check_patient_identity_mismatch(detected, patient_name)
+    if expect_mismatch:
+        assert result, f"expected {detected} to be flagged against patient {patient_name!r}"
+    else:
+        assert result == [], f"expected no mismatch for {detected} against patient {patient_name!r}, got {result}"
+
+
+def test_check_patient_identity_mismatch_returns_only_the_mismatched_names():
+    result = check_patient_identity_mismatch(["Meera Sharma", "Kavita Rao"], "Meera Sharma")
+    assert result == ["Kavita Rao"]
+
+
+# ---------------------------------------------------------------------------
+# OCR gap review P0: source-date tracking (extract_clinical_facts_with_identity's document_date)
+# ---------------------------------------------------------------------------
+
+def test_extract_clinical_facts_with_identity_parses_document_date(monkeypatch):
+    def _fake(prompt, system=None, response_schema=None, **kwargs):
+        return {"facts": [], "patient_names_mentioned": [], "document_date": "2024-03-12"}
+    monkeypatch.setattr(gemini_client, "generate_structured_json", _fake)
+    result = extract_clinical_facts_with_identity("some document text")
+    assert result["document_date"] == date(2024, 3, 12)
+
+
+def test_extract_clinical_facts_with_identity_defaults_document_date_to_none_when_absent(monkeypatch):
+    """Every EXISTING test/caller (predating this field) mocks a bare {"facts": [...]} with no
+    "document_date" key at all -- must degrade to None, never raise."""
+    def _fake(prompt, system=None, response_schema=None, **kwargs):
+        return {"facts": []}
+    monkeypatch.setattr(gemini_client, "generate_structured_json", _fake)
+    result = extract_clinical_facts_with_identity("some document text")
+    assert result["document_date"] is None
+
+
+def test_extract_clinical_facts_with_identity_defaults_document_date_to_none_when_blank(monkeypatch):
+    def _fake(prompt, system=None, response_schema=None, **kwargs):
+        return {"facts": [], "patient_names_mentioned": [], "document_date": ""}
+    monkeypatch.setattr(gemini_client, "generate_structured_json", _fake)
+    result = extract_clinical_facts_with_identity("some document text")
+    assert result["document_date"] is None
+
+
+@pytest.mark.parametrize("raw_date", [
+    "12th March 2024",   # not the requested YYYY-MM-DD format
+    "2024-13-40",         # not a real calendar date
+    "not a date",
+])
+def test_extract_clinical_facts_with_identity_discards_unparseable_document_date(monkeypatch, raw_date):
+    def _fake(prompt, system=None, response_schema=None, **kwargs):
+        return {"facts": [], "patient_names_mentioned": [], "document_date": raw_date}
+    monkeypatch.setattr(gemini_client, "generate_structured_json", _fake)
+    result = extract_clinical_facts_with_identity("some document text")
+    assert result["document_date"] is None
+
+
+def test_extract_clinical_facts_with_identity_discards_a_future_document_date(monkeypatch):
+    """A future date is never a real report date -- almost always the model defaulting to
+    "today" despite the prompt's explicit instruction not to guess."""
+    future = (date.today() + timedelta(days=30)).isoformat()
+
+    def _fake(prompt, system=None, response_schema=None, **kwargs):
+        return {"facts": [], "patient_names_mentioned": [], "document_date": future}
+    monkeypatch.setattr(gemini_client, "generate_structured_json", _fake)
+    result = extract_clinical_facts_with_identity("some document text")
+    assert result["document_date"] is None
+
+
+def test_extract_clinical_facts_with_identity_schema_requires_document_date(monkeypatch):
+    from backend.app.cca_engine import _FACTS_RESPONSE_SCHEMA
+    captured = {}
+
+    def _fake(prompt, system=None, response_schema=None, **kwargs):
+        captured["schema"] = response_schema
+        return {"facts": [], "patient_names_mentioned": [], "document_date": ""}
+
+    monkeypatch.setattr(gemini_client, "generate_structured_json", _fake)
+    extract_clinical_facts_with_identity("Diagnosis: Breast carcinoma")
+    assert "document_date" in captured["schema"]["properties"]
+    assert "document_date" in captured["schema"]["required"]
+    assert captured["schema"] is _FACTS_RESPONSE_SCHEMA
+
+
+def test_group_document_pages_into_sections_collapses_consecutive_same_type():
+    pages = [
+        {"page_number": 1, "page_type": "CASE_DETAILS"},
+        {"page_number": 2, "page_type": "CASE_DETAILS"},
+        {"page_number": 3, "page_type": "LAB_REPORT"},
+        {"page_number": 4, "page_type": "PATHOLOGY_REPORT"},
+        {"page_number": 5, "page_type": "PATHOLOGY_REPORT"},
+        {"page_number": 6, "page_type": "SCAN_IMAGING"},
+    ]
+    sections = group_document_pages_into_sections(pages)
+    assert sections == [
+        {"page_type": "CASE_DETAILS", "start_page": 1, "end_page": 2, "page_count": 2},
+        {"page_type": "LAB_REPORT", "start_page": 3, "end_page": 3, "page_count": 1},
+        {"page_type": "PATHOLOGY_REPORT", "start_page": 4, "end_page": 5, "page_count": 2},
+        {"page_type": "SCAN_IMAGING", "start_page": 6, "end_page": 6, "page_count": 1},
+    ]
+
+
+def test_group_document_pages_into_sections_never_merges_non_consecutive_runs():
+    """Two separate SCAN_IMAGING runs with a different type in between (e.g. a duplicate scan
+    filed after an unrelated page) must stay two sections, not collapse into one."""
+    pages = [
+        {"page_number": 1, "page_type": "SCAN_IMAGING"},
+        {"page_number": 2, "page_type": "CASE_DETAILS"},
+        {"page_number": 3, "page_type": "SCAN_IMAGING"},
+    ]
+    sections = group_document_pages_into_sections(pages)
+    assert len(sections) == 3
+
+
+def test_group_document_pages_into_sections_empty_input():
+    assert group_document_pages_into_sections([]) == []
+
+
+def test_group_document_pages_into_sections_sorts_out_of_order_input():
+    pages = [
+        {"page_number": 2, "page_type": "LAB_REPORT"},
+        {"page_number": 1, "page_type": "CASE_DETAILS"},
+    ]
+    sections = group_document_pages_into_sections(pages)
+    assert [s["page_type"] for s in sections] == ["CASE_DETAILS", "LAB_REPORT"]
 
 
 def test_staging_readiness_state_machine(db_session):
@@ -274,6 +566,38 @@ def test_nexus_brief_never_fabricates_missing_clinical_data(db_session):
 
     assert "[NOT_RECORDED]" in sections["12_safety_flags"]["content"]
     assert "Baseline CBC/LFT/KFT normal" not in sections["12_safety_flags"]["content"]
+
+
+def test_nexus_brief_and_care_plan_prefill_never_show_a_pending_biomarker_as_resulted(db_session):
+    """Real gap found via cross-reference against the Pathologist/Molecular Diagnostics gap
+    report: synthesize_nexus_brief and generate_care_plan_prefill both used to query EVERY
+    CCABiomarkerResult regardless of status, so a PENDING test (result_as_reported defaults to
+    a placeholder string, e.g. "Pending") rendered inline as e.g. "HER2: Pending" with no visual
+    distinction from a real, finalised result -- and, since a non-empty (but entirely PENDING)
+    biomarker list made `not biomarkers` False, this also silently suppressed the NEXUS brief's
+    "no biomarker/molecular results are on record" must-not-miss warning even though nothing was
+    actually resulted yet. Both functions must now only ever consume status="RESULTED" rows,
+    matching evaluate_guideline_readiness's existing (already-correct) filter on the same
+    table."""
+    patient = CCAPatient(mrn="TEST-MRN-BM01", name="Pending Biomarker Patient", age=49, sex="F", organization_id=1)
+    db_session.add(patient)
+    db_session.commit()
+    # _must_not_miss_items' biomarker-gap warning is gated on `diagnosis and not biomarkers` --
+    # needs a confirmed diagnosis on record for that branch to be reachable at all.
+    diagnosis = CCACancerDiagnosis(patient_id=patient.id, primary_site="Breast", status="CONFIRMED")
+    pending = CCABiomarkerResult(
+        patient_id=patient.id, marker_name="HER2", result_as_reported="Pending", status="PENDING",
+    )
+    db_session.add_all([diagnosis, pending])
+    db_session.commit()
+
+    brief = synthesize_nexus_brief(db_session, patient.id)
+    assert "Pending" not in brief["sections"]["4_biomarker_profile"]["content"]
+    assert brief["sections"]["4_biomarker_profile"]["content"] == "Biomarker assessment pending."
+    assert any("No biomarker/molecular results are on record" in item for item in brief["sections"]["14_must_not_miss"]["content"].split(". "))
+
+    prefill_bm_str = ", ".join(f"{b.marker_name}: {b.result_as_reported}" for b in db_session.query(CCABiomarkerResult))
+    assert "Pending" in prefill_bm_str  # sanity: the pending row genuinely exists and would have leaked through unfiltered
 
 
 def test_care_plan_prefill_refuses_to_invent_a_regimen_without_an_mdt_decision(db_session):

@@ -34,6 +34,16 @@ def path_headers(auth_headers, pathologist):
 
 
 @pytest.fixture
+def front_desk(make_user, oncologist):
+    return make_user(email="frontdesk@accession-test.com", role="CCAFrontDesk", organization_id=oncologist.organization_id)
+
+
+@pytest.fixture
+def fd_headers(auth_headers, front_desk):
+    return auth_headers(front_desk)
+
+
+@pytest.fixture
 def patient(db_session, oncologist):
     p = CCAPatient(mrn="ACCESSION-0001", name="Accession Test Patient", age=55, sex="Female", organization_id=oncologist.organization_id)
     db_session.add(p)
@@ -129,6 +139,21 @@ def test_notify_and_escalate_critical_result(client, onc_headers, db_session, pa
     escalated = client.post(f"/api/cca/results/{result.id}/escalate-critical", headers=onc_headers, json={"escalated_to": "On-call Oncologist"})
     assert escalated.status_code == 200, escalated.text
     assert escalated.json()["result"]["critical_escalated_to"] == "On-call Oncologist"
+
+
+def test_notify_and_escalate_critical_result_denied_for_non_clinical_role(client, fd_headers, db_session, patient):
+    """Real, currently-shipping gap: these two endpoints had NO role check at all beyond
+    org-scoping, so a purely administrative/scheduling role (Front Desk here) could record
+    itself as having notified/escalated a critical clinical result."""
+    result = _make_critical_result(db_session, patient.id)
+
+    denied_notify = client.post(f"/api/cca/results/{result.id}/notify-critical", headers=fd_headers, json={
+        "notified_to": "Dr. Referring Physician", "notification_method": "Phone",
+    })
+    assert denied_notify.status_code == 403
+
+    denied_escalate = client.post(f"/api/cca/results/{result.id}/escalate-critical", headers=fd_headers, json={"escalated_to": "On-call Oncologist"})
+    assert denied_escalate.status_code == 403
 
 
 def test_notify_requires_result_to_be_critical(client, onc_headers, db_session, patient):

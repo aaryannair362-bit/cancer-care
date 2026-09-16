@@ -66,7 +66,7 @@ class ScribeEngine:
 Analyze the doctor-patient conversation transcript and synthesize an accurate clinical prescription draft with maximum fidelity to the spoken facts.
 
 Your absolute highest priority directive is to STRICTLY report the conversation:
-1. PURELY report spoken facts. Do NOT add, invent, or assume any facts, clinical developments, or medications that were not mentioned.
+1. PURELY report spoken facts. Do NOT add, invent, or assume any facts, clinical developments, or medications that were not mentioned. In particular, NEVER attach a formal classification (a cancer stage, a grade, a category) to THIS patient unless the clinician explicitly states it as a finding about THIS patient's own case -- a doctor speaking generally about a category of disease while explaining treatment options (e.g. "for stage III colon cancer, chemotherapy commonly involves...", said to explain WHY a treatment is being considered) is teaching/context, not a statement that this patient has been staged; do not copy that classification into primaryDiagnosis or anywhere else as if it were a confirmed fact about this patient.
 2. If any element has no mention in the transcript, return a blank string "" or an empty array [].
 3. STRICTLY DISTINGUISH BETWEEN:
    - "chiefComplaint": Subjective symptoms reported by the patient
@@ -77,7 +77,11 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
 5. Handle spoken names, medicines, or measurements gracefully
 6. HPI VS PHYSICAL EXAMINATION -- KEEP THESE SEPARATE: "hpi" is the patient's history as reported -- symptoms, duration/progression of illness, aggravating/relieving factors, vitals the patient reports or that are read out as history. "physicalExam" is EXCLUSIVELY the clinician's own objective examination findings from actually examining the patient right now (e.g. "throat is red and inflamed", "chest clear on auscultation", "no palpable lymphadenopathy", "abdomen soft, non-tender"). If the doctor states an examination finding, it belongs in "physicalExam", NEVER duplicated into or substituted for "hpi". If no examination finding was spoken, "physicalExam" is "".
 7. NEVER include medication names, doses, frequencies, or other treatment/prescription details anywhere in "chiefComplaint" or "hpi" -- those belong EXCLUSIVELY in the "medications" array, even if the doctor mentions them in the same breath as a symptom (e.g. "for the fever I gave paracetamol" -> "fever" goes in hpi, "paracetamol" goes in medications, never both).
-8. "medications" is EXCLUSIVELY for a specific, named, purchasable drug/product (a real medicine name -- "Paracetamol", "Betadine Gargle", "Crocin"), never a generic home-care or lifestyle instruction with no product name attached. "Gargle with warm salt water", "drink plenty of fluids", "rest for 2 days", "apply an ice pack", "steam inhalation" are ADVICE, not medications, even though the doctor phrases them as an instruction to do something ("gargle thrice a day with salt water" -> advice; "gargle thrice a day with Betadine" -> medications, because Betadine is a named product). If it has no product name, it is never a medication."""
+8. "medications" is EXCLUSIVELY for a specific, named, purchasable drug/product (a real medicine name -- "Paracetamol", "Betadine Gargle", "Crocin"), never a generic home-care or lifestyle instruction with no product name attached. "Gargle with warm salt water", "drink plenty of fluids", "rest for 2 days", "apply an ice pack", "steam inhalation" are ADVICE, not medications, even though the doctor phrases them as an instruction to do something ("gargle thrice a day with salt water" -> advice; "gargle thrice a day with Betadine" -> medications, because Betadine is a named product). If it has no product name, it is never a medication.
+9. "biomarkers": whenever a receptor/biomarker test result is stated (ER, PR, HER2, Ki-67, or any other named biomarker), capture it here with its EXACT reported value verbatim -- a percentage, an IHC score, "positive"/"negative". Never round, simplify, or drop a stated number. Never fold a biomarker result into primaryDiagnosis/hpi as prose only -- it must also appear here, structured.
+10. "imagingFindings": whenever an imaging study's finding is stated (mammography, ultrasound, MRI, CT, X-ray, PET), capture the study and its exact finding here, including any stated measurement/size/anatomical location (e.g. "2 o'clock position", "1.6 by 1.2 centimetres"). Never round or drop a stated number.
+11. "comorbidities": capture any OTHER medical condition mentioned that is not itself the primary complaint being addressed today (diabetes, hypertension, thyroid disease, prior cardiac history, etc.), including any duration or lab value stated with it (e.g. "HbA1c 8.3%"). This is separate from hpi, which is about the presenting complaint's own history -- a comorbidity mentioned in passing while discussing the main complaint still belongs here, not only in hpi.
+12. "existingResultsReviewed" vs "labTests" -- STRICTLY DISTINGUISH: if the clinician is reading out or discussing a report/test that has ALREADY been done (a biopsy result, an MRI already performed, a CT already performed), that test belongs in "existingResultsReviewed", NEVER in "labTests". "labTests" is EXCLUSIVELY for a test being NEWLY recommended or ordered now, that has not already been done. The same test name must never appear in both."""
 
     def _post_with_retry(self, url: str, request_kwargs: dict, _retry: int = 0) -> dict:
         """
@@ -358,7 +362,13 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
             "differentialDiagnosis": "",
             "medications": [],
             "advice": "",
-            "labTests": []
+            "labTests": [],
+            # Backfilled by _extract_note_fields's own _NOTE_DEFAULT_FIELDS loop regardless --
+            # declared explicitly here too, matching this dict's existing self-documenting style.
+            "biomarkers": [],
+            "imagingFindings": [],
+            "comorbidities": [],
+            "existingResultsReviewed": [],
         }
         # Try to find sections by common headings
         lines = text.split('\n')
@@ -431,12 +441,44 @@ Your absolute highest priority directive is to STRICTLY report the conversation:
                 result[field] = str(value)
         return result
 
+    @staticmethod
+    def _coerce_array_fields(result: dict, fields) -> dict:
+        """Mirrors _coerce_string_fields above, for fields the prompt asks for as a JSON array
+        (medications/labTests and, as of the Scribe Phase 2 additions, biomarkers/
+        imagingFindings/comorbidities/existingResultsReviewed) -- Groq's prompt-only JSON gives
+        no structural guarantee the model actually returns a list for these. A non-list value
+        defaults to [] rather than being wrapped/guessed at, matching this file's existing
+        "never invent, prefer an honest empty over a guess" philosophy (see _fallback_extract's
+        own module-level framing)."""
+        for field in fields:
+            if not isinstance(result.get(field), list):
+                result[field] = []
+        return result
+
+    # biomarkers/imagingFindings/comorbidities/existingResultsReviewed added for the OCR/Scribe
+    # gap review's Scribe Phase 2 -- live-verified against a real (translated) Hindi/English
+    # oncology consultation script that ER/PR/Ki-67/exact HER2 IHC score, MRI/CT measurements,
+    # and an entire diabetes/HbA1c comorbidity thread were silently dropped from the structured
+    # draft even from clean input text, because the schema had no field for any of them (they
+    # don't fit chiefComplaint/hpi/primaryDiagnosis's narrower definitions). Purely additive --
+    # this schema/prompt is SHARED with the general hospital's non-oncology OPD scribe
+    # (backend/app/main.py's POST /api/scribe, and every IPD voice feature -- see this module's
+    # docstring), so a consultation with nothing relevant to say for these fields must produce
+    # exactly the same output as before this change (empty arrays), never a behavior change for
+    # existing General Medicine usage.
     _NOTE_DEFAULT_FIELDS = {
         "chiefComplaint": "", "hpi": "", "physicalExam": "", "primaryDiagnosis": "",
-        "differentialDiagnosis": "", "medications": [], "advice": "", "labTests": []
+        "differentialDiagnosis": "", "medications": [], "advice": "", "labTests": [],
+        "biomarkers": [], "imagingFindings": [], "comorbidities": [], "existingResultsReviewed": [],
     }
     _NOTE_NARRATIVE_FIELDS = (
         "chiefComplaint", "hpi", "physicalExam", "primaryDiagnosis", "differentialDiagnosis", "advice"
+    )
+    # Fields the prompt asks for as a JSON array -- Groq's prompt-only JSON (no schema
+    # enforcement, unlike gemini_client.py's Gemini calls elsewhere in this codebase) doesn't
+    # guarantee the model actually returns a list for these; see _coerce_array_fields.
+    _NOTE_ARRAY_FIELDS = (
+        "medications", "labTests", "biomarkers", "imagingFindings", "comorbidities", "existingResultsReviewed",
     )
 
     def _extract_note_fields(self, transcript: str) -> dict:
@@ -460,7 +502,15 @@ Return a JSON object with the following structure:
         {{"drugName": "", "dose": "", "frequency": "", "route": "", "duration": ""}}
     ],
     "advice": "Clinical advice, warnings and instructions -- INCLUDING generic home-care instructions with no named product (gargling with salt water, hydration, rest, ice/warm compress, steam inhalation, follow-up timing). These never belong in medications -- see system prompt rule 8",
-    "labTests": ["list of recommended tests"]
+    "labTests": ["list of tests/investigations being newly recommended or ordered now -- NEVER a test whose result is being reviewed/discussed as an already-existing report; that goes in existingResultsReviewed below instead. Blank array if nothing is being newly ordered"],
+    "biomarkers": [
+        {{"marker": "The exact biomarker/receptor name as spoken (e.g. ER, PR, HER2, Ki-67)", "result": "The exact reported value/score, verbatim (e.g. '<1%, negative', 'IHC 3+, positive', '~60%'). Never round, simplify, or drop a stated percentage/score"}}
+    ],
+    "imagingFindings": [
+        {{"study": "The imaging study/modality as spoken (e.g. Mammography, MRI breast, CT chest/abdomen/pelvis, USG axilla)", "finding": "The exact reported finding, including any stated measurement, size, or anatomical location (e.g. '5.4 cm irregular enhancing lesion, 2 o'clock position'). Never round or drop a stated number"}}
+    ],
+    "comorbidities": ["Other medical conditions/diagnoses mentioned that are NOT the primary complaint being addressed today (e.g. 'Type 2 diabetes mellitus, ~12 years, HbA1c 8.3%'), including any stated duration or lab value tied to that condition. Blank array if none mentioned"],
+    "existingResultsReviewed": ["Tests/reports/imaging explicitly discussed as ALREADY DONE/being reviewed right now (e.g. a biopsy, MRI, or CT the doctor is reading out results from) -- these must NEVER also appear in labTests above, since nothing new is being ordered for them. Blank array if nothing existing was reviewed"]
 }}"""
         result = self._generate_json(prompt, temperature=0.3, fallback=self._fallback_extract)
         # See _generate_json's own comment on this sentinel: distinguishes "the API call itself
@@ -473,6 +523,7 @@ Return a JSON object with the following structure:
             if key not in result or result[key] is None:
                 result[key] = default_value
         result = self._coerce_string_fields(result, self._NOTE_NARRATIVE_FIELDS)
+        result = self._coerce_array_fields(result, self._NOTE_ARRAY_FIELDS)
         result["_extractionFailed"] = extraction_failed
         return result
 
@@ -510,6 +561,12 @@ Return a JSON object with the following structure:
         a field, rather than losing real content extracted by the per-chunk passes."""
         medications = [m for p in partials for m in (p.get("medications") or [])]
         lab_tests = [t for p in partials for t in (p.get("labTests") or [])]
+        # Same "concatenate, caller dedupes" treatment as medications/labTests above -- see
+        # scribe_transcript's own dedup calls after this merge.
+        biomarkers = [b for p in partials for b in (p.get("biomarkers") or [])]
+        imaging_findings = [f for p in partials for f in (p.get("imagingFindings") or [])]
+        comorbidities = [c for p in partials for c in (p.get("comorbidities") or [])]
+        existing_results_reviewed = [r for p in partials for r in (p.get("existingResultsReviewed") or [])]
         partial_narratives = [{k: p.get(k, "") for k in self._NOTE_NARRATIVE_FIELDS} for p in partials]
 
         system = (
@@ -541,6 +598,10 @@ Return a JSON object with the following structure:
                 result[field] = "\n\n".join(v for v in (p.get(field) for p in partials) if v).strip()
         result["medications"] = medications
         result["labTests"] = lab_tests
+        result["biomarkers"] = biomarkers
+        result["imagingFindings"] = imaging_findings
+        result["comorbidities"] = comorbidities
+        result["existingResultsReviewed"] = existing_results_reviewed
         return result
 
     @staticmethod
@@ -565,6 +626,28 @@ Return a JSON object with the following structure:
             if key and key in seen:
                 continue
             if key:
+                seen.add(key)
+            out.append(item)
+        return out
+
+    @staticmethod
+    def _dedupe_dicts(items: list, key_fields: tuple) -> list:
+        """Same dedup shape as _dedupe_medications, generalized to an arbitrary array-of-dicts
+        field (biomarkers/imagingFindings) -- two chunks of a long, split transcript
+        (_split_transcript_into_chunks) mentioning the exact same biomarker/imaging finding
+        must collapse to one entry, not two. Dedup key is every field in `key_fields` taken
+        together (e.g. both marker AND result) so a genuinely UPDATED value for the same
+        marker/study across the conversation is kept, not silently dropped as a duplicate."""
+        seen = set()
+        out = []
+        for item in items:
+            if not isinstance(item, dict):
+                out.append(item)
+                continue
+            key = tuple(str(item.get(f, "")).strip().lower() for f in key_fields)
+            if any(key) and key in seen:
+                continue
+            if any(key):
                 seen.add(key)
             out.append(item)
         return out
@@ -610,6 +693,13 @@ Return a JSON object with the following structure:
         # Same idea for recommended lab tests: "CBC"/"Widal"/a misspelled test name gets
         # normalized against the canonical lab test master (see lab_test_matcher.py).
         result["labTests"] = self._dedupe_strings(lab_test_matcher.correct_lab_test_names(result["labTests"]))
+        # No canonical dataset to correct names against here (unlike medications/labTests) --
+        # just dedupe. Key fields chosen so a genuinely updated value for the same marker/study
+        # across a long conversation's chunks is kept, not dropped (see _dedupe_dicts).
+        result["biomarkers"] = self._dedupe_dicts(result["biomarkers"], ("marker", "result"))
+        result["imagingFindings"] = self._dedupe_dicts(result["imagingFindings"], ("study", "finding"))
+        result["comorbidities"] = self._dedupe_strings(result["comorbidities"])
+        result["existingResultsReviewed"] = self._dedupe_strings(result["existingResultsReviewed"])
         result["transcriptChunked"] = chunked
         # True when at least one underlying Groq call genuinely failed (API error, exhausted
         # retries) rather than the model looking at real content and finding nothing to report --
@@ -652,16 +742,14 @@ Keep drug names in English. Translate descriptions, instructions, and test names
             returned = dict(draft)
             returned["translationFailed"] = True
             return returned
-        default = {
-            "chiefComplaint": "", "hpi": "", "physicalExam": "", "primaryDiagnosis": "",
-            "differentialDiagnosis": "", "medications": [], "advice": "", "labTests": []
-        }
+        default = dict(self._NOTE_DEFAULT_FIELDS)
         for key in default:
             if key not in result:
                 result[key] = default[key]
         result = self._coerce_string_fields(
             result, ("chiefComplaint", "hpi", "physicalExam", "primaryDiagnosis", "differentialDiagnosis", "advice")
         )
+        result = self._coerce_array_fields(result, self._NOTE_ARRAY_FIELDS)
         result["translationFailed"] = False
         return result
 
