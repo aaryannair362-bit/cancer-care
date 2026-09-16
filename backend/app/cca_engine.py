@@ -683,17 +683,23 @@ FACT_TYPES = (
 # the real documents (data_insurance/) that motivated removing the truncation/ceiling this
 # constant used to have paired with it.
 #
-# Raised from 6000 -- verified live (see rate_limiter.py's own token-bucket calibration notes)
-# that each Groq call pays a large ~1700+ hidden-reasoning-token cost roughly independent of how
-# much real content is in the prompt, so a smaller slice size doesn't make each call cheaper, it
-# just multiplies how many times that fixed cost gets paid for the same document. 18000 chars is
-# ~4500 estimated prompt tokens + up to 2000 completion tokens (~6500 total), still comfortably
-# under rate_limiter.estimate_tokens's own 7500-token per-call cap, while cutting total calls per
-# document roughly 3x for the same content coverage -- a real 126-call multi-page document's
-# call count (both this pass and classify_and_extract_page's per-page/chunk pass, which shares
-# this same constant) drops proportionally, directly reducing how much of the shared per-minute
-# Groq budget one large document upload consumes.
-_PAGE_EXTRACTION_SLICE_CHARS = 18000
+# REVERTED 2026-09-16, same day: was briefly raised 6000 -> 18000 to cut call count (fewer,
+# bigger slices pay this app's own per-call token-rate-limit "tax" less often). That reasoning
+# only accounted for Groq's TOKEN-per-minute rate limit (the estimate_tokens()/token_bucket
+# machinery) -- it never checked Groq's separate, independent request BODY SIZE limit, which is
+# what actually produces a 413 (Payload Too Large), a different failure mode from 429. Confirmed
+# live in production: at 18000 chars, one real document's slice 2/5 got a hard 413 that exhausted
+# all 5 retries and permanently contributed zero facts for that slice's text (extract_clinical_
+# facts's except block only logs a warning and continues -- there is no fallback or later retry
+# for a slice that fails this way). Slicing by CHARACTER count doesn't bound BYTE size either --
+# this codebase explicitly supports Hindi/Devanagari and other multi-byte-UTF-8 content (see
+# scribe.py's Hinglish handling), so the same character count can be a very different number of
+# real bytes depending on which slice of the document it lands on, which is the likely reason
+# slice 1 went through fine while slice 2 of the SAME document hit the body-size ceiling. 6000
+# was the value verified working in production before this was touched -- reverted to it rather
+# than guessing at a new "safer" number without live verification against Groq's real payload
+# limit (which nothing in this codebase had measured before either value was chosen).
+_PAGE_EXTRACTION_SLICE_CHARS = 6000
 
 
 def extract_clinical_facts(document_text: str) -> List[Dict]:
