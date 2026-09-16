@@ -992,6 +992,13 @@
                 if (scribeVoiceRecorder.wasInterrupted()) {
                     statusEl.textContent = '⚠️ Recording was interrupted before you clicked Stop — the transcript below may be incomplete. Review it carefully.';
                     toast('Recording was interrupted — transcript may be incomplete', 'error');
+                } else if (scribeVoiceRecorder.wasPartial()) {
+                    // See frontend/opd.html's stop-consult handler for the full incident
+                    // writeup -- a mid-recording chunk that fails to even reach the server
+                    // (not the 401 case, which is already retried) is silently dropped by
+                    // design; this flag is how the doctor is supposed to find out.
+                    statusEl.textContent = '⚠️ At least one part of the recording failed to transcribe — the transcript below may be missing a slice of the conversation. Review it carefully.';
+                    toast('Part of the recording failed to transcribe — review the transcript carefully', 'error');
                 } else {
                     statusEl.textContent = transcript ? '✅ Transcribed. Review below, then Generate AI Draft.' : 'No speech detected — type manually.';
                 }

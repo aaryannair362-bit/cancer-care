@@ -216,3 +216,73 @@ def test_long_recording_uploads_chunks_periodically_and_joins_the_transcript(
     )
     chief_complaint = js_page.eval_on_selector("#chief-complaint", "el => el.value")
     assert chief_complaint == "Long consultation"
+
+
+def test_dropped_chunk_surfaces_partial_transcript_warning_to_the_doctor(
+    js_page, live_server_url, opd_patient, monkeypatch
+):
+    """
+    Regression test for a real bug found live in production: a mid-recording chunk upload that
+    never reaches the server at all (a transient 5xx, not the 401 case voice-capture.js already
+    retries) is dropped by design -- _rotateChunk()'s fire-and-forget upload swallows the
+    failure so one bad chunk can't crash the recording. main.py's transcribe_audio_chunk_endpoint
+    correctly detects the resulting gap (fewer chunk indices present than the final chunk_index
+    implies) and returns transcriptPartial: true, and voice-capture.js's stop() correctly surfaces
+    it via wasPartial() -- but NO calling page ever called wasPartial(), so a doctor whose
+    consultation lost a real ~3-minute slice this way saw a plain "done" status with zero
+    indication anything was missing. Confirmed live: a real ~20-minute test consultation's
+    transcript came back 3000 characters shorter than an identical prior run, with a clean
+    "Transcribed" status. Fixed across every page that uses voice-capture.js
+    (opd.html/medical_oncologist.html/radiation_oncologist.html/surgical_oncologist.html) to
+    check wasPartial() the same way wasInterrupted() already was; this test pins opd.html's fix.
+
+    Simulates the dropped chunk at the SERVER side (the first chunk's transcription raises,
+    matching transcribe_audio_chunk_endpoint's own except-and-drop path) rather than at the
+    upload/network level, since that's what actually produces transcriptPartial: true --
+    equivalent to (and simpler to simulate than) the real upload-level failure, which has the
+    same server-observable effect: that chunk_index is never present in the session's dict.
+    """
+    import app.main as app_main
+    doctor, patient = opd_patient
+    monkeypatch.setattr(app_main.scribe, "_call_groq_api",
+                         lambda *a, **k: '{"chiefComplaint": "Consultation with a dropped chunk"}')
+
+    call_count = {"n": 0}
+
+    def _fake_transcribe(audio_bytes, content_type, filename):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("simulated transient transcription failure for the first chunk")
+        return "second chunk of the conversation" if call_count["n"] == 2 else "final short chunk"
+
+    monkeypatch.setattr(app_main.scribe, "transcribe_audio", _fake_transcribe)
+
+    tokens = mint_tokens(doctor)
+    set_tokens_in_browser(js_page, live_server_url, tokens["access_token"], tokens["refresh_token"])
+
+    js_page.goto(f"{live_server_url}/opd.html")
+    js_page.wait_for_selector("#patient-select")
+    js_page.wait_for_function("document.querySelector('#patient-select').options.length > 1")
+    js_page.select_option("#patient-select", str(patient.id))
+
+    js_page.clock.install()
+    js_page.click("#start-consult-btn")
+    js_page.wait_for_timeout(150)
+
+    js_page.clock.fast_forward("03:05")  # rotation 1 -- this chunk's transcription will fail
+    js_page.wait_for_timeout(150)
+    js_page.clock.fast_forward("03:05")  # rotation 2 -- succeeds
+    js_page.wait_for_timeout(150)
+
+    js_page.click("#stop-consult-btn")
+    js_page.wait_for_timeout(1200)
+
+    assert js_page.js_errors == [], f"unexpected JS errors: {js_page.js_errors}"
+    transcript_value = js_page.eval_on_selector("#transcript-input", "el => el.value")
+    # The first chunk's text is genuinely missing (not just re-ordered) -- this is the real
+    # data loss the warning below must not silently hide.
+    assert transcript_value == "second chunk of the conversation final short chunk"
+    status_text = js_page.eval_on_selector("#analysis-status", "el => el.textContent")
+    assert "missing slice" in status_text, (
+        f"doctor was not warned about the dropped chunk: {status_text!r}"
+    )

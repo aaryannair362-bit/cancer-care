@@ -443,6 +443,11 @@ let micLevelRAF = null;
 let transcriptionProvider = 'whisper';
 let selectedPatientId = null;
 let currentConsultationId = null;
+// Set when wasPartial() flags a dropped mid-recording chunk (see the stop-consult-btn handler
+// below) -- processConsultation()'s own success/error message unconditionally overwrites
+// analysisStatus moments later, which would otherwise silently clobber the warning before a
+// doctor ever saw it. Read once by processConsultation() and reset there.
+let transcriptWasPartial = false;
 let currentPatientName = '';
 let currentPatientAge = '';
 let currentPatientGender = '';
@@ -945,6 +950,18 @@ document.getElementById('stop-consult-btn').addEventListener('click', async () =
                 setMicStatus('idle', 'Interrupted');
                 analysisStatus.className = 'error';
                 analysisStatus.textContent = '⚠️ Recording was interrupted before you clicked Stop — the transcript may be incomplete. Review it carefully.';
+            } else if (voiceRecorder.wasPartial()) {
+                // Confirmed live: a single mid-recording chunk upload that never reaches the
+                // server at all (a transient 5xx, not a 401 the client already retries) is
+                // silently dropped by design (voice-capture.js's _rotateChunk() swallows it so
+                // one bad chunk can't crash the recording) -- the server-side transcriptPartial
+                // flag exists specifically to catch this, but nothing here was reading it, so a
+                // whole ~3-minute slice of a real consultation vanished from the transcript with
+                // the doctor seeing a plain "done" status and no reason to suspect anything.
+                setMicStatus('idle', 'Partial');
+                analysisStatus.className = 'error';
+                analysisStatus.textContent = '⚠️ At least one part of the recording failed to transcribe — the transcript below may be missing a slice of the conversation. Review it carefully.';
+                transcriptWasPartial = true;
             } else {
                 setMicStatus('idle', 'Idle');
             }
@@ -985,8 +1002,17 @@ async function processConsultation(transcript) {
         populateDraft(data);
         currentConsultationId = data.id || null;
         const taskNote = data.tasks_created ? ` (${data.tasks_created} task${data.tasks_created === 1 ? '' : 's'} sent to nursing)` : '';
-        analysisStatus.className = 'success';
-        analysisStatus.textContent = `✅ Prescription ready!${taskNote} Review and click Finalize & Save when done.`;
+        // transcriptWasPartial's warning (set moments earlier, right after Stop) would
+        // otherwise be silently overwritten right here -- this is the ONLY status update this
+        // handler makes on the success path, so it's the one place that must carry the warning
+        // forward if there was one, not just the transcribing-in-progress message a doctor
+        // would likely miss anyway in a fast-moving auto-chained flow.
+        const partialNote = transcriptWasPartial
+            ? ' ⚠️ Part of the recording failed to transcribe — review the transcript above for a missing slice before finalising.'
+            : '';
+        transcriptWasPartial = false;
+        analysisStatus.className = partialNote ? 'error' : 'success';
+        analysisStatus.textContent = `✅ Prescription ready!${taskNote} Review and click Finalize & Save when done.${partialNote}`;
         loadConsultations();
         await checkInteractions();
     } catch(e) {
