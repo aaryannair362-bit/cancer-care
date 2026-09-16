@@ -84,6 +84,9 @@ class CCAConsent(Base):
     # Same idea as treatment_plan_id above, for a specific SurgicalPlan (surgical-oncology
     # missing-development round) -- procedure-specific consent, not assumed from plan creation.
     surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=True)
+    # Same idea again, for a specific RadiationPrescription (radiation missing-development
+    # round) -- radiation-specific consent, not assumed from course creation.
+    radiation_prescription_id = Column(Integer, ForeignKey("cca_radiation_prescriptions.id"), nullable=True)
     captured_by = Column(String(200))
     valid_from = Column(DateTime, default=datetime.utcnow)
     status = Column(String(30), default="ACTIVE")

@@ -79,6 +79,42 @@ class RadiationPrescription(Base):
     signer_email = Column(String(200), nullable=True)
     signer_role = Column(String(50), nullable=True)
     signed_at = Column(DateTime, nullable=True)
+    # Radiation Oncology missing-development round: Draft/Signed/Amended/Discontinued lifecycle
+    # (PDF item 1) -- previously this row was created already-signed with no draft state and no
+    # amend/discontinue path at all. Defaults to "Signed" so every existing caller/test that
+    # creates-and-signs-immediately keeps working unchanged; a caller now opts into a draft via
+    # create_radiation_prescription's own "draft" body flag. "Completed"/"PartiallyCompleted"
+    # are appended later (see RadiationPrescription.completed_at below) by the Treatment
+    # Completion round -- appended-only, this column's existing three values are never renamed.
+    status = Column(String(30), default="Signed")
+    discontinued_reason = Column(Text, nullable=True)
+    discontinued_by = Column(String(200), nullable=True)
+    discontinued_at = Column(DateTime, nullable=True)
+    # Same field name/pattern as SurgicalPlan.mdt_decision_id -- links this course to the actual
+    # MDT DECISION (not just mdt_case_id above, which only shows a case exists) once the team
+    # has one, without forcing every course through MDT (nullable).
+    mdt_decision_id = Column(Integer, ForeignKey("cca_mdt_decisions.id"), nullable=True)
+    # Radiation Oncology missing-development round, Treatment Completion (PDF item 12) -- course
+    # wrap-up fields, set together by the completion-summary endpoint alongside `status` above.
+    follow_up_plan = Column(Text, nullable=True)
+    follow_up_clinician = Column(String(200), nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    completion_summary = Column(Text, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RadiationPrescriptionVersion(Base):
+    """Amendment history for RadiationPrescription -- same snapshot-plus-mandatory-reason shape
+    as SurgicalPlanVersion (models_cca_oncology_ext.py): a full JSON snapshot of the course's
+    prior state plus a mandatory reason, appended whenever an already-Signed/Amended course is
+    amended. Never mutated after creation."""
+    __tablename__ = "cca_radiation_prescription_versions"
+    id = Column(Integer, primary_key=True)
+    prescription_id = Column(Integer, ForeignKey("cca_radiation_prescriptions.id"), nullable=False)
+    version_no = Column(Integer, nullable=False)
+    snapshot = Column(JSON, nullable=False)
+    change_reason = Column(Text, nullable=False)
     created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
     # --- unused legacy columns, see class docstring ---
@@ -154,8 +190,183 @@ class CCARadiationPhase(Base):
     physician_signer_role = Column(String(50), nullable=True)
     physician_signed_at = Column(DateTime, nullable=True)
     physician_approval_note = Column(Text, nullable=True)
+    # Radiation missing-development round, per-phase technique override (both PDFs explicitly
+    # want technique to be able to differ phase to phase, e.g. a boost delivered by a different
+    # technique than the main course) -- nullable; an unset phase falls back to the course-level
+    # RadiationPrescription.technique at the read/display layer, never duplicated into storage.
+    technique = Column(String(100), nullable=True)
+    # Advisory-only flag (never a hard transition block, same conservative approach as every
+    # other new gate in this round): set when a RadiationInterruption is recorded against this
+    # phase, or when the parent RadiationPrescription is amended -- surfaces "this phase's
+    # physics sign-off was given against conditions that have since changed" on the worklist/
+    # dashboard so a physicist can consciously re-check and acknowledge, without silently
+    # invalidating an already-Approved physics QA decision.
+    physics_review_required = Column(Boolean, default=False)
+    physics_review_acknowledged_by = Column(String(200), nullable=True)
+    physics_review_acknowledged_at = Column(DateTime, nullable=True)
+    # Radiation missing-development round, Batch 4 -- Physics Worklist ergonomics (both PDFs'
+    # "Make It Actionable" sections): clinical/operational priority, ownership, and planning
+    # deadlines, none of which existed before -- the worklist had no way to sort/filter beyond
+    # rt_sub_status itself.
+    priority = Column(String(20), default="Routine")  # Urgent, Routine
+    assigned_physicist = Column(String(200), nullable=True)
+    assigned_at = Column(DateTime, nullable=True)
+    physics_review_due_date = Column(Date, nullable=True)
+    treatment_start_due_date = Column(Date, nullable=True)
     created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RadiationSimulationRecord(Base):
+    """Radiation missing-development round, Batch 2 -- CT simulation & dataset readiness check
+    (both PDFs' "Simulation & Dataset Readiness" sections), previously represented only by
+    CCARadiationPhase's own simulation_required bool + immobilization string with nothing
+    capturing what was actually checked or confirming the dataset ever arrived. One row per
+    simulation attempt (a rejected/incomplete sim may need a re-attempt, each its own row --
+    never overwritten) linked to the phase it's readying for planning."""
+    __tablename__ = "cca_radiation_simulation_records"
+    id = Column(Integer, primary_key=True)
+    phase_id = Column(Integer, ForeignKey("cca_radiation_phases.id"), nullable=False)
+    simulation_date = Column(Date, nullable=True)
+    modality = Column(String(50), nullable=True)  # CT Sim, MRI Sim, 4D-CT, PET-CT
+    immobilization_device = Column(String(200), nullable=True)
+    contrast_used = Column(Boolean, nullable=True)
+    ct_dataset_status = Column(String(30), default="Pending")  # Pending, Acquired, Transferred, Rejected
+    dataset_transferred_to_tps = Column(Boolean, default=False)
+    rejection_reason = Column(Text, nullable=True)
+    performed_by = Column(String(200), nullable=True)
+    performed_at = Column(DateTime, default=datetime.utcnow)
+    # readiness_status is the physicist's own explicit sign-off that this simulation is usable
+    # for planning -- distinct from ct_dataset_status above (which only tracks whether the scan
+    # itself was acquired/transferred, not whether it's clinically acceptable).
+    readiness_status = Column(String(30), default="Pending")  # Pending, Ready, NotReady
+    reviewed_by = Column(String(200), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+
+
+class RadiationStructureSet(Base):
+    """Radiation missing-development round, Batch 2 -- target/OAR contour status with an
+    explicit approval gate (both PDFs' "Contouring / Target & OAR Definition" sections).
+    target_volumes_snapshot/organs_at_risk_snapshot are SNAPSHOTS of CCARadiationPhase's own
+    target_volumes/organs_at_risk JSON at the moment this structure set was submitted for
+    review -- never a live reference to the phase's own (still-editable) blobs, so contour
+    history survives even if the phase's JSON is later re-edited for a subsequent version."""
+    __tablename__ = "cca_radiation_structure_sets"
+    id = Column(Integer, primary_key=True)
+    phase_id = Column(Integer, ForeignKey("cca_radiation_phases.id"), nullable=False)
+    version_no = Column(Integer, default=1)
+    target_volumes_snapshot = Column(JSON, nullable=True)
+    organs_at_risk_snapshot = Column(JSON, nullable=True)
+    image_fusion_reference = Column(String(255), nullable=True)  # e.g. "PET-CT fused, dated ..." -- reference text only
+    status = Column(String(30), default="Draft")  # Draft, PendingReview, Reviewed, Approved, Rejected
+    contoured_by = Column(String(200), nullable=True)
+    contoured_at = Column(DateTime, nullable=True)
+    reviewed_by = Column(String(200), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    review_note = Column(Text, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RadiationTreatmentPlanVersion(Base):
+    """Radiation missing-development round, Batch 3 -- the "Treatment Planning Workspace"
+    both PDFs describe (plan identity/version, technique, calculation record, three-person
+    reviewer chain, supersede-not-overwrite versioning). Previously CCARadiationPhase itself
+    stood in for "the plan" with no version identity at all -- this is the real, persisted
+    plan object a phase's dosimetric review/patient-specific QA now reference.
+
+    Uses a SUPERSEDE-CHAIN shape (supersedes_id, like TreatmentPlan.supersedes_id) rather than
+    the snapshot-on-amend shape used elsewhere in this round (e.g. RadiationPrescriptionVersion)
+    -- both PDFs explicitly ask for "new versions supersede rather than overwrite", i.e. a new
+    row entirely, not a diff against the old one. "The active version" is never a stored flag:
+    always computed at read time as the latest status="Approved" row whose id is not itself
+    referenced by a later row's supersedes_id (see get_active_radiation_plan_version)."""
+    __tablename__ = "cca_radiation_treatment_plan_versions"
+    id = Column(Integer, primary_key=True)
+    phase_id = Column(Integer, ForeignKey("cca_radiation_phases.id"), nullable=False)
+    version_no = Column(Integer, nullable=False)
+    plan_name = Column(String(200), nullable=True)
+    technique = Column(String(100), nullable=True)
+    calculation_status = Column(String(30), default="Pending")  # Pending, Calculated, Recalculated, Superseded
+    calculation_algorithm = Column(String(100), nullable=True)  # e.g. "AAA", "AcurosXB" -- reference text only, never computed here
+    external_plan_reference = Column(String(255), nullable=True)  # OIS/TPS plan id, same precedent as RadiationPrescription.dicom_rt_plan_ref
+    created_by = Column(String(200), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    checked_by = Column(String(200), nullable=True)  # independent second-person check, distinct from created_by
+    checked_at = Column(DateTime, nullable=True)
+    approved_by = Column(String(200), nullable=True)  # release-approval reviewer, distinct from checked_by
+    approved_at = Column(DateTime, nullable=True)
+    status = Column(String(30), default="Draft")  # Draft, Checked, Approved, Superseded
+    supersedes_id = Column(Integer, ForeignKey("cca_radiation_treatment_plan_versions.id"), nullable=True)
+    notes = Column(Text, nullable=True)
+
+
+class RadiationDosimetricReview(Base):
+    """Radiation missing-development round, Batch 3 -- structured numeric dosimetric review
+    (both PDFs' "Dose Calculation & Dosimetric Review" sections), distinct from
+    CCARadiationPhase.physics_qa_checklist's boolean attestation (dose_volume_constraint_review/
+    target_oar_coverage_review keys) -- this is the underlying reviewed data those attestations
+    are ABOUT, not a replacement for the attestation gate itself. Metrics are clinician/
+    physicist-typed reference values (e.g. "D95: 98.2%"), never compared or derived by this
+    repo (standing rule)."""
+    __tablename__ = "cca_radiation_dosimetric_reviews"
+    id = Column(Integer, primary_key=True)
+    phase_id = Column(Integer, ForeignKey("cca_radiation_phases.id"), nullable=False)
+    plan_version_id = Column(Integer, ForeignKey("cca_radiation_treatment_plan_versions.id"), nullable=True)
+    target_coverage_metrics = Column(JSON, nullable=True)  # [{"structure": "PTV_boost", "metric": "D95", "value": "98.2%"}, ...]
+    oar_dose_metrics = Column(JSON, nullable=True)  # [{"structure": "Rectum", "metric": "V50", "value": "32%"}, ...]
+    hotspot_dose = Column(String(100), nullable=True)
+    conformity_index = Column(String(50), nullable=True)
+    homogeneity_index = Column(String(50), nullable=True)
+    outcome = Column(String(30), nullable=True)  # Pass, Fail, Conditional
+    comments = Column(Text, nullable=True)  # required by the endpoint when outcome != Pass
+    reviewed_by = Column(String(200), nullable=True)
+    reviewed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RadiationPatientSpecificQA(Base):
+    """Radiation missing-development round, Batch 3 -- the actual measurement/verification
+    record backing CCARadiationPhase.physics_qa_checklist's "patient_specific_qa_review"
+    attestation key, distinct from RadiationInVivoDosimetry (which measures dose DURING a
+    delivered fraction, not a pre-treatment machine QA measurement of the plan itself). Every
+    field is physicist-typed reference text -- method/tolerance/result are recorded as
+    performed, never computed or compared by this repo."""
+    __tablename__ = "cca_radiation_patient_specific_qa_records"
+    id = Column(Integer, primary_key=True)
+    phase_id = Column(Integer, ForeignKey("cca_radiation_phases.id"), nullable=False)
+    plan_version_id = Column(Integer, ForeignKey("cca_radiation_treatment_plan_versions.id"), nullable=True)
+    method = Column(String(100), nullable=True)  # e.g. Portal Dosimetry, ArcCHECK, Film
+    measurement_date = Column(Date, nullable=True)
+    equipment = Column(String(200), nullable=True)
+    measured_result = Column(String(200), nullable=True)  # e.g. "Gamma 99.1% (3%/2mm)" -- reference value only
+    tolerance = Column(String(200), nullable=True)  # reference text, e.g. institution's stated acceptance criterion
+    outcome = Column(String(30), nullable=True)  # Pass, Fail, Conditional -- physicist's own judgment
+    comments = Column(Text, nullable=True)  # required by the endpoint when outcome != Pass
+    performed_by = Column(String(200), nullable=True)
+    reviewed_by = Column(String(200), nullable=True)
+    performed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RadiationPrescriptionVerification(Base):
+    """Radiation missing-development round, Batch 3 -- the physicist's explicit "I verified
+    the planning request matches the signed Radiation Oncologist prescription" action (both
+    PDFs' "Radiation Prescription Verification -- Critical" section), distinct from
+    physics_qa's later, broader release-gate attestation. Also carries the mismatch/return-to-
+    Radiation-Oncologist workflow: a documented reason and an explicit resolution step, rather
+    than the physicist silently editing the prescription themselves."""
+    __tablename__ = "cca_radiation_prescription_verifications"
+    id = Column(Integer, primary_key=True)
+    phase_id = Column(Integer, ForeignKey("cca_radiation_phases.id"), nullable=False)
+    reviewer = Column(String(200), nullable=True)
+    reviewed_at = Column(DateTime, default=datetime.utcnow)
+    outcome = Column(String(30), nullable=False)  # Verified, Mismatch
+    comments = Column(Text, nullable=True)  # required by the endpoint when outcome == Mismatch
+    returned_to_ro = Column(Boolean, default=False)
+    returned_at = Column(DateTime, nullable=True)
+    resolved = Column(Boolean, default=False)
+    resolved_note = Column(Text, nullable=True)
+    resolved_by = Column(String(200), nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
 
 
 class RadiationFraction(Base):
@@ -985,8 +1196,66 @@ class RadiationEquipmentIssue(Base):
     return_to_service_by = Column(String(200), nullable=True)
     return_to_service_checks = Column(Text, nullable=True)
     incident_reference = Column(String(100), nullable=True)
-    status = Column(String(30), default="OPEN")  # OPEN, RESOLVED
+    # Radiation missing-development round, Batch 5 -- OPEN/RESOLVED are kept EXACTLY as they
+    # were (report_equipment_issue/resolve_equipment_issue's existing one-call OPEN->RESOLVED
+    # contract is unchanged) -- INVESTIGATING/VERIFIED/CLOSED are new states appended reachable
+    # only from RESOLVED onward via the new update_equipment_issue_status endpoint, never
+    # inserted between the original two.
+    status = Column(String(30), default="OPEN")  # OPEN, RESOLVED, INVESTIGATING, VERIFIED, CLOSED
+    # Optional -- existing report_equipment_issue callers that omit it keep working; category
+    # above is the issue TYPE, severity is the operational impact, a distinct concept.
+    severity = Column(String(20), nullable=True)  # Critical, Major, Minor
+    investigating_started_at = Column(DateTime, nullable=True)
+    corrective_action = Column(Text, nullable=True)
+    corrective_action_by = Column(String(200), nullable=True)
+    corrective_action_at = Column(DateTime, nullable=True)
+    verified_by = Column(String(200), nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+    closed_by = Column(String(200), nullable=True)
+    closed_at = Column(DateTime, nullable=True)
     reported_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RadiationSafetyIncident(Base):
+    """Radiation missing-development round, Batch 5 -- Incident / Near-Miss / Radiation Safety
+    Record (both PDFs' "Incident / Near-Miss / Radiation Safety Record" sections), previously
+    entirely absent from this codebase. Organization-level, not purely patient-keyed -- a
+    process/equipment near-miss (e.g. a machine interlock fault caught before any patient was
+    affected) may have no patient at all, so every link below is nullable except the
+    organization itself.
+
+    Deliberately separate from RadiationDiscrepancyRecord (a physics-QA-stage finding against
+    one specific phase's plan) and RadiationEquipmentIssue (an equipment fault report) -- this
+    is the broader safety-event record either of those (or a purely process failure with no
+    equipment/plan involved at all) may escalate into, with its own root-cause/corrective/
+    preventive-action investigation lifecycle."""
+    __tablename__ = "cca_radiation_safety_incidents"
+    id = Column(Integer, primary_key=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=True)
+    phase_id = Column(Integer, ForeignKey("cca_radiation_phases.id"), nullable=True)
+    fraction_id = Column(Integer, ForeignKey("cca_radiation_fractions.id"), nullable=True)
+    treatment_unit_id = Column(Integer, ForeignKey("cca_radiation_treatment_units.id"), nullable=True)
+    equipment_issue_id = Column(Integer, ForeignKey("cca_radiation_equipment_issues.id"), nullable=True)
+    incident_type = Column(String(30), nullable=False)  # Incident, NearMiss
+    category = Column(String(100), nullable=True)  # Wrong Patient, Wrong Site, Dose Deviation, Equipment Malfunction, Process Failure, Other
+    severity = Column(String(20), nullable=False)  # Critical, Major, Minor -- same vocabulary as RadiationEquipmentIssue.severity
+    description = Column(Text, nullable=False)
+    immediate_action_taken = Column(Text, nullable=True)
+    reported_by = Column(String(200), nullable=True)
+    reported_at = Column(DateTime, default=datetime.utcnow)
+    investigation_status = Column(String(30), default="Reported")  # Reported, UnderInvestigation, RootCauseIdentified, CorrectiveActionPlanned, Closed
+    root_cause = Column(Text, nullable=True)
+    corrective_action_plan = Column(Text, nullable=True)
+    preventive_action = Column(Text, nullable=True)
+    reviewed_by = Column(String(200), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    closed_by = Column(String(200), nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    # A physicist-set flag only -- this app never auto-submits anything to a regulator; it
+    # just records that this event was judged reportable so follow-up isn't missed.
+    regulatory_reportable = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

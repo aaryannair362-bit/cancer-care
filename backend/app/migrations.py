@@ -308,6 +308,46 @@ ADDITIVE_COLUMNS = [
     # SurgicalPlan, reusing the existing CCAConsent model (same precedent as
     # cca_consents.treatment_plan_id above) instead of a redundant status column on the plan.
     ("cca_consents", "surgical_plan_id", "INTEGER"),
+    # Radiation missing-development round, Batch 1: RadiationPrescription Draft/Signed/Amended/
+    # Discontinued lifecycle, MDT decision linkage, and Treatment Completion fields -- see each
+    # column's docstring on RadiationPrescription.
+    ("cca_radiation_prescriptions", "status", "VARCHAR(30) DEFAULT 'Signed'"),
+    ("cca_radiation_prescriptions", "discontinued_reason", "TEXT"),
+    ("cca_radiation_prescriptions", "discontinued_by", "VARCHAR(200)"),
+    ("cca_radiation_prescriptions", "discontinued_at", "TIMESTAMP"),
+    ("cca_radiation_prescriptions", "mdt_decision_id", "INTEGER"),
+    ("cca_radiation_prescriptions", "follow_up_plan", "TEXT"),
+    ("cca_radiation_prescriptions", "follow_up_clinician", "VARCHAR(200)"),
+    ("cca_radiation_prescriptions", "completed_at", "TIMESTAMP"),
+    ("cca_radiation_prescriptions", "completion_summary", "TEXT"),
+    # Radiation missing-development round: procedure-specific consent tracking on
+    # RadiationPrescription, same pattern as cca_consents.surgical_plan_id above.
+    ("cca_consents", "radiation_prescription_id", "INTEGER"),
+    # Radiation missing-development round, Batches 2/3: per-phase technique override and the
+    # advisory physics-review-required flag -- see each column's docstring on CCARadiationPhase.
+    ("cca_radiation_phases", "technique", "VARCHAR(100)"),
+    ("cca_radiation_phases", "physics_review_required", "BOOLEAN DEFAULT FALSE"),
+    ("cca_radiation_phases", "physics_review_acknowledged_by", "VARCHAR(200)"),
+    ("cca_radiation_phases", "physics_review_acknowledged_at", "TIMESTAMP"),
+    # Radiation missing-development round, Batch 4: Physics Worklist ergonomics -- see each
+    # column's docstring on CCARadiationPhase.
+    ("cca_radiation_phases", "priority", "VARCHAR(20) DEFAULT 'Routine'"),
+    ("cca_radiation_phases", "assigned_physicist", "VARCHAR(200)"),
+    ("cca_radiation_phases", "assigned_at", "TIMESTAMP"),
+    ("cca_radiation_phases", "physics_review_due_date", "DATE"),
+    ("cca_radiation_phases", "treatment_start_due_date", "DATE"),
+    # Radiation missing-development round, Batch 5: RadiationEquipmentIssue severity + lifecycle
+    # expansion (states appended reachable from RESOLVED onward, OPEN/RESOLVED unchanged) --
+    # see each column's docstring on RadiationEquipmentIssue.
+    ("cca_radiation_equipment_issues", "severity", "VARCHAR(20)"),
+    ("cca_radiation_equipment_issues", "investigating_started_at", "TIMESTAMP"),
+    ("cca_radiation_equipment_issues", "corrective_action", "TEXT"),
+    ("cca_radiation_equipment_issues", "corrective_action_by", "VARCHAR(200)"),
+    ("cca_radiation_equipment_issues", "corrective_action_at", "TIMESTAMP"),
+    ("cca_radiation_equipment_issues", "verified_by", "VARCHAR(200)"),
+    ("cca_radiation_equipment_issues", "verified_at", "TIMESTAMP"),
+    ("cca_radiation_equipment_issues", "closed_by", "VARCHAR(200)"),
+    ("cca_radiation_equipment_issues", "closed_at", "TIMESTAMP"),
 ]
 
 

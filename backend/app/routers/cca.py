@@ -682,6 +682,16 @@ async def capture_consent(
         if not surgical_plan:
             raise HTTPException(422, "surgical_plan_id does not reference a Surgical Plan for this patient")
 
+    # Same idea again, for a specific RadiationPrescription (radiation missing-development
+    # round) -- optional, a generic consent still works unchanged with no radiation_prescription_id.
+    radiation_prescription_id = body.get("radiation_prescription_id")
+    if radiation_prescription_id is not None:
+        radiation_rx = db.query(RadiationPrescription).filter(
+            RadiationPrescription.id == radiation_prescription_id, RadiationPrescription.patient_id == patient_id
+        ).first()
+        if not radiation_rx:
+            raise HTTPException(422, "radiation_prescription_id does not reference a Radiation Prescription for this patient")
+
     actor = _actor(current_user)
     consent = CCAConsent(
         patient_id=patient_id,
@@ -690,6 +700,7 @@ async def capture_consent(
         signatory_reason=body.get("signatory_reason"),
         treatment_plan_id=treatment_plan_id,
         surgical_plan_id=surgical_plan_id,
+        radiation_prescription_id=radiation_prescription_id,
         captured_by=actor,
         status="ACTIVE",
     )
@@ -709,6 +720,7 @@ async def capture_consent(
             "id": consent.id, "patient_id": consent.patient_id, "consent_types": consent.consent_types,
             "signatory": consent.signatory, "status": consent.status, "treatment_plan_id": consent.treatment_plan_id,
             "surgical_plan_id": consent.surgical_plan_id,
+            "radiation_prescription_id": consent.radiation_prescription_id,
             "valid_from": consent.valid_from.isoformat() if consent.valid_from else None,
         },
     }

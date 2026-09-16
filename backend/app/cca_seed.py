@@ -39,7 +39,11 @@ from .models_cca import (
     ClaimRecord, RefundCreditNote, CCAFinancialCase,
 )
 from .models_cca_oncology_ext import (
-    TreatmentOrderDrugLine, RadiationPrescription, CCARadiationPhase, RadiationFraction,
+    TreatmentOrderDrugLine, RadiationPrescription, RadiationPrescriptionVersion,
+    RadiationSimulationRecord, RadiationStructureSet,
+    RadiationTreatmentPlanVersion, RadiationDosimetricReview, RadiationPatientSpecificQA,
+    RadiationPrescriptionVerification, RadiationSafetyIncident,
+    CCARadiationPhase, RadiationFraction,
     RadiationInterruption, RadiationOnTreatmentVisit,
     RadiationDiscrepancyRecord, RadiationPreTreatmentVerification,
     RadiationInVivoDosimetry, RadiationOncologyConsultation,
@@ -115,6 +119,14 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # above), not patient data, so they stay out of this list too.
             # RadiationInVivoDosimetry IS patient/fraction data -- cleaned up above via
             # fraction_ids alongside RadiationPreTreatmentVerification.
+            # RadiationSafetyIncident (radiation missing-development round) is NOT the same
+            # case as the equipment models just above, despite also being org-scoped rather
+            # than purely patient-keyed -- it carries a nullable patient_id (a process/
+            # equipment near-miss may have none, but a patient-linked incident is a real,
+            # common case), so leaving it out here would let patient-linked incident rows go
+            # stale across resets exactly the way this file's own registration rule exists to
+            # prevent. Deleted by organization_id directly below instead (it already carries
+            # that column, so no patient_id lookup is needed).
             # Day Care / Treatment Order / Pharmacy universe (Phases 1-7 and Batches 1-2 of the
             # Product 1 vs Product 2 gap-closing initiative) -- previously entirely missing from
             # this reset, so repeated demo/reset calls accumulated stale TreatmentOrder rows that
@@ -171,6 +183,12 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             CCAIntakeAssessment,
             CCAEncounter, CCAQueueEvent, CCAConsent
         ]
+        # RadiationSafetyIncident is organization-scoped, not purely patient-keyed (see its
+        # own comment above in child_models_by_patient) -- deleted directly by organization_id
+        # rather than via org_patient_ids, so it's cleaned up even though it's not in that list.
+        db.query(RadiationSafetyIncident).filter(
+            RadiationSafetyIncident.organization_id == organization_id
+        ).delete(synchronize_session=False)
         if org_patient_ids:
             # MDTActionItem/MDTMeetingMinutes have no patient_id of their own -- delete them
             # via their parent MDTCase ids before MDTCase itself is deleted below.
@@ -280,6 +298,13 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
                 ).all()
             ]
             if rx_ids:
+                # Radiation missing-development round -- RadiationPrescriptionVersion has no
+                # patient_id of its own, deleted via this rx_ids lookup before
+                # RadiationPrescription itself is deleted below (same pattern as
+                # SurgicalPlanVersion via surgical_plan_ids).
+                db.query(RadiationPrescriptionVersion).filter(
+                    RadiationPrescriptionVersion.prescription_id.in_(rx_ids)
+                ).delete(synchronize_session=False)
                 phase_ids = [
                     row.id for row in db.query(CCARadiationPhase.id).filter(
                         CCARadiationPhase.prescription_id.in_(rx_ids)
@@ -317,6 +342,27 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
                     # reasoning as RadiationInterruption/RadiationOnTreatmentVisit above.
                     db.query(RadiationDiscrepancyRecord).filter(
                         RadiationDiscrepancyRecord.phase_id.in_(phase_ids)
+                    ).delete(synchronize_session=False)
+                    # Radiation missing-development round -- all keyed by phase_id, no
+                    # patient_id of their own, same reasoning as every other phase_id-keyed
+                    # deletion in this block.
+                    db.query(RadiationSimulationRecord).filter(
+                        RadiationSimulationRecord.phase_id.in_(phase_ids)
+                    ).delete(synchronize_session=False)
+                    db.query(RadiationStructureSet).filter(
+                        RadiationStructureSet.phase_id.in_(phase_ids)
+                    ).delete(synchronize_session=False)
+                    db.query(RadiationTreatmentPlanVersion).filter(
+                        RadiationTreatmentPlanVersion.phase_id.in_(phase_ids)
+                    ).delete(synchronize_session=False)
+                    db.query(RadiationDosimetricReview).filter(
+                        RadiationDosimetricReview.phase_id.in_(phase_ids)
+                    ).delete(synchronize_session=False)
+                    db.query(RadiationPatientSpecificQA).filter(
+                        RadiationPatientSpecificQA.phase_id.in_(phase_ids)
+                    ).delete(synchronize_session=False)
+                    db.query(RadiationPrescriptionVerification).filter(
+                        RadiationPrescriptionVerification.phase_id.in_(phase_ids)
                     ).delete(synchronize_session=False)
                     db.query(CCARadiationPhase).filter(
                         CCARadiationPhase.id.in_(phase_ids)

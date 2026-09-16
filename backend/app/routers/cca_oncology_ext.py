@@ -28,6 +28,9 @@ from ..models_cca import CCAConsent, CCAPatient, CCAResult, DomainEvent, MDTCase
 from ..models_cca import ResponseAssessment, ToxicityEvent, TreatmentPlan
 from ..models_cca_oncology_ext import (
     CCARadiationPhase, OncologyRecordExtension, RadiationFraction, RadiationPrescription,
+    RadiationPrescriptionVersion, RadiationSimulationRecord, RadiationStructureSet,
+    RadiationTreatmentPlanVersion, RadiationDosimetricReview, RadiationPatientSpecificQA,
+    RadiationPrescriptionVerification, RadiationSafetyIncident,
     RadiationInterruption, RadiationOnTreatmentVisit,
     RadiationDiscrepancyRecord, RadiationPreTreatmentVerification,
     RadiationTreatmentUnit, RadiationEquipmentQARecord, RadiationEquipmentIssue,
@@ -157,7 +160,18 @@ def _rt_prescription_out(rx: RadiationPrescription) -> dict:
         "special_instructions": rx.special_instructions, "dicom_rt_plan_ref": rx.dicom_rt_plan_ref,
         "signer_email": rx.signer_email, "signer_role": rx.signer_role,
         "signed_at": rx.signed_at.isoformat() if rx.signed_at else None, "created_by": rx.created_by,
+        "status": rx.status, "discontinued_reason": rx.discontinued_reason,
+        "discontinued_by": rx.discontinued_by,
+        "discontinued_at": rx.discontinued_at.isoformat() if rx.discontinued_at else None,
+        "mdt_decision_id": rx.mdt_decision_id,
+        "follow_up_plan": rx.follow_up_plan, "follow_up_clinician": rx.follow_up_clinician,
+        "completed_at": rx.completed_at.isoformat() if rx.completed_at else None,
+        "completion_summary": rx.completion_summary,
     }
+
+
+def _rt_prescription_snapshot(rx: RadiationPrescription) -> dict:
+    return {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in _rt_prescription_out(rx).items()}
 
 
 def _rt_phase_out(p: CCARadiationPhase) -> dict:
@@ -179,6 +193,14 @@ def _rt_phase_out(p: CCARadiationPhase) -> dict:
         "physician_signer_email": p.physician_signer_email, "physician_signer_role": p.physician_signer_role,
         "physician_signed_at": p.physician_signed_at.isoformat() if p.physician_signed_at else None,
         "physician_approval_note": p.physician_approval_note,
+        "technique": p.technique,
+        "physics_review_required": p.physics_review_required,
+        "physics_review_acknowledged_by": p.physics_review_acknowledged_by,
+        "physics_review_acknowledged_at": p.physics_review_acknowledged_at.isoformat() if p.physics_review_acknowledged_at else None,
+        "priority": p.priority, "assigned_physicist": p.assigned_physicist,
+        "assigned_at": p.assigned_at.isoformat() if p.assigned_at else None,
+        "physics_review_due_date": p.physics_review_due_date.isoformat() if p.physics_review_due_date else None,
+        "treatment_start_due_date": p.treatment_start_due_date.isoformat() if p.treatment_start_due_date else None,
         "created_by": p.created_by,
     }
 
@@ -372,12 +394,20 @@ async def create_radiation_prescription(request: Request, db: Session = Depends(
     if consultation.cied_present and not consultation.cied_management_plan:
         raise HTTPException(409, "The patient's CIED management plan must be documented before prescribing a course")
 
+    # Radiation Oncology missing-development round, PDF item 1 (prescription status) -- a
+    # caller now opts into a draft via "draft": true instead of the course being signed the
+    # instant it's created; every existing caller that omits this flag keeps the original
+    # create-and-sign-immediately behavior unchanged.
+    is_draft = bool(body.get("draft", False))
     rx = RadiationPrescription(
         patient_id=patient_id, mdt_case_id=body.get("mdt_case_id"), diagnosis=body.get("diagnosis"),
         intent=body.get("intent"), modality=body.get("modality"), technique=body.get("technique"),
         concurrent_systemic_treatment=bool(body.get("concurrent_systemic_treatment", False)),
         special_instructions=body.get("special_instructions"), dicom_rt_plan_ref=body.get("dicom_rt_plan_ref"),
-        signer_email=current_user.get("email"), signer_role=current_user.get("role"), signed_at=datetime.utcnow(),
+        status="Draft" if is_draft else "Signed",
+        signer_email=None if is_draft else current_user.get("email"),
+        signer_role=None if is_draft else current_user.get("role"),
+        signed_at=None if is_draft else datetime.utcnow(),
         created_by=_actor(current_user),
     )
     db.add(rx)
@@ -400,6 +430,166 @@ def list_radiation_prescriptions(patient_id: int, db: Session = Depends(get_cca_
     return {"radiation_prescriptions": [_rt_prescription_out(r) for r in rows]}
 
 
+# ---------------------------------------------------------------------------
+# Radiation Oncology missing-development round: prescription status lifecycle (PDF item 1),
+# version history, procedure-specific consent status, and MDT decision linkage -- all on the
+# existing RadiationPrescription, none of it a rebuild of the course shell itself. Byte-for-
+# byte mirrors of the equivalent SurgicalPlan endpoints above (same review/amend/consent/MDT
+# idioms), adapted to this model's own field names.
+# ---------------------------------------------------------------------------
+
+@router.post("/radiation-prescriptions/{prescription_id}/sign")
+async def sign_radiation_prescription(prescription_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_modality_signer(current_user, "radiation")
+    rx = _get_org_radiation_prescription(db, prescription_id, _org_id(current_user))
+    if rx.status != "Draft":
+        raise HTTPException(409, f"Only a Draft prescription can be signed (current status: {rx.status})")
+    rx.status = "Signed"
+    rx.signer_email = current_user.get("email")
+    rx.signer_role = current_user.get("role")
+    rx.signed_at = datetime.utcnow()
+    publish(
+        db, "RADIATION_PRESCRIPTION_SIGNED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Radiation prescription signed", category="TREATMENT",
+        description=f"{_actor(current_user)} signed the radiation prescription.", prescription_id=rx.id,
+    )
+    db.commit()
+    db.refresh(rx)
+    return {"status": "success", "radiation_prescription": _rt_prescription_out(rx)}
+
+
+@router.post("/radiation-prescriptions/{prescription_id}/amend")
+async def amend_radiation_prescription(prescription_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Snapshots the course's pre-amendment state into RadiationPrescriptionVersion (mandatory
+    reason, same convention as SurgicalPlanVersion) before applying the change, then flags
+    every non-completed phase under this course for physics re-review -- a content change to
+    the signed course must not silently leave an already-QA'd/approved phase's physics status
+    looking current when the prescription it was reviewed against just changed."""
+    _require_modality_signer(current_user, "radiation")
+    rx = _get_org_radiation_prescription(db, prescription_id, _org_id(current_user))
+    if rx.status not in ("Signed", "Amended"):
+        raise HTTPException(409, f"Only a Signed or Amended prescription can be amended (current status: {rx.status})")
+    body = await request.json()
+    reason = (body.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(422, "reason is required to amend a radiation prescription")
+
+    version_count = db.query(RadiationPrescriptionVersion).filter(RadiationPrescriptionVersion.prescription_id == rx.id).count()
+    db.add(RadiationPrescriptionVersion(
+        prescription_id=rx.id, version_no=version_count + 1, snapshot=_rt_prescription_snapshot(rx),
+        change_reason=reason, created_by=_actor(current_user),
+    ))
+    for field in ("diagnosis", "intent", "modality", "technique", "special_instructions", "dicom_rt_plan_ref", "concurrent_systemic_treatment"):
+        if field in body:
+            setattr(rx, field, body[field])
+    rx.status = "Amended"
+    rx.signer_email = current_user.get("email")
+    rx.signer_role = current_user.get("role")
+    rx.signed_at = datetime.utcnow()
+
+    # See this function's own docstring -- advisory flag only (surfaced on the worklist/
+    # dashboard), never a hard transition block, same conservative approach as every other new
+    # gate in this round.
+    phases = db.query(CCARadiationPhase).filter(
+        CCARadiationPhase.prescription_id == rx.id, CCARadiationPhase.rt_sub_status != "completed",
+    ).all()
+    for phase in phases:
+        phase.physics_review_required = True
+
+    publish(
+        db, "RADIATION_PRESCRIPTION_AMENDED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Radiation prescription amended", category="TREATMENT",
+        description=f"{_actor(current_user)} amended the radiation prescription: {reason}", prescription_id=rx.id,
+    )
+    db.commit()
+    db.refresh(rx)
+    return {"status": "success", "radiation_prescription": _rt_prescription_out(rx)}
+
+
+@router.post("/radiation-prescriptions/{prescription_id}/discontinue")
+async def discontinue_radiation_prescription(prescription_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_modality_signer(current_user, "radiation")
+    rx = _get_org_radiation_prescription(db, prescription_id, _org_id(current_user))
+    if rx.status in ("Discontinued", "Completed", "PartiallyCompleted"):
+        raise HTTPException(409, f"This prescription is already {rx.status}")
+    body = await request.json()
+    reason = (body.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(422, "reason is required to discontinue a radiation prescription")
+    rx.status = "Discontinued"
+    rx.discontinued_reason = reason
+    rx.discontinued_by = _actor(current_user)
+    rx.discontinued_at = datetime.utcnow()
+    publish(
+        db, "RADIATION_PRESCRIPTION_DISCONTINUED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Radiation prescription discontinued", category="TREATMENT",
+        description=f"{_actor(current_user)} discontinued the radiation prescription: {reason}", prescription_id=rx.id,
+    )
+    db.commit()
+    db.refresh(rx)
+    return {"status": "success", "radiation_prescription": _rt_prescription_out(rx)}
+
+
+@router.get("/radiation-prescriptions/{prescription_id}/versions")
+def list_radiation_prescription_versions(prescription_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    rx = _get_org_radiation_prescription(db, prescription_id, _org_id(current_user))
+    rows = db.query(RadiationPrescriptionVersion).filter(
+        RadiationPrescriptionVersion.prescription_id == rx.id
+    ).order_by(RadiationPrescriptionVersion.version_no.asc()).all()
+    return {"versions": [
+        {
+            "id": v.id, "version_no": v.version_no, "snapshot": v.snapshot, "change_reason": v.change_reason,
+            "created_by": v.created_by, "created_at": v.created_at.isoformat() if v.created_at else None,
+        } for v in rows
+    ]}
+
+
+@router.get("/radiation-prescriptions/{prescription_id}/consent-status")
+def get_radiation_prescription_consent_status(prescription_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Derived at read time from CCAConsent rows linked to this course, same convention as
+    GET /surgical-plans/{id}/consent-status -- consent status is never assumed from course
+    creation and never duplicated onto RadiationPrescription itself."""
+    rx = _get_org_radiation_prescription(db, prescription_id, _org_id(current_user))
+    linked = db.query(CCAConsent).filter(
+        CCAConsent.radiation_prescription_id == rx.id, CCAConsent.status == "ACTIVE"
+    ).order_by(CCAConsent.valid_from.desc()).first()
+    return {
+        "radiation_prescription_id": rx.id,
+        "consent_obtained": linked is not None,
+        "consent": ({
+            "id": linked.id, "consent_types": linked.consent_types, "signatory": linked.signatory,
+            "valid_from": linked.valid_from.isoformat() if linked.valid_from else None,
+        } if linked else None),
+    }
+
+
+@router.post("/radiation-prescriptions/{prescription_id}/link-mdt-decision")
+async def link_radiation_prescription_mdt_decision(prescription_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Same validation as SurgicalPlan's own link-mdt-decision: the decision must belong to the
+    same patient and already be APPROVED/PARTIALLY_APPROVED by the treating clinician."""
+    _require_modality_signer(current_user, "radiation")
+    rx = _get_org_radiation_prescription(db, prescription_id, _org_id(current_user))
+    body = await request.json()
+    mdt_decision_id = body.get("mdt_decision_id")
+    if not mdt_decision_id:
+        raise HTTPException(422, "mdt_decision_id is required")
+    decision = db.query(MDTDecision).filter(MDTDecision.id == mdt_decision_id).first()
+    if not decision or decision.patient_id != rx.patient_id:
+        raise HTTPException(422, "mdt_decision_id must reference an MDT decision for this same patient")
+    if decision.status not in ("APPROVED", "PARTIALLY_APPROVED"):
+        raise HTTPException(409, f"This MDT decision is not yet approved by the treating clinician (status: {decision.status})")
+    rx.mdt_decision_id = decision.id
+    publish(
+        db, "RADIATION_PRESCRIPTION_MDT_DECISION_LINKED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="MDT decision linked to radiation prescription", category="TREATMENT",
+        description=f"{_actor(current_user)} linked MDT decision #{decision.id} to the radiation prescription.",
+        prescription_id=rx.id, mdt_decision_id=decision.id,
+    )
+    db.commit()
+    db.refresh(rx)
+    return {"status": "success", "radiation_prescription": _rt_prescription_out(rx)}
+
+
 @router.post("/radiation-prescriptions/{prescription_id}/phases", status_code=201)
 async def create_radiation_phase(prescription_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     """Only the treating Radiation Oncologist prescribes a phase's site/dose/fractions --
@@ -420,7 +610,7 @@ async def create_radiation_phase(prescription_id: int, request: Request, db: Ses
         number_of_fractions=body["number_of_fractions"], frequency=body.get("frequency"),
         simulation_required=bool(body.get("simulation_required", True)), immobilization=body.get("immobilization"),
         image_guidance_required=bool(body.get("image_guidance_required", True)), bolus=body.get("bolus"),
-        created_by=_actor(current_user),
+        technique=body.get("technique"), created_by=_actor(current_user),
     )
     db.add(phase)
     db.flush()
@@ -443,12 +633,35 @@ def list_radiation_phases(prescription_id: int, db: Session = Depends(get_cca_db
     return {"phases": [_rt_phase_out(p) for p in rows]}
 
 
+@router.post("/radiation-phases/{phase_id}/acknowledge-physics-review")
+def acknowledge_radiation_phase_physics_review(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Clears the advisory physics_review_required flag (see CCARadiationPhase's own
+    docstring) once the physicist has consciously re-checked the phase after whatever
+    triggered it (an interruption or a prescription amendment) -- an explicit action, not an
+    automatic side effect of any other endpoint, so there's always a recorded who/when."""
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may acknowledge a physics review flag")
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    phase.physics_review_required = False
+    phase.physics_review_acknowledged_by = _actor(current_user)
+    phase.physics_review_acknowledged_at = datetime.utcnow()
+    db.commit()
+    db.refresh(phase)
+    return {"status": "success", "phase": _rt_phase_out(phase)}
+
+
 @router.get("/radiation-phases/worklist")
-def radiation_phase_worklist(status: str = None, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+def radiation_phase_worklist(
+    status: str = None, priority: str = None, mine: bool = False,
+    db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user),
+):
     """Cross-patient worklist for the Radiation Physicist (planning/physics-QA-pending
     phases) and Radiologist -- who also covers Radiation Technologist duties (treatment-ready/
     on-treatment phases) in this hospital's role structure -- these roles work off "what needs
-    me next" across the whole organization's caseload, not one already-open patient."""
+    me next" across the whole organization's caseload, not one already-open patient.
+
+    Radiation missing-development round, Batch 4 -- priority/mine filters and due-date
+    ordering (both PDFs' "Make It Actionable" sections), on top of the existing status filter."""
     org_id = _org_id(current_user)
     q = (
         db.query(CCARadiationPhase, RadiationPrescription, CCAPatient)
@@ -458,7 +671,16 @@ def radiation_phase_worklist(status: str = None, db: Session = Depends(get_cca_d
     )
     if status:
         q = q.filter(CCARadiationPhase.rt_sub_status == status)
-    rows = q.order_by(CCARadiationPhase.created_at.desc()).all()
+    if priority:
+        q = q.filter(CCARadiationPhase.priority == priority)
+    if mine:
+        q = q.filter(CCARadiationPhase.assigned_physicist == _actor(current_user))
+    # Due soonest first (nulls last), then most recently created -- a phase with no due date
+    # set at all still shows up, just after every phase that does have one.
+    rows = q.order_by(
+        CCARadiationPhase.physics_review_due_date.is_(None), CCARadiationPhase.physics_review_due_date.asc(),
+        CCARadiationPhase.created_at.desc(),
+    ).all()
     return {"worklist": [
         {
             **_rt_phase_out(phase), "patient_id": patient.id, "patient_name": patient.name,
@@ -468,10 +690,576 @@ def radiation_phase_worklist(status: str = None, db: Session = Depends(get_cca_d
     ]}
 
 
+@router.patch("/radiation-phases/{phase_id}/worklist")
+async def update_radiation_phase_worklist(phase_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Sets/updates ownership and priority/due-dates for a phase on the physics worklist --
+    distinct from transition_radiation_phase, which only moves rt_sub_status forward."""
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may update worklist ownership/priority")
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    body = await request.json()
+    if "priority" in body:
+        if body["priority"] not in ("Urgent", "Routine"):
+            raise HTTPException(422, "priority must be one of ('Urgent', 'Routine')")
+        phase.priority = body["priority"]
+    if body.get("assign_to_self"):
+        phase.assigned_physicist = _actor(current_user)
+        phase.assigned_at = datetime.utcnow()
+    elif "assigned_physicist" in body:
+        phase.assigned_physicist = body["assigned_physicist"]
+        phase.assigned_at = datetime.utcnow() if body["assigned_physicist"] else None
+    if "physics_review_due_date" in body:
+        phase.physics_review_due_date = (
+            datetime.fromisoformat(body["physics_review_due_date"]).date() if body["physics_review_due_date"] else None
+        )
+    if "treatment_start_due_date" in body:
+        phase.treatment_start_due_date = (
+            datetime.fromisoformat(body["treatment_start_due_date"]).date() if body["treatment_start_due_date"] else None
+        )
+    db.commit()
+    db.refresh(phase)
+    return {"status": "success", "phase": _rt_phase_out(phase)}
+
+
 @router.get("/radiation-phases/{phase_id}")
 def get_radiation_phase(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
     return {"phase": _rt_phase_out(phase), "prescription": _rt_prescription_out(rx)}
+
+
+@router.get("/radiation-phases/{phase_id}/release-readiness")
+def get_radiation_phase_release_readiness(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Radiation missing-development round, Batch 4 -- both PDFs' "Treatment Plan Release /
+    Physics Approval" pre-release checklist. Pure read-time aggregation of signals already
+    built across Batches 1-3 -- never writes anything, and never itself a gate (the real gates
+    already live in transition_radiation_phase/record_physics_qa); this exists purely so the
+    UI/an approver can see every prerequisite in one place before acting."""
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    org_id = _org_id(current_user)
+
+    verification = db.query(RadiationPrescriptionVerification).filter(
+        RadiationPrescriptionVerification.phase_id == phase.id
+    ).order_by(RadiationPrescriptionVerification.id.desc()).first()
+    prescription_verified = bool(verification and (verification.outcome == "Verified" or (verification.outcome == "Mismatch" and verification.resolved)))
+
+    ready_sim = db.query(RadiationSimulationRecord).filter(
+        RadiationSimulationRecord.phase_id == phase.id, RadiationSimulationRecord.readiness_status == "Ready",
+    ).first()
+    simulation_verified = ready_sim is not None
+
+    latest_structure_set = db.query(RadiationStructureSet).filter(
+        RadiationStructureSet.phase_id == phase.id
+    ).order_by(RadiationStructureSet.version_no.desc()).first()
+    contours_approved = bool(latest_structure_set and latest_structure_set.status == "Approved")
+
+    approved_plan_version = db.query(RadiationTreatmentPlanVersion).filter(
+        RadiationTreatmentPlanVersion.phase_id == phase.id, RadiationTreatmentPlanVersion.status == "Approved",
+    ).first()
+    plan_reviewed = approved_plan_version is not None
+
+    open_discrepancy = db.query(RadiationDiscrepancyRecord).filter(
+        RadiationDiscrepancyRecord.phase_id == phase.id, RadiationDiscrepancyRecord.status == "OPEN"
+    ).first()
+    latest_dosimetric_review = db.query(RadiationDosimetricReview).filter(
+        RadiationDosimetricReview.phase_id == phase.id
+    ).order_by(RadiationDosimetricReview.id.desc()).first()
+    qa_complete = bool(
+        phase.physics_qa_decision == "Approved" and not open_discrepancy
+        and not (latest_dosimetric_review and latest_dosimetric_review.outcome == "Fail")
+    )
+
+    active_units = db.query(RadiationTreatmentUnit).filter(
+        RadiationTreatmentUnit.organization_id == org_id, RadiationTreatmentUnit.status == "Active",
+    ).all()
+    machine_available = False
+    for unit in active_units:
+        qa_rows = db.query(RadiationEquipmentQARecord).filter(RadiationEquipmentQARecord.treatment_unit_id == unit.id).all()
+        if not any(_qa_record_out(q)["overdue"] for q in qa_rows):
+            machine_available = True
+            break
+
+    checklist = {
+        "prescription_verified": prescription_verified, "simulation_verified": simulation_verified,
+        "contours_approved": contours_approved, "plan_reviewed": plan_reviewed,
+        "qa_complete": qa_complete, "machine_available": machine_available,
+    }
+    return {
+        "phase_id": phase.id, "rt_sub_status": phase.rt_sub_status,
+        **checklist, "overall_ready": all(checklist.values()),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Radiation missing-development round, Batch 2: Simulation & dataset readiness check (both
+# PDFs' "Simulation & Dataset Readiness" sections) -- gates transition_radiation_phase's
+# simulation_pending -> simulation_complete step above.
+# ---------------------------------------------------------------------------
+
+def _rt_simulation_out(s: RadiationSimulationRecord) -> dict:
+    return {
+        "id": s.id, "phase_id": s.phase_id,
+        "simulation_date": s.simulation_date.isoformat() if s.simulation_date else None,
+        "modality": s.modality, "immobilization_device": s.immobilization_device,
+        "contrast_used": s.contrast_used, "ct_dataset_status": s.ct_dataset_status,
+        "dataset_transferred_to_tps": s.dataset_transferred_to_tps, "rejection_reason": s.rejection_reason,
+        "performed_by": s.performed_by, "performed_at": s.performed_at.isoformat() if s.performed_at else None,
+        "readiness_status": s.readiness_status, "reviewed_by": s.reviewed_by,
+        "reviewed_at": s.reviewed_at.isoformat() if s.reviewed_at else None,
+    }
+
+
+@router.post("/radiation-phases/{phase_id}/simulation", status_code=201)
+async def record_radiation_simulation(phase_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Performed/logged by the Radiation Technologist at the simulator, or by the Physicist
+    reviewing it directly -- see _rt_simulation_review's own gate for the separate explicit
+    readiness sign-off, which only the Physicist may give."""
+    if not (is_cca_radiation_technologist(current_user) or is_cca_radiation_physicist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Radiation Technologist or Radiation Physicist may record a simulation")
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    body = await request.json()
+    record = RadiationSimulationRecord(
+        phase_id=phase.id,
+        simulation_date=datetime.fromisoformat(body["simulation_date"]).date() if body.get("simulation_date") else None,
+        modality=body.get("modality"), immobilization_device=body.get("immobilization_device"),
+        contrast_used=body.get("contrast_used"), ct_dataset_status=body.get("ct_dataset_status") or "Pending",
+        dataset_transferred_to_tps=bool(body.get("dataset_transferred_to_tps", False)),
+        performed_by=_actor(current_user),
+    )
+    db.add(record)
+    db.flush()
+    publish(
+        db, "RADIATION_SIMULATION_RECORDED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Radiation simulation recorded", category="TREATMENT",
+        description=f"{_actor(current_user)} recorded a simulation for phase {phase.phase_number} ({phase.label}).",
+        prescription_id=rx.id, phase_id=phase.id,
+    )
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "simulation": _rt_simulation_out(record)}
+
+
+@router.get("/radiation-phases/{phase_id}/simulation")
+def list_radiation_simulations(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    rows = db.query(RadiationSimulationRecord).filter(RadiationSimulationRecord.phase_id == phase_id).order_by(RadiationSimulationRecord.id.desc()).all()
+    return {"simulation_records": [_rt_simulation_out(s) for s in rows]}
+
+
+@router.post("/radiation-simulation-records/{simulation_id}/review")
+async def review_radiation_simulation(simulation_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """The Physicist's explicit readiness sign-off -- distinct from whoever performed the
+    simulation above. rejection_reason is required on NotReady so a blocked case always
+    carries a documented reason, matching this round's other mismatch/return workflows."""
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may review simulation readiness")
+    record = db.query(RadiationSimulationRecord).filter(RadiationSimulationRecord.id == simulation_id).first()
+    if not record:
+        raise HTTPException(404, "Simulation record not found")
+    phase, rx = _get_org_radiation_phase(db, record.phase_id, _org_id(current_user))
+    body = await request.json()
+    readiness_status = body.get("readiness_status")
+    if readiness_status not in ("Ready", "NotReady"):
+        raise HTTPException(422, "readiness_status must be one of ('Ready', 'NotReady')")
+    rejection_reason = (body.get("rejection_reason") or "").strip()
+    if readiness_status == "NotReady" and not rejection_reason:
+        raise HTTPException(422, "rejection_reason is required when readiness_status is NotReady")
+    record.readiness_status = readiness_status
+    record.rejection_reason = rejection_reason or None
+    record.reviewed_by = _actor(current_user)
+    record.reviewed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "simulation": _rt_simulation_out(record)}
+
+
+# ---------------------------------------------------------------------------
+# Radiation missing-development round, Batch 2: Target/OAR contouring workflow (both PDFs'
+# "Contouring / Target & OAR Definition" sections) -- gates transition_radiation_phase's
+# contouring -> planning step above.
+# ---------------------------------------------------------------------------
+
+def _rt_structure_set_out(s: RadiationStructureSet) -> dict:
+    return {
+        "id": s.id, "phase_id": s.phase_id, "version_no": s.version_no,
+        "target_volumes_snapshot": s.target_volumes_snapshot, "organs_at_risk_snapshot": s.organs_at_risk_snapshot,
+        "image_fusion_reference": s.image_fusion_reference, "status": s.status,
+        "contoured_by": s.contoured_by, "contoured_at": s.contoured_at.isoformat() if s.contoured_at else None,
+        "reviewed_by": s.reviewed_by, "reviewed_at": s.reviewed_at.isoformat() if s.reviewed_at else None,
+        "review_note": s.review_note, "created_by": s.created_by,
+    }
+
+
+def _require_rt_contouring_role(current_user: dict):
+    if not (is_cca_radiation_physicist(current_user) or is_cca_radiation_oncologist(current_user)):
+        raise HTTPException(403, "Only the Radiation Physicist or Radiation Oncologist may submit a structure set")
+
+
+@router.post("/radiation-phases/{phase_id}/structure-sets", status_code=201)
+async def create_radiation_structure_set(phase_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Snapshots the phase's current target_volumes/organs_at_risk JSON at submission time
+    (see RadiationStructureSet's own docstring for why it's a snapshot, not a live reference).
+    Each submission is a new version -- never overwrites a prior structure set, so contour
+    history for this phase is always fully reconstructable."""
+    _require_rt_contouring_role(current_user)
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    body = await request.json()
+    existing_count = db.query(RadiationStructureSet).filter(RadiationStructureSet.phase_id == phase.id).count()
+    structure_set = RadiationStructureSet(
+        phase_id=phase.id, version_no=existing_count + 1,
+        target_volumes_snapshot=body.get("target_volumes") or phase.target_volumes,
+        organs_at_risk_snapshot=body.get("organs_at_risk") or phase.organs_at_risk,
+        image_fusion_reference=body.get("image_fusion_reference"),
+        status="Draft", contoured_by=_actor(current_user), contoured_at=datetime.utcnow(),
+        created_by=_actor(current_user),
+    )
+    db.add(structure_set)
+    db.flush()
+    publish(
+        db, "RADIATION_STRUCTURE_SET_CREATED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Radiation structure set submitted", category="TREATMENT",
+        description=f"{_actor(current_user)} submitted structure set v{structure_set.version_no} for phase {phase.phase_number} ({phase.label}).",
+        prescription_id=rx.id, phase_id=phase.id,
+    )
+    db.commit()
+    db.refresh(structure_set)
+    return {"status": "success", "structure_set": _rt_structure_set_out(structure_set)}
+
+
+@router.get("/radiation-phases/{phase_id}/structure-sets")
+def list_radiation_structure_sets(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    rows = db.query(RadiationStructureSet).filter(RadiationStructureSet.phase_id == phase_id).order_by(RadiationStructureSet.version_no.desc()).all()
+    return {"structure_sets": [_rt_structure_set_out(s) for s in rows]}
+
+
+@router.post("/radiation-structure-sets/{structure_set_id}/review")
+async def review_radiation_structure_set(structure_set_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Physicist-only review/approval -- distinct from whoever contoured/submitted it above,
+    matching this round's "the physicist verifies the technical plan" architecture principle
+    even when a Radiation Oncologist also has contouring rights."""
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may review a structure set")
+    structure_set = db.query(RadiationStructureSet).filter(RadiationStructureSet.id == structure_set_id).first()
+    if not structure_set:
+        raise HTTPException(404, "Structure set not found")
+    phase, rx = _get_org_radiation_phase(db, structure_set.phase_id, _org_id(current_user))
+    body = await request.json()
+    status = body.get("status")
+    if status not in ("Reviewed", "Approved", "Rejected"):
+        raise HTTPException(422, "status must be one of ('Reviewed', 'Approved', 'Rejected')")
+    structure_set.status = status
+    structure_set.review_note = body.get("review_note")
+    structure_set.reviewed_by = _actor(current_user)
+    structure_set.reviewed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(structure_set)
+    return {"status": "success", "structure_set": _rt_structure_set_out(structure_set)}
+
+
+# ---------------------------------------------------------------------------
+# Radiation missing-development round, Batch 3: Treatment Planning Workspace (plan identity/
+# version/technique/calculation record/three-person reviewer chain, supersede-not-overwrite
+# versioning) -- gates transition_radiation_phase's planning -> physics_qa step above.
+# ---------------------------------------------------------------------------
+
+def _rt_plan_version_out(v: RadiationTreatmentPlanVersion) -> dict:
+    return {
+        "id": v.id, "phase_id": v.phase_id, "version_no": v.version_no, "plan_name": v.plan_name,
+        "technique": v.technique, "calculation_status": v.calculation_status,
+        "calculation_algorithm": v.calculation_algorithm, "external_plan_reference": v.external_plan_reference,
+        "created_by": v.created_by, "created_at": v.created_at.isoformat() if v.created_at else None,
+        "checked_by": v.checked_by, "checked_at": v.checked_at.isoformat() if v.checked_at else None,
+        "approved_by": v.approved_by, "approved_at": v.approved_at.isoformat() if v.approved_at else None,
+        "status": v.status, "supersedes_id": v.supersedes_id, "notes": v.notes,
+    }
+
+
+@router.post("/radiation-phases/{phase_id}/plan-versions", status_code=201)
+async def create_radiation_plan_version(phase_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may create a treatment plan version")
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    body = await request.json()
+    existing_count = db.query(RadiationTreatmentPlanVersion).filter(RadiationTreatmentPlanVersion.phase_id == phase.id).count()
+    version = RadiationTreatmentPlanVersion(
+        phase_id=phase.id, version_no=existing_count + 1, plan_name=body.get("plan_name"),
+        technique=body.get("technique"), calculation_status=body.get("calculation_status") or "Pending",
+        calculation_algorithm=body.get("calculation_algorithm"), external_plan_reference=body.get("external_plan_reference"),
+        created_by=_actor(current_user), notes=body.get("notes"),
+    )
+    db.add(version)
+    db.flush()
+    publish(
+        db, "RADIATION_PLAN_VERSION_CREATED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Radiation treatment plan version created", category="TREATMENT",
+        description=f"{_actor(current_user)} created plan v{version.version_no} for phase {phase.phase_number} ({phase.label}).",
+        prescription_id=rx.id, phase_id=phase.id,
+    )
+    db.commit()
+    db.refresh(version)
+    return {"status": "success", "plan_version": _rt_plan_version_out(version)}
+
+
+@router.get("/radiation-phases/{phase_id}/plan-versions")
+def list_radiation_plan_versions(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    rows = db.query(RadiationTreatmentPlanVersion).filter(RadiationTreatmentPlanVersion.phase_id == phase_id).order_by(RadiationTreatmentPlanVersion.version_no.desc()).all()
+    return {"plan_versions": [_rt_plan_version_out(v) for v in rows]}
+
+
+@router.get("/radiation-phases/{phase_id}/plan-versions/active")
+def get_active_radiation_plan_version(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """"Active" is never a stored flag (see RadiationTreatmentPlanVersion's own docstring) --
+    the latest Approved version whose id no later row's supersedes_id points at."""
+    _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    rows = db.query(RadiationTreatmentPlanVersion).filter(
+        RadiationTreatmentPlanVersion.phase_id == phase_id, RadiationTreatmentPlanVersion.status == "Approved",
+    ).order_by(RadiationTreatmentPlanVersion.version_no.desc()).all()
+    superseded_ids = {v.supersedes_id for v in rows if v.supersedes_id}
+    active = next((v for v in rows if v.id not in superseded_ids), None)
+    return {"active_plan_version": _rt_plan_version_out(active) if active else None}
+
+
+@router.post("/radiation-plan-versions/{version_id}/check")
+def check_radiation_plan_version(version_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may check a treatment plan version")
+    version = db.query(RadiationTreatmentPlanVersion).filter(RadiationTreatmentPlanVersion.id == version_id).first()
+    if not version:
+        raise HTTPException(404, "Plan version not found")
+    _get_org_radiation_phase(db, version.phase_id, _org_id(current_user))
+    if version.status != "Draft":
+        raise HTTPException(409, f"Only a Draft plan version can be checked (current status: {version.status})")
+    version.status = "Checked"
+    version.checked_by = _actor(current_user)
+    version.checked_at = datetime.utcnow()
+    db.commit()
+    db.refresh(version)
+    return {"status": "success", "plan_version": _rt_plan_version_out(version)}
+
+
+@router.post("/radiation-plan-versions/{version_id}/approve")
+def approve_radiation_plan_version(version_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Supersede-not-overwrite (see RadiationTreatmentPlanVersion's own docstring): approving
+    a new version automatically marks any other currently-Approved-and-unsuperseded version
+    for this same phase as Superseded, chained via supersedes_id -- there is never more than
+    one active Approved version per phase at a time."""
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may approve a treatment plan version")
+    version = db.query(RadiationTreatmentPlanVersion).filter(RadiationTreatmentPlanVersion.id == version_id).first()
+    if not version:
+        raise HTTPException(404, "Plan version not found")
+    phase, rx = _get_org_radiation_phase(db, version.phase_id, _org_id(current_user))
+    if version.status != "Checked":
+        raise HTTPException(409, f"Only a Checked plan version can be approved (current status: {version.status})")
+    prior_rows = db.query(RadiationTreatmentPlanVersion).filter(
+        RadiationTreatmentPlanVersion.phase_id == phase.id, RadiationTreatmentPlanVersion.status == "Approved",
+    ).all()
+    superseded_ids = {v.supersedes_id for v in prior_rows if v.supersedes_id}
+    currently_active = next((v for v in prior_rows if v.id not in superseded_ids), None)
+    if currently_active:
+        currently_active.status = "Superseded"
+        version.supersedes_id = currently_active.id
+    version.status = "Approved"
+    version.approved_by = _actor(current_user)
+    version.approved_at = datetime.utcnow()
+    publish(
+        db, "RADIATION_PLAN_VERSION_APPROVED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Radiation treatment plan version approved", category="TREATMENT",
+        description=f"{_actor(current_user)} approved plan v{version.version_no} for phase {phase.phase_number} ({phase.label}).",
+        prescription_id=rx.id, phase_id=phase.id,
+    )
+    db.commit()
+    db.refresh(version)
+    return {"status": "success", "plan_version": _rt_plan_version_out(version)}
+
+
+# ---------------------------------------------------------------------------
+# Radiation missing-development round, Batch 3: Dose Calculation & Dosimetric Review, and
+# Patient-Specific QA -- both feed record_physics_qa's Approved-decision gate above.
+# ---------------------------------------------------------------------------
+
+def _rt_dosimetric_review_out(r: RadiationDosimetricReview) -> dict:
+    return {
+        "id": r.id, "phase_id": r.phase_id, "plan_version_id": r.plan_version_id,
+        "target_coverage_metrics": r.target_coverage_metrics or [], "oar_dose_metrics": r.oar_dose_metrics or [],
+        "hotspot_dose": r.hotspot_dose, "conformity_index": r.conformity_index, "homogeneity_index": r.homogeneity_index,
+        "outcome": r.outcome, "comments": r.comments,
+        "reviewed_by": r.reviewed_by, "reviewed_at": r.reviewed_at.isoformat() if r.reviewed_at else None,
+    }
+
+
+@router.post("/radiation-phases/{phase_id}/dosimetric-review", status_code=201)
+async def record_dosimetric_review(phase_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may record a dosimetric review")
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    body = await request.json()
+    outcome = body.get("outcome")
+    if outcome not in ("Pass", "Fail", "Conditional"):
+        raise HTTPException(422, "outcome must be one of ('Pass', 'Fail', 'Conditional')")
+    comments = (body.get("comments") or "").strip()
+    if outcome != "Pass" and not comments:
+        raise HTTPException(422, "comments is required when outcome is not Pass")
+    review = RadiationDosimetricReview(
+        phase_id=phase.id, plan_version_id=body.get("plan_version_id"),
+        target_coverage_metrics=body.get("target_coverage_metrics"), oar_dose_metrics=body.get("oar_dose_metrics"),
+        hotspot_dose=body.get("hotspot_dose"), conformity_index=body.get("conformity_index"),
+        homogeneity_index=body.get("homogeneity_index"), outcome=outcome, comments=comments or None,
+        reviewed_by=_actor(current_user),
+    )
+    db.add(review)
+    db.flush()
+    publish(
+        db, "RADIATION_DOSIMETRIC_REVIEW_RECORDED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Radiation dosimetric review recorded", category="TREATMENT",
+        description=f"{_actor(current_user)} recorded a dosimetric review ({outcome}) for phase {phase.phase_number} ({phase.label}).",
+        prescription_id=rx.id, phase_id=phase.id,
+    )
+    db.commit()
+    db.refresh(review)
+    return {"status": "success", "dosimetric_review": _rt_dosimetric_review_out(review)}
+
+
+@router.get("/radiation-phases/{phase_id}/dosimetric-review")
+def list_dosimetric_reviews(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    rows = db.query(RadiationDosimetricReview).filter(RadiationDosimetricReview.phase_id == phase_id).order_by(RadiationDosimetricReview.id.desc()).all()
+    return {"dosimetric_reviews": [_rt_dosimetric_review_out(r) for r in rows]}
+
+
+def _rt_patient_specific_qa_out(q: RadiationPatientSpecificQA) -> dict:
+    return {
+        "id": q.id, "phase_id": q.phase_id, "plan_version_id": q.plan_version_id, "method": q.method,
+        "measurement_date": q.measurement_date.isoformat() if q.measurement_date else None,
+        "equipment": q.equipment, "measured_result": q.measured_result, "tolerance": q.tolerance,
+        "outcome": q.outcome, "comments": q.comments, "performed_by": q.performed_by,
+        "reviewed_by": q.reviewed_by, "performed_at": q.performed_at.isoformat() if q.performed_at else None,
+    }
+
+
+@router.post("/radiation-phases/{phase_id}/patient-specific-qa", status_code=201)
+async def record_patient_specific_qa(phase_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may record patient-specific QA")
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    body = await request.json()
+    outcome = body.get("outcome")
+    if outcome not in ("Pass", "Fail", "Conditional"):
+        raise HTTPException(422, "outcome must be one of ('Pass', 'Fail', 'Conditional')")
+    comments = (body.get("comments") or "").strip()
+    if outcome != "Pass" and not comments:
+        raise HTTPException(422, "comments is required when outcome is not Pass")
+    record = RadiationPatientSpecificQA(
+        phase_id=phase.id, plan_version_id=body.get("plan_version_id"), method=body.get("method"),
+        measurement_date=datetime.fromisoformat(body["measurement_date"]).date() if body.get("measurement_date") else None,
+        equipment=body.get("equipment"), measured_result=body.get("measured_result"), tolerance=body.get("tolerance"),
+        outcome=outcome, comments=comments or None, performed_by=_actor(current_user), reviewed_by=_actor(current_user),
+    )
+    db.add(record)
+    db.flush()
+    publish(
+        db, "RADIATION_PATIENT_SPECIFIC_QA_RECORDED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Patient-specific QA recorded", category="TREATMENT",
+        description=f"{_actor(current_user)} recorded patient-specific QA ({outcome}) for phase {phase.phase_number} ({phase.label}).",
+        prescription_id=rx.id, phase_id=phase.id,
+    )
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "patient_specific_qa": _rt_patient_specific_qa_out(record)}
+
+
+@router.get("/radiation-phases/{phase_id}/patient-specific-qa")
+def list_patient_specific_qa(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    rows = db.query(RadiationPatientSpecificQA).filter(RadiationPatientSpecificQA.phase_id == phase_id).order_by(RadiationPatientSpecificQA.id.desc()).all()
+    return {"patient_specific_qa_records": [_rt_patient_specific_qa_out(q) for q in rows]}
+
+
+# ---------------------------------------------------------------------------
+# Radiation missing-development round, Batch 3: Radiation Prescription Verification (both
+# PDFs' "Radiation Prescription Verification -- Critical" section) -- gates
+# transition_radiation_phase's contouring -> planning step above.
+# ---------------------------------------------------------------------------
+
+def _rt_verification_out(v: RadiationPrescriptionVerification) -> dict:
+    return {
+        "id": v.id, "phase_id": v.phase_id, "reviewer": v.reviewer,
+        "reviewed_at": v.reviewed_at.isoformat() if v.reviewed_at else None,
+        "outcome": v.outcome, "comments": v.comments,
+        "returned_to_ro": v.returned_to_ro, "returned_at": v.returned_at.isoformat() if v.returned_at else None,
+        "resolved": v.resolved, "resolved_note": v.resolved_note,
+        "resolved_by": v.resolved_by, "resolved_at": v.resolved_at.isoformat() if v.resolved_at else None,
+    }
+
+
+@router.post("/radiation-phases/{phase_id}/prescription-verification", status_code=201)
+async def record_prescription_verification(phase_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """The physicist's explicit "I verified this planning request against the signed
+    prescription" action. A Mismatch auto-flags returned_to_ro -- documenting the mismatch
+    IS the return to the Radiation Oncologist, matching this round's "return with a
+    documented reason rather than silently editing the prescription" architecture principle."""
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may verify a radiation prescription")
+    phase, rx = _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    body = await request.json()
+    outcome = body.get("outcome")
+    if outcome not in ("Verified", "Mismatch"):
+        raise HTTPException(422, "outcome must be one of ('Verified', 'Mismatch')")
+    comments = (body.get("comments") or "").strip()
+    if outcome == "Mismatch" and not comments:
+        raise HTTPException(422, "comments is required when outcome is Mismatch")
+    verification = RadiationPrescriptionVerification(
+        phase_id=phase.id, reviewer=_actor(current_user), outcome=outcome, comments=comments or None,
+        returned_to_ro=(outcome == "Mismatch"), returned_at=datetime.utcnow() if outcome == "Mismatch" else None,
+    )
+    db.add(verification)
+    db.flush()
+    publish(
+        db, "RADIATION_PRESCRIPTION_VERIFICATION_RECORDED", patient_id=rx.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Radiation prescription verification recorded", category="TREATMENT",
+        description=f"{_actor(current_user)} {'verified' if outcome == 'Verified' else 'flagged a mismatch on'} "
+                     f"the prescription for phase {phase.phase_number} ({phase.label}).",
+        prescription_id=rx.id, phase_id=phase.id,
+    )
+    db.commit()
+    db.refresh(verification)
+    return {"status": "success", "prescription_verification": _rt_verification_out(verification)}
+
+
+@router.get("/radiation-phases/{phase_id}/prescription-verification")
+def list_prescription_verifications(phase_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_radiation_phase(db, phase_id, _org_id(current_user))
+    rows = db.query(RadiationPrescriptionVerification).filter(RadiationPrescriptionVerification.phase_id == phase_id).order_by(RadiationPrescriptionVerification.id.desc()).all()
+    return {"prescription_verifications": [_rt_verification_out(v) for v in rows]}
+
+
+@router.post("/radiation-prescription-verifications/{verification_id}/resolve")
+async def resolve_prescription_verification(verification_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Closes the mismatch-return loop -- either the Radiation Oncologist or the Physicist may
+    resolve it (the correction itself might be a re-signed prescription from the RO, or a
+    physicist confirming the original was in fact correct on re-check)."""
+    if not (is_cca_radiation_physicist(current_user) or is_cca_radiation_oncologist(current_user)):
+        raise HTTPException(403, "Only the Radiation Physicist or Radiation Oncologist may resolve a prescription mismatch")
+    verification = db.query(RadiationPrescriptionVerification).filter(RadiationPrescriptionVerification.id == verification_id).first()
+    if not verification:
+        raise HTTPException(404, "Prescription verification not found")
+    _get_org_radiation_phase(db, verification.phase_id, _org_id(current_user))
+    if verification.outcome != "Mismatch":
+        raise HTTPException(409, "Only a Mismatch verification can be resolved")
+    if verification.resolved:
+        raise HTTPException(409, "This mismatch is already resolved")
+    body = await request.json()
+    resolved_note = (body.get("resolved_note") or "").strip()
+    if not resolved_note:
+        raise HTTPException(422, "resolved_note is required to resolve a prescription mismatch")
+    verification.resolved = True
+    verification.resolved_note = resolved_note
+    verification.resolved_by = _actor(current_user)
+    verification.resolved_at = datetime.utcnow()
+    db.commit()
+    db.refresh(verification)
+    return {"status": "success", "prescription_verification": _rt_verification_out(verification)}
 
 
 @router.get("/radiation-phases/{phase_id}/physics-qa")
@@ -601,6 +1389,25 @@ async def record_physics_qa(phase_id: int, request: Request, db: Session = Depen
         missing = [k for k in _PHYSICS_QA_CHECKLIST_KEYS if not checklist.get(k) and k not in waived_keys]
         if missing:
             raise HTTPException(422, f"All checklist items must be confirmed or explicitly waived to approve -- missing: {', '.join(missing)}")
+        # Radiation missing-development round, Batch 3 -- extends this same Approved-decision
+        # gate: a Fail dosimetric review blocks approval exactly like an open discrepancy does
+        # above (same pattern, same severity of finding).
+        latest_dosimetric_review = db.query(RadiationDosimetricReview).filter(
+            RadiationDosimetricReview.phase_id == phase.id
+        ).order_by(RadiationDosimetricReview.id.desc()).first()
+        if latest_dosimetric_review and latest_dosimetric_review.outcome == "Fail":
+            raise HTTPException(409, "Cannot approve Physics QA while the latest dosimetric review outcome is Fail")
+        # Radiation missing-development round, Batch 3 -- makes the "patient_specific_qa_review"
+        # checklist key actually backed by a real measurement record (see
+        # RadiationPatientSpecificQA's own docstring) rather than a bare attestation, unless
+        # that key was explicitly waived above.
+        if checklist.get("patient_specific_qa_review") and "patient_specific_qa_review" not in waived_keys:
+            passing_qa = db.query(RadiationPatientSpecificQA).filter(
+                RadiationPatientSpecificQA.phase_id == phase.id,
+                RadiationPatientSpecificQA.outcome.in_(("Pass", "Conditional")),
+            ).first()
+            if not passing_qa:
+                raise HTTPException(409, "patient_specific_qa_review is checked but no Pass/Conditional patient-specific QA record exists for this phase")
 
     phase.physics_qa_checklist = checklist
     phase.physics_qa_decision = decision
@@ -652,6 +1459,10 @@ async def transition_radiation_phase(phase_id: int, request: Request, db: Sessio
             phase_id=phase.id, reason=reason, category=category,
             compensation_plan=body.get("compensation_plan"), recorded_by=_actor(current_user),
         ))
+        # Radiation missing-development round -- see CCARadiationPhase.physics_review_required's
+        # own docstring: an interruption is exactly the kind of condition change a physicist
+        # should consciously re-check before treatment resumes.
+        phase.physics_review_required = True
         publish(
             db, "RADIATION_PHASE_INTERRUPTED", patient_id=rx.patient_id, actor=_actor(current_user),
             role=current_user.get("role"), title="Radiation treatment interrupted", category="TREATMENT",
@@ -685,6 +1496,47 @@ async def transition_radiation_phase(phase_id: int, request: Request, db: Sessio
     # rejected -- see record_physics_qa above.
     if target == "physician_approved" and phase.physics_qa_decision != "Approved":
         raise HTTPException(409, "Cannot advance to physician approval until Physics QA has been Approved")
+    # Radiation missing-development round, Batch 2 -- previously a phase could move straight
+    # from simulation_pending to simulation_complete with nothing ever having confirmed the
+    # simulation dataset actually arrived and was usable (see RadiationSimulationRecord).
+    if target == "simulation_complete":
+        ready_sim = db.query(RadiationSimulationRecord).filter(
+            RadiationSimulationRecord.phase_id == phase.id, RadiationSimulationRecord.readiness_status == "Ready",
+        ).first()
+        if not ready_sim:
+            raise HTTPException(409, "A simulation record with readiness_status=Ready is required before simulation can be marked complete")
+    # Radiation missing-development round, Batch 2 -- previously contouring could be marked
+    # done with no structure set ever reviewed/approved (see RadiationStructureSet). Checked
+    # against the LATEST structure set for this phase only -- an older Approved set doesn't
+    # count once a newer (unreviewed) version has been submitted.
+    if target == "planning":
+        latest_structure_set = db.query(RadiationStructureSet).filter(
+            RadiationStructureSet.phase_id == phase.id
+        ).order_by(RadiationStructureSet.version_no.desc()).first()
+        if not latest_structure_set or latest_structure_set.status != "Approved":
+            raise HTTPException(409, "The latest target/OAR structure set must be Approved before planning can begin")
+    # Radiation missing-development round, Batch 3 -- previously nothing ever required the
+    # physicist to explicitly attest the planning request matches the signed prescription
+    # before planning began (see RadiationPrescriptionVerification's own docstring). A
+    # Mismatch is acceptable here too, as long as it's been explicitly resolved -- a
+    # documented mismatch that was corrected is not the same as one nobody ever checked.
+    if target == "planning":
+        verification = db.query(RadiationPrescriptionVerification).filter(
+            RadiationPrescriptionVerification.phase_id == phase.id
+        ).order_by(RadiationPrescriptionVerification.id.desc()).first()
+        verified_ok = verification and (verification.outcome == "Verified" or (verification.outcome == "Mismatch" and verification.resolved))
+        if not verified_ok:
+            raise HTTPException(409, "The planning request must be verified against the signed prescription (or a documented mismatch resolved) before planning can begin")
+    # Radiation missing-development round, Batch 3 -- previously physics QA could open with
+    # no actual plan version ever having been checked/approved (see
+    # RadiationTreatmentPlanVersion's own docstring) -- the phase itself stood in for "the
+    # plan" with nothing to point Physics QA at.
+    if target == "physics_qa":
+        approved_plan_version = db.query(RadiationTreatmentPlanVersion).filter(
+            RadiationTreatmentPlanVersion.phase_id == phase.id, RadiationTreatmentPlanVersion.status == "Approved",
+        ).first()
+        if not approved_plan_version:
+            raise HTTPException(409, "An Approved treatment plan version is required before Physics QA can begin")
     phase.rt_sub_status = target
     if target == "physics_qa":
         phase.physicist_signer_email = current_user.get("email")
@@ -2541,6 +3393,7 @@ async def put_record_extension(request: Request, db: Session = Depends(get_cca_d
 
 _QA_FREQUENCY_DAYS = {"Daily": 1, "Weekly": 7, "Monthly": 30, "Annual": 365}
 _ISSUE_CATEGORIES = ("Interlock", "Mechanical", "Imaging", "Dosimetry", "Software", "Accessory", "Environmental")
+_EQUIPMENT_ISSUE_SEVERITIES = ("Critical", "Major", "Minor")
 
 
 def _require_rt_reporter_or_physicist(current_user: dict):
@@ -2622,7 +3475,12 @@ def _equipment_issue_out(db: Session, i: RadiationEquipmentIssue) -> dict:
         "action_taken": i.action_taken, "resolution": i.resolution,
         "resolved_at": i.resolved_at.isoformat() if i.resolved_at else None,
         "return_to_service_by": i.return_to_service_by, "return_to_service_checks": i.return_to_service_checks,
-        "incident_reference": i.incident_reference, "status": i.status,
+        "incident_reference": i.incident_reference, "status": i.status, "severity": i.severity,
+        "investigating_started_at": i.investigating_started_at.isoformat() if i.investigating_started_at else None,
+        "corrective_action": i.corrective_action, "corrective_action_by": i.corrective_action_by,
+        "corrective_action_at": i.corrective_action_at.isoformat() if i.corrective_action_at else None,
+        "verified_by": i.verified_by, "verified_at": i.verified_at.isoformat() if i.verified_at else None,
+        "closed_by": i.closed_by, "closed_at": i.closed_at.isoformat() if i.closed_at else None,
         "reported_by": i.reported_by, "created_at": i.created_at.isoformat() if i.created_at else None,
         "downtime_minutes": downtime_minutes,
         "affected_patients": _affected_patients_for_issue(db, i),
@@ -2682,6 +3540,82 @@ def qa_register(db: Session = Depends(get_cca_db), current_user: dict = Depends(
     records = [_qa_record_out(q) for q in rows]
     overdue_unit_ids = sorted({r["treatment_unit_id"] for r in records if r["overdue"]})
     return {"records": records, "overdue_unit_ids": overdue_unit_ids}
+
+
+@router.get("/radiation-physics-dashboard")
+def radiation_physics_dashboard(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Radiation missing-development round, Batch 4 -- both PDFs' "Physics Dashboard /
+    Monitoring" sections. Pure composition of queries that already exist elsewhere in this
+    file (worklist, qa-register, units, issues, discrepancies, in-vivo, domain events) --
+    same "cross-department operational metrics" idiom as cca_coordination.py's
+    operations_dashboard, scoped to the Radiation Physicist's own caseload instead of Admin's
+    whole-hospital view."""
+    if not (is_cca_radiation_physicist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Radiation Physicist or Admin may view the Physics Dashboard")
+    org_id = _org_id(current_user)
+
+    def _phase_count(*filters):
+        q = (
+            db.query(CCARadiationPhase)
+            .join(RadiationPrescription, CCARadiationPhase.prescription_id == RadiationPrescription.id)
+            .join(CCAPatient, RadiationPrescription.patient_id == CCAPatient.id)
+            .filter(CCAPatient.organization_id == org_id)
+        )
+        for f in filters:
+            q = q.filter(f)
+        return q.count()
+
+    units = db.query(RadiationTreatmentUnit).filter(RadiationTreatmentUnit.organization_id == org_id).all()
+    unit_ids = [u.id for u in units]
+    qa_rows = db.query(RadiationEquipmentQARecord).filter(
+        RadiationEquipmentQARecord.treatment_unit_id.in_(unit_ids)
+    ).all() if unit_ids else []
+    overdue_unit_ids = sorted({q.treatment_unit_id for q in qa_rows if _qa_record_out(q)["overdue"]})
+
+    invivo_rows = db.query(RadiationInVivoDosimetry).join(
+        RadiationFraction, RadiationInVivoDosimetry.fraction_id == RadiationFraction.id
+    ).join(
+        CCARadiationPhase, RadiationFraction.phase_id == CCARadiationPhase.id
+    ).join(
+        RadiationPrescription, CCARadiationPhase.prescription_id == RadiationPrescription.id
+    ).join(
+        CCAPatient, RadiationPrescription.patient_id == CCAPatient.id
+    ).filter(CCAPatient.organization_id == org_id).all()
+
+    recent_events = db.query(DomainEvent).join(
+        CCAPatient, DomainEvent.patient_id == CCAPatient.id
+    ).filter(
+        CCAPatient.organization_id == org_id, DomainEvent.event_type.like("RADIATION_%"),
+    ).order_by(DomainEvent.created_at.desc()).limit(20).all()
+
+    return {
+        "generated_at": datetime.utcnow().isoformat(),
+        "planning_queue_count": _phase_count(CCARadiationPhase.rt_sub_status.in_(("contouring", "planning"))),
+        "qa_queue_count": _phase_count(CCARadiationPhase.rt_sub_status == "physics_qa"),
+        "release_queue_count": _phase_count(CCARadiationPhase.rt_sub_status == "treatment_ready"),
+        "physics_review_required_count": _phase_count(CCARadiationPhase.physics_review_required.is_(True)),
+        "machines": {
+            "total": len(units), "active": sum(1 for u in units if u.status == "Active"),
+            "out_of_service": sum(1 for u in units if u.status != "Active"),
+            "qa_overdue_unit_ids": overdue_unit_ids,
+        },
+        "open_equipment_issues_count": db.query(RadiationEquipmentIssue).filter(
+            RadiationEquipmentIssue.treatment_unit_id.in_(unit_ids), RadiationEquipmentIssue.status == "OPEN",
+        ).count() if unit_ids else 0,
+        "open_discrepancies_count": db.query(RadiationDiscrepancyRecord).join(
+            CCARadiationPhase, RadiationDiscrepancyRecord.phase_id == CCARadiationPhase.id
+        ).join(
+            RadiationPrescription, CCARadiationPhase.prescription_id == RadiationPrescription.id
+        ).join(
+            CCAPatient, RadiationPrescription.patient_id == CCAPatient.id
+        ).filter(CCAPatient.organization_id == org_id, RadiationDiscrepancyRecord.status == "OPEN").count(),
+        "invivo_pending_count": sum(1 for iv in invivo_rows if not iv.outcome),
+        "invivo_out_of_tolerance_count": sum(1 for iv in invivo_rows if iv.outcome == "Out of Tolerance"),
+        "recent_audit": [
+            {"id": e.id, "event_type": e.event_type, "payload": e.payload, "created_at": e.created_at.isoformat() if e.created_at else None}
+            for e in recent_events
+        ],
+    }
 
 
 @router.get("/radiation-units/{unit_id}/schedule")
@@ -2766,8 +3700,13 @@ async def report_equipment_issue(unit_id: int, request: Request, db: Session = D
         raise HTTPException(422, "description is required")
     if category not in _ISSUE_CATEGORIES:
         raise HTTPException(422, f"category must be one of {_ISSUE_CATEGORIES}")
+    # Radiation missing-development round, Batch 5 -- severity is optional (existing callers
+    # that omit it keep working unchanged), validated against the tuple only when provided.
+    severity = body.get("severity")
+    if severity is not None and severity not in _EQUIPMENT_ISSUE_SEVERITIES:
+        raise HTTPException(422, f"severity must be one of {_EQUIPMENT_ISSUE_SEVERITIES}")
     issue = RadiationEquipmentIssue(
-        treatment_unit_id=unit.id, description=description, category=category,
+        treatment_unit_id=unit.id, description=description, category=category, severity=severity,
         physics_notified_name=body.get("physics_notified_name"),
         physics_notified_at=datetime.utcnow() if body.get("physics_notified_name") else None,
         action_taken=body.get("action_taken"), incident_reference=body.get("incident_reference"),
@@ -2839,6 +3778,195 @@ async def resolve_equipment_issue(issue_id: int, request: Request, db: Session =
     return {"status": "success", "issue": _equipment_issue_out(db, issue)}
 
 
+# Radiation missing-development round, Batch 5 -- states reachable ONLY from RESOLVED onward
+# (see RadiationEquipmentIssue.status's own docstring). RESOLVED itself stays owned exclusively
+# by resolve_equipment_issue above -- not reachable through this endpoint, so that endpoint's
+# existing OPEN->RESOLVED contract never changes.
+_EQUIPMENT_ISSUE_STATUS_TRANSITIONS = {
+    "INVESTIGATING": "RESOLVED", "CORRECTIVE_ACTION": "INVESTIGATING",
+    "VERIFIED": "CORRECTIVE_ACTION", "CLOSED": "VERIFIED",
+}
+
+
+@router.post("/radiation-issues/{issue_id}/status")
+async def update_equipment_issue_status(issue_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may advance an equipment issue's post-resolution status")
+    issue = _get_org_equipment_issue(db, issue_id, _org_id(current_user))
+    body = await request.json()
+    target = body.get("status")
+    required_from = _EQUIPMENT_ISSUE_STATUS_TRANSITIONS.get(target)
+    if not required_from:
+        raise HTTPException(422, f"status must be one of {list(_EQUIPMENT_ISSUE_STATUS_TRANSITIONS)}")
+    if issue.status != required_from:
+        raise HTTPException(409, f"Cannot move to {target} from {issue.status} (requires {required_from})")
+    note = (body.get("note") or "").strip()
+    if target == "INVESTIGATING":
+        issue.investigating_started_at = datetime.utcnow()
+    elif target == "CORRECTIVE_ACTION":
+        if not note:
+            raise HTTPException(422, "note is required to record the corrective action")
+        issue.corrective_action = note
+        issue.corrective_action_by = _actor(current_user)
+        issue.corrective_action_at = datetime.utcnow()
+    elif target == "VERIFIED":
+        issue.verified_by = _actor(current_user)
+        issue.verified_at = datetime.utcnow()
+    elif target == "CLOSED":
+        issue.closed_by = _actor(current_user)
+        issue.closed_at = datetime.utcnow()
+    issue.status = target
+    db.commit()
+    db.refresh(issue)
+    return {"status": "success", "issue": _equipment_issue_out(db, issue)}
+
+
+# ---------------------------------------------------------------------------
+# Radiation missing-development round, Batch 5: Incident / Near-Miss / Radiation Safety
+# Record (both PDFs' own section of the same name) -- see RadiationSafetyIncident's own
+# docstring for why this is deliberately separate from RadiationDiscrepancyRecord/
+# RadiationEquipmentIssue.
+# ---------------------------------------------------------------------------
+
+_SAFETY_INCIDENT_TYPES = ("Incident", "NearMiss")
+_SAFETY_INCIDENT_SEVERITIES = ("Critical", "Major", "Minor")
+
+
+def _require_rt_safety_reporter(current_user: dict):
+    if is_cca_radiation_technologist(current_user) or is_cca_radiation_physicist(current_user) or is_cca_radiation_oncologist(current_user) or is_admin(current_user):
+        return
+    raise HTTPException(403, "Only Radiation Technologist, Radiation Oncologist, Radiation Physicist, or Admin may report a safety incident")
+
+
+def _safety_incident_out(i: RadiationSafetyIncident) -> dict:
+    return {
+        "id": i.id, "patient_id": i.patient_id, "phase_id": i.phase_id, "fraction_id": i.fraction_id,
+        "treatment_unit_id": i.treatment_unit_id, "equipment_issue_id": i.equipment_issue_id,
+        "incident_type": i.incident_type, "category": i.category, "severity": i.severity,
+        "description": i.description, "immediate_action_taken": i.immediate_action_taken,
+        "reported_by": i.reported_by, "reported_at": i.reported_at.isoformat() if i.reported_at else None,
+        "investigation_status": i.investigation_status, "root_cause": i.root_cause,
+        "corrective_action_plan": i.corrective_action_plan, "preventive_action": i.preventive_action,
+        "reviewed_by": i.reviewed_by, "reviewed_at": i.reviewed_at.isoformat() if i.reviewed_at else None,
+        "closed_by": i.closed_by, "closed_at": i.closed_at.isoformat() if i.closed_at else None,
+        "regulatory_reportable": i.regulatory_reportable,
+        "created_at": i.created_at.isoformat() if i.created_at else None,
+    }
+
+
+@router.post("/radiation-safety-incidents", status_code=201)
+async def report_safety_incident(request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_rt_safety_reporter(current_user)
+    org_id = _org_id(current_user)
+    body = await request.json()
+    incident_type = body.get("incident_type")
+    if incident_type not in _SAFETY_INCIDENT_TYPES:
+        raise HTTPException(422, f"incident_type must be one of {_SAFETY_INCIDENT_TYPES}")
+    severity = body.get("severity")
+    if severity not in _SAFETY_INCIDENT_SEVERITIES:
+        raise HTTPException(422, f"severity must be one of {_SAFETY_INCIDENT_SEVERITIES}")
+    description = (body.get("description") or "").strip()
+    if not description:
+        raise HTTPException(422, "description is required")
+    patient_id = body.get("patient_id")
+    if patient_id is not None:
+        _check_patient_in_org(db, patient_id, org_id)
+    incident = RadiationSafetyIncident(
+        organization_id=org_id, patient_id=patient_id, phase_id=body.get("phase_id"),
+        fraction_id=body.get("fraction_id"), treatment_unit_id=body.get("treatment_unit_id"),
+        equipment_issue_id=body.get("equipment_issue_id"), incident_type=incident_type,
+        category=body.get("category"), severity=severity, description=description,
+        immediate_action_taken=body.get("immediate_action_taken"), reported_by=_actor(current_user),
+        regulatory_reportable=bool(body.get("regulatory_reportable", False)),
+    )
+    db.add(incident)
+    db.flush()
+    publish(
+        db, "RADIATION_SAFETY_INCIDENT_REPORTED", patient_id=patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title=f"Radiation safety {incident_type.lower()} reported", category="SAFETY",
+        description=f"{_actor(current_user)} reported a {severity} {incident_type}: {description[:200]}",
+        incident_id=incident.id,
+    )
+    db.commit()
+    db.refresh(incident)
+    return {"status": "success", "safety_incident": _safety_incident_out(incident)}
+
+
+@router.get("/radiation-safety-incidents")
+def list_safety_incidents(
+    incident_type: str = None, severity: str = None, investigation_status: str = None,
+    db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user),
+):
+    org_id = _org_id(current_user)
+    q = db.query(RadiationSafetyIncident).filter(RadiationSafetyIncident.organization_id == org_id)
+    if incident_type:
+        q = q.filter(RadiationSafetyIncident.incident_type == incident_type)
+    if severity:
+        q = q.filter(RadiationSafetyIncident.severity == severity)
+    if investigation_status:
+        q = q.filter(RadiationSafetyIncident.investigation_status == investigation_status)
+    rows = q.order_by(RadiationSafetyIncident.created_at.desc()).all()
+    return {"safety_incidents": [_safety_incident_out(i) for i in rows]}
+
+
+def _get_org_safety_incident(db: Session, incident_id: int, org_id: int) -> RadiationSafetyIncident:
+    incident = db.query(RadiationSafetyIncident).filter(
+        RadiationSafetyIncident.id == incident_id, RadiationSafetyIncident.organization_id == org_id,
+    ).first()
+    if not incident:
+        raise HTTPException(404, "Safety incident not found")
+    return incident
+
+
+@router.get("/radiation-safety-incidents/{incident_id}")
+def get_safety_incident(incident_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    incident = _get_org_safety_incident(db, incident_id, _org_id(current_user))
+    return {"safety_incident": _safety_incident_out(incident)}
+
+
+@router.post("/radiation-safety-incidents/{incident_id}/investigate")
+async def investigate_safety_incident(incident_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may lead a safety incident investigation")
+    incident = _get_org_safety_incident(db, incident_id, _org_id(current_user))
+    if incident.investigation_status == "Closed":
+        raise HTTPException(409, "This incident is already closed")
+    body = await request.json()
+    investigation_status = body.get("investigation_status")
+    valid_statuses = ("UnderInvestigation", "RootCauseIdentified", "CorrectiveActionPlanned")
+    if investigation_status not in valid_statuses:
+        raise HTTPException(422, f"investigation_status must be one of {valid_statuses}")
+    incident.investigation_status = investigation_status
+    if "root_cause" in body:
+        incident.root_cause = body["root_cause"]
+    if "corrective_action_plan" in body:
+        incident.corrective_action_plan = body["corrective_action_plan"]
+    if "preventive_action" in body:
+        incident.preventive_action = body["preventive_action"]
+    incident.reviewed_by = _actor(current_user)
+    incident.reviewed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(incident)
+    return {"status": "success", "safety_incident": _safety_incident_out(incident)}
+
+
+@router.post("/radiation-safety-incidents/{incident_id}/close")
+def close_safety_incident(incident_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not is_cca_radiation_physicist(current_user):
+        raise HTTPException(403, "Only the Radiation Physicist may close a safety incident")
+    incident = _get_org_safety_incident(db, incident_id, _org_id(current_user))
+    if incident.investigation_status == "Closed":
+        raise HTTPException(409, "This incident is already closed")
+    if not (incident.root_cause and incident.corrective_action_plan):
+        raise HTTPException(409, "root_cause and corrective_action_plan must be recorded before closing")
+    incident.investigation_status = "Closed"
+    incident.closed_by = _actor(current_user)
+    incident.closed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(incident)
+    return {"status": "success", "safety_incident": _safety_incident_out(incident)}
+
+
 @router.post("/radiation-fractions/{fraction_id}/schedule")
 async def schedule_radiation_fraction(fraction_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     """Assigns a scheduled fraction to a treatment unit/day (RTT-001's 'unit lead; scheduler'
@@ -2853,7 +3981,16 @@ async def schedule_radiation_fraction(fraction_id: int, request: Request, db: Se
     body = await request.json()
     unit_id = body.get("treatment_unit_id")
     if unit_id is not None:
-        _get_org_treatment_unit(db, unit_id, org_id)
+        unit = _get_org_treatment_unit(db, unit_id, org_id)
+        # Radiation missing-development round, Batch 4 -- previously nothing stopped
+        # scheduling a fraction onto a unit that's out of service/decommissioned or has
+        # overdue QA; that overdue signal already existed (qa_register/treatment_unit_schedule
+        # both surface it) but was display-only, never enforced here.
+        if unit.status != "Active":
+            raise HTTPException(409, f"Cannot schedule onto a unit that is not Active (current status: {unit.status})")
+        overdue = db.query(RadiationEquipmentQARecord).filter(RadiationEquipmentQARecord.treatment_unit_id == unit.id).all()
+        if any(_qa_record_out(q)["overdue"] for q in overdue):
+            raise HTTPException(409, "Cannot schedule onto a unit with overdue QA")
         fraction.treatment_unit_id = unit_id
     if body.get("scheduled_date"):
         fraction.scheduled_date = datetime.strptime(body["scheduled_date"], "%Y-%m-%d").date()

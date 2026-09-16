@@ -78,8 +78,32 @@ def _advance_to(client, headers, phase_id, status):
     return res.json()["phase"]
 
 
+def _make_phase_sim_and_contours_ready(client, physicist_headers, phase_id):
+    """Radiation missing-development round: simulation_complete/planning/physics_qa now
+    require (respectively) a Ready simulation record, an Approved structure set + a Verified
+    prescription verification, and an Approved plan version for the phase (see
+    transition_radiation_phase's own gates) -- satisfies all of them, plus a passing
+    patient-specific QA record for record_physics_qa's own Approved-decision gate."""
+    sim_id = client.post(f"/api/cca/radiation-phases/{phase_id}/simulation", headers=physicist_headers, json={}).json()["simulation"]["id"]
+    client.post(f"/api/cca/radiation-simulation-records/{sim_id}/review", headers=physicist_headers, json={"readiness_status": "Ready"})
+    structure_set_id = client.post(f"/api/cca/radiation-phases/{phase_id}/structure-sets", headers=physicist_headers, json={
+        "target_volumes": {"PTV": "defined"}, "organs_at_risk": {"OAR": "defined"},
+    }).json()["structure_set"]["id"]
+    client.post(f"/api/cca/radiation-structure-sets/{structure_set_id}/review", headers=physicist_headers, json={"status": "Approved"})
+    client.post(f"/api/cca/radiation-phases/{phase_id}/prescription-verification", headers=physicist_headers, json={"outcome": "Verified"})
+    plan_version_id = client.post(f"/api/cca/radiation-phases/{phase_id}/plan-versions", headers=physicist_headers, json={
+        "plan_name": "Primary plan", "calculation_status": "Calculated",
+    }).json()["plan_version"]["id"]
+    client.post(f"/api/cca/radiation-plan-versions/{plan_version_id}/check", headers=physicist_headers)
+    client.post(f"/api/cca/radiation-plan-versions/{plan_version_id}/approve", headers=physicist_headers)
+    client.post(f"/api/cca/radiation-phases/{phase_id}/patient-specific-qa", headers=physicist_headers, json={
+        "plan_version_id": plan_version_id, "outcome": "Pass",
+    })
+
+
 def _create_phase_at_physics_qa(client, onc_headers, physicist_headers, patient_id):
     phase_id = _create_phase(client, onc_headers, patient_id)
+    _make_phase_sim_and_contours_ready(client, physicist_headers, phase_id)
     for status in ("simulation_pending", "simulation_complete", "contouring", "planning", "physics_qa"):
         _advance_to(client, physicist_headers, phase_id, status)
     return phase_id
