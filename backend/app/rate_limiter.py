@@ -145,33 +145,43 @@ request_bucket = TokenBucket(rate_per_sec=_REQUEST_RATE_PER_SEC, capacity=_REQUE
 token_bucket = TokenBucket(rate_per_sec=_TOKEN_RATE_PER_SEC, capacity=_TOKEN_BURST_CAPACITY)
 
 
-# CORRECTED 2026-09-16, disproving this bucket's own original assumption below: verified live
-# by comparing Groq's own x-ratelimit-remaining-tokens response header for GROQ_API_KEY and
-# GROQ_API_KEY_OCR in the same instant -- both keys returned the IDENTICAL remaining-tokens
-# count, decrementing together. They are two keys on the SAME Groq account, not two separate
-# accounts, so they share one real 8000-token/minute ceiling regardless of which key string a
-# call uses. Giving each workload its own *local* bucket (the original design below) was
-# actively harmful, not just ineffective: each bucket believed it alone had the full 8000 TPM,
-# so a document-OCR burst and a concurrent live-scribing burst could both fire past their own
-# (over-generous) local limit at the same time, jointly blow through the one real shared
-# ceiling, and 429 each other -- confirmed live via a production 429 storm on a 13-slice
-# document upload (extract_clinical_facts logging -- see cca_engine.py -- showed slice 7/13
-# onward cascading into repeated 429s seconds apart). Aliased to the SAME bucket INSTANCES as
-# request_bucket/token_bucket above so all Groq traffic on this account is paced against one
-# true shared budget, exactly like before GROQ_API_KEY_OCR existed. If GROQ_API_KEY_OCR is ever
-# pointed at a genuinely separate Groq account (a new signup, not just a second key on this
-# one), re-verify with the same header comparison before reintroducing separate bucket
-# instances here -- do not assume a different key string implies a different account again.
+# CORRECTED AGAIN 2026-09-16 (later same day): GROQ_API_KEY / GROQ_API_KEY_OCR were rotated to
+# a new pair of keys ("aivana_scribe" / "aivana_ocr"), and THIS pair was verified live to be on
+# genuinely separate Groq accounts -- see the note below on why that verification needed a
+# different method than the one that (correctly, for the OLD key pair) produced the opposite
+# finding just earlier today.
 #
-# Original (incorrect) reasoning kept for context: a multi-page document upload's per-slice
-# extraction calls and a concurrent doctor's live OPD/IPD consultation scribing both funnel
-# through the same account's 8000-token/minute ceiling -- a document processing burst could
-# exhaust that whole budget by itself and starve a live consultation waiting on its own note
-# draft, or vice versa. The fix for that real problem is proper shared pacing (this file's
-# token_bucket.consume() already blocks callers until real budget is available), not two
-# buckets that both overcommit against a budget neither of them actually owns alone.
-ocr_extraction_request_bucket = request_bucket
-ocr_extraction_token_bucket = token_bucket
+# Verification method that actually works: a concurrent burst of 6 real-sized (~400 completion
+# token) calls on one key, immediately followed by a probe on the other key. The burst's own
+# key dropped from 7918 -> 7137 remaining tokens; the other key's remaining_tokens read exactly
+# 7918 both before and after the burst -- completely unaffected. That is only possible if the
+# two keys draw from independent 8000-token/minute budgets.
+#
+# Why the EARLIER (same-day) same-account finding for the OLD key pair used a method that is
+# actually unreliable, and shouldn't be repeated: a single small probe call on each key, read
+# sequentially, compared remaining_tokens/remaining_requests directly. Both this account's real
+# token bucket (~120-133 tokens/sec) and request bucket refill continuously and fast enough that
+# the network+inference latency between two sequential tiny calls (a "hi" prompt, max_tokens=1)
+# is enough for the budget to partially or fully refill in between -- so two calls on the SAME
+# account can easily read back identical remaining_* values, which looks IDENTICAL to two calls
+# on genuinely separate accounts each starting fresh. The two-probe method cannot tell the
+# difference; only a burst large/fast enough to outrun refill (this section's method) can. The
+# OLD key pair's same-account conclusion was NOT re-verified with the burst method before being
+# discarded (the keys were rotated out first) -- it may well have still been correct, but that
+# specific finding rests on a method now known to be unreliable. Do not reuse the simple
+# two-sequential-probe comparison to decide this again for any future key rotation; use the
+# burst-and-cross-check method above.
+#
+# Genuinely separate TokenBucket instances, now correctly reflecting two independent accounts:
+# a document-OCR burst can no longer starve a live consultation's own budget (or vice versa),
+# and this workload no longer competes with scribing for the same 8000 TPM ceiling at all.
+_OCR_REQUEST_RATE_PER_SEC = 1.0
+_OCR_REQUEST_BURST_CAPACITY = 10.0
+_OCR_TOKEN_RATE_PER_SEC = 120.0
+_OCR_TOKEN_BURST_CAPACITY = 8000.0
+
+ocr_extraction_request_bucket = TokenBucket(rate_per_sec=_OCR_REQUEST_RATE_PER_SEC, capacity=_OCR_REQUEST_BURST_CAPACITY)
+ocr_extraction_token_bucket = TokenBucket(rate_per_sec=_OCR_TOKEN_RATE_PER_SEC, capacity=_OCR_TOKEN_BURST_CAPACITY)
 
 
 # Calibrated against Sarvam's own documented rate limit for Document Intelligence / Vision
