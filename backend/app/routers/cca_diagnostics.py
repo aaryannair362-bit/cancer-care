@@ -69,6 +69,10 @@ def _order_out(o: CCAOrder, patient_name: str = None, patient_mrn: str = None) -
         "contrast_notes": o.contrast_notes, "technical_notes": o.technical_notes,
         "technical_issue": o.technical_issue, "acquired_by": o.acquired_by,
         "acquired_at": o.acquired_at.isoformat() if o.acquired_at else None,
+        "identity_confirmed": bool(o.identity_confirmed), "specimen_accession_id": o.specimen_accession_id,
+        "collection_site": o.collection_site, "specimen_count": o.specimen_count,
+        "received_by": o.received_by, "received_at": o.received_at.isoformat() if o.received_at else None,
+        "recollection_of_order_id": o.recollection_of_order_id, "recollection_number": o.recollection_number,
     }
 
 
@@ -78,7 +82,9 @@ def _result_out(r: CCAResult) -> dict:
         "title": r.title, "findings_text": r.findings_text, "technique": r.technique,
         "comparison": r.comparison, "impression": r.impression, "structured_report": r.structured_report,
         "extracted_values": r.extracted_values, "is_critical": r.is_critical, "status": r.status,
-        "report_status": r.report_status, "finalized_by": r.finalized_by,
+        "report_status": r.report_status,
+        "entered_by": r.entered_by, "entered_at": r.entered_at.isoformat() if r.entered_at else None,
+        "finalized_by": r.finalized_by,
         "finalized_at": r.finalized_at.isoformat() if r.finalized_at else None,
         "acknowledged_by": r.acknowledged_by,
         "acknowledged_at": r.acknowledged_at.isoformat() if r.acknowledged_at else None,
@@ -1019,12 +1025,45 @@ async def record_molecular_result(test_id: int, request: Request, db: Session = 
 
 # ---------------------------------------------------------------------------
 # Lab / Phlebotomy
+#
+# Order lifecycle (gap review, "Laboratory Order Lifecycle -- Critical" / "Result Verification &
+# Release -- Critical"): Raised -> collect (identity confirmed, specimen accessioned) ->
+# AwaitingLabReceipt -> receive -> Received -> draft a result (Entered, entered_by/at recorded)
+# -> verify (Finalized, finalized_by/at recorded, order.status becomes RESULTED). A rejected
+# specimen moves to RecollectionRequired and can never itself be resulted -- a NEW linked order
+# is created via /recollect instead, exactly mirroring how a finalized pathology report is
+# amended via a new linked CCAResult rather than mutated in place (see
+# draft_pathology_report/finalize_pathology_report above).
 # ---------------------------------------------------------------------------
+
+# Structured rejection reasons (gap review "Specimen Rejection -- Critical") -- replaces the
+# previous free-text `reason` field, which accepted anything typed. Codes, not the PDF's exact
+# prose, to match this file's existing enum-like conventions (CCAOrder.status/order_type);
+# frontend maps each code to a human label for the dropdown.
+LAB_REJECTION_REASONS = (
+    "HEMOLYSED", "CLOTTED", "INSUFFICIENT_QUANTITY", "WRONG_CONTAINER", "WRONG_SPECIMEN",
+    "LEAKED_DAMAGED", "MISLABELED", "EXPIRED_TRANSPORT_ISSUE", "OTHER",
+)
+
 
 @router.get("/lab/worklist")
 def lab_worklist(db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
     _require_diagnostics_read(current_user, is_cca_lab_phlebotomy)
-    return {"worklist": _worklist(db, _org_id(current_user), "LAB")}
+    worklist = _worklist(db, _org_id(current_user), "LAB")
+    # The frontend needs to know whether an order's result is still a Draft (show "Verify &
+    # Release") or already Finalized (show "Resulted") -- attach the CURRENT (not superseded)
+    # LAB result's id/report_status per order rather than making the frontend fetch each one
+    # individually.
+    order_ids = [o["id"] for o in worklist]
+    latest_results = {}
+    if order_ids:
+        for r in db.query(CCAResult).filter(
+            CCAResult.order_id.in_(order_ids), CCAResult.result_type == "LAB", CCAResult.superseded_by_id.is_(None)
+        ):
+            latest_results[r.order_id] = {"id": r.id, "report_status": r.report_status}
+    for o in worklist:
+        o["latest_result"] = latest_results.get(o["id"])
+    return {"worklist": worklist}
 
 
 @router.get("/other-diagnostics/worklist")
@@ -1043,25 +1082,73 @@ def other_diagnostics_worklist(db: Session = Depends(get_cca_db), current_user: 
 
 @router.post("/lab/orders/{order_id}/collect")
 async def collect_specimen(order_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Specimen collection -- gap review "Patient & Specimen Identification"/"Specimen
+    Collection Workflow" (Critical): positive patient identification is a hard gate here, not
+    just a recorded field, and a unique specimen/accession identifier is generated server-side
+    (never client-supplied) rather than left for a barcode system that doesn't exist yet."""
     if not (is_cca_lab_phlebotomy(current_user) or is_admin(current_user)):
         raise HTTPException(403, "Only Lab/Phlebotomy staff or Admin may record specimen collection")
     order = _get_org_order(db, order_id, _org_id(current_user))
     if order.order_type != "LAB":
         raise HTTPException(404, "Not a lab order")
+    if order.workflow_state in ("RecollectionRequired", "RecollectionInitiated"):
+        raise HTTPException(409, "This specimen was rejected -- use the recollection workflow to raise a new collection")
+    if order.collected_at:
+        raise HTTPException(409, "This order's specimen has already been collected")
     body = await request.json()
+    if not body.get("identity_confirmed"):
+        raise HTTPException(422, "identity_confirmed must be true -- positive patient identification is required before collection")
     actor = _actor(current_user)
+    now = datetime.utcnow()
+    order.identity_confirmed = True
     order.collected_by = actor
-    order.collected_at = datetime.utcnow()
+    order.collected_at = now
     order.specimen_container = body.get("specimen_container")
-    order.workflow_state = "Collected"
+    order.collection_site = body.get("collection_site")
+    order.specimen_count = body.get("specimen_count") or 1
+    # Server-generated, never client-supplied -- the identifier a physical specimen label/
+    # barcode would carry. Format is an internal convention, not a real accessioning standard;
+    # good enough to be unique and human-traceable back to this exact order/collection event.
+    order.specimen_accession_id = f"LAB-{order.id}-{now.strftime('%Y%m%d%H%M%S')}"
+    order.workflow_state = "AwaitingLabReceipt"
     order.status = "IN_PROGRESS"
     publish(
         db, "SPECIMEN_COLLECTED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
         title=f"Specimen collected: {order.item_name}", category="INVESTIGATION",
-        description=f"{actor} collected the specimen for {order.item_name}.",
+        description=f"{actor} collected the specimen for {order.item_name} (accession {order.specimen_accession_id}).",
         order_id=order.id,
     )
     db.commit()
+    db.refresh(order)
+    return {"status": "success", "order": _order_out(order)}
+
+
+@router.post("/lab/orders/{order_id}/receive")
+async def receive_specimen(order_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Sample Routing & Laboratory Receipt -- records the lab actually taking custody of the
+    specimen, distinct from collect_specimen's phlebotomist-side event. A result cannot be
+    drafted until this has happened (see record_lab_result's own gate)."""
+    if not (is_cca_lab_phlebotomy(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only Lab/Phlebotomy staff or Admin may record specimen receipt")
+    order = _get_org_order(db, order_id, _org_id(current_user))
+    if order.order_type != "LAB":
+        raise HTTPException(404, "Not a lab order")
+    if not order.collected_at:
+        raise HTTPException(409, "Cannot receive a specimen that has not been collected yet")
+    if order.received_at:
+        raise HTTPException(409, "This specimen has already been received")
+    actor = _actor(current_user)
+    order.received_by = actor
+    order.received_at = datetime.utcnow()
+    order.workflow_state = "Received"
+    publish(
+        db, "SPECIMEN_RECEIVED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Specimen received: {order.item_name}", category="INVESTIGATION",
+        description=f"{actor} recorded laboratory receipt of the specimen for {order.item_name}.",
+        order_id=order.id,
+    )
+    db.commit()
+    db.refresh(order)
     return {"status": "success", "order": _order_out(order)}
 
 
@@ -1070,56 +1157,159 @@ async def reject_specimen(order_id: int, request: Request, db: Session = Depends
     if not (is_cca_lab_phlebotomy(current_user) or is_admin(current_user)):
         raise HTTPException(403, "Only Lab/Phlebotomy staff or Admin may reject a specimen")
     order = _get_org_order(db, order_id, _org_id(current_user))
+    if order.status == "RESULTED":
+        raise HTTPException(409, "Cannot reject a specimen that already has a result")
     body = await request.json()
     reason = body.get("reason")
-    if not reason:
-        raise HTTPException(422, "reason is required to reject a specimen")
+    if reason not in LAB_REJECTION_REASONS:
+        raise HTTPException(422, f"reason must be one of: {', '.join(LAB_REJECTION_REASONS)}")
     order.rejection_reason = reason
     order.workflow_state = "RecollectionRequired"
     actor = _actor(current_user)
+    # "Notify relevant clinical/ordering team when recollection is required" -- this journey
+    # event/publish() call IS this app's existing notification mechanism (the same one every
+    # other role's actions surface through); no separate notification channel exists to build.
     publish(
         db, "SPECIMEN_REJECTED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
         title=f"Specimen rejected: {order.item_name}", category="INVESTIGATION",
-        description=f"{actor} rejected the specimen for {order.item_name}: {reason}",
+        description=f"{actor} rejected the specimen for {order.item_name}: {reason}. Recollection required.",
         order_id=order.id,
     )
     db.commit()
     return {"status": "success", "order": _order_out(order)}
 
 
+@router.post("/lab/orders/{order_id}/recollect")
+async def recollect_specimen(order_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Creates a NEW CCAOrder for a fresh collection against a rejected specimen's order --
+    never reuses or resets the original, so its own collection/rejection history stays exactly
+    as it happened (gap review: "Rejected specimen should not simply disappear... Link the new
+    specimen to the original order and rejection event... Track recollection count"). The
+    original is marked RecollectionInitiated (not left at RecollectionRequired) so this can't be
+    called twice for the same rejection."""
+    if not (is_cca_lab_phlebotomy(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only Lab/Phlebotomy staff or Admin may initiate a recollection")
+    original = _get_org_order(db, order_id, _org_id(current_user))
+    if original.order_type != "LAB":
+        raise HTTPException(404, "Not a lab order")
+    if original.workflow_state != "RecollectionRequired":
+        raise HTTPException(409, f"Order is not pending recollection (workflow_state={original.workflow_state})")
+
+    new_order = CCAOrder(
+        patient_id=original.patient_id, encounter_id=original.encounter_id, order_type="LAB",
+        item_name=original.item_name, item_code=original.item_code,
+        clinical_indication=original.clinical_indication, priority=original.priority,
+        staging_relevant=original.staging_relevant, requested_by=original.requested_by,
+        order_set_master_id=original.order_set_master_id,
+        recollection_of_order_id=original.id, recollection_number=(original.recollection_number or 0) + 1,
+    )
+    db.add(new_order)
+    original.workflow_state = "RecollectionInitiated"
+    db.flush()
+
+    actor = _actor(current_user)
+    publish(
+        db, "SPECIMEN_RECOLLECTION_INITIATED", patient_id=original.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Recollection raised: {original.item_name}", category="INVESTIGATION",
+        description=f"{actor} raised a new collection (order #{new_order.id}) for {original.item_name} following rejection of order #{original.id}.",
+        order_id=new_order.id,
+    )
+    db.commit()
+    db.refresh(new_order)
+    return {"status": "success", "order": _order_out(new_order)}
+
+
 @router.post("/lab/orders/{order_id}/result")
 async def record_lab_result(order_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Technical result ENTRY -- gap review "Result Verification & Release" (Critical): this no
+    longer finalizes a result on its own. It creates/updates a Draft CCAResult (entered_by/at
+    recorded); a separate call to /lab/results/{id}/verify is required before the result counts
+    as released. Mirrors draft_pathology_report's own draft/amend shape exactly: editing an
+    already-Finalized result requires `amendment_reason` and creates a new linked CCAResult via
+    supersedes_id rather than mutating finalized content in place."""
     if not (is_cca_lab_phlebotomy(current_user) or is_admin(current_user)):
         raise HTTPException(403, "Only Lab/Phlebotomy staff or Admin may record a lab result")
     org_id = _org_id(current_user)
     order = _get_org_order(db, order_id, org_id)
     if order.order_type != "LAB":
         raise HTTPException(404, "Not a lab order")
+    if order.workflow_state in ("RecollectionRequired", "RecollectionInitiated"):
+        raise HTTPException(409, "Cannot enter a result for a rejected specimen -- use the recollection workflow")
+    if not order.received_at:
+        raise HTTPException(409, "Cannot enter a result: this specimen has not been received by the laboratory yet")
     body = await request.json()
     findings = body.get("findings_text")
     if not findings:
         raise HTTPException(422, "findings_text is required")
-
-    result = CCAResult(
-        order_id=order.id, patient_id=order.patient_id, result_type="LAB", title=order.item_name,
-        findings_text=findings, extracted_values=body.get("extracted_values"),
-        is_critical=bool(body.get("is_critical", False)),
-        status="PENDING_REVIEW" if body.get("is_critical") else "NEW", report_status="Finalized",
-        finalized_by=_actor(current_user), finalized_at=datetime.utcnow(),
-    )
-    db.add(result)
-    db.flush()
-    order.status = "RESULTED"
-    order.workflow_state = "ResultAvailable"
-    # No journey/domain event existed for lab results at all before this -- unlike imaging
-    # and pathology, which always had one. Lab results finalize immediately (no separate
-    # draft step), so this is the only point to publish from.
     actor = _actor(current_user)
+
+    # "Current" = not yet superseded by a later amendment, whether Draft or Finalized -- same
+    # lookup draft_pathology_report uses.
+    result = db.query(CCAResult).filter(
+        CCAResult.order_id == order.id, CCAResult.result_type == "LAB", CCAResult.superseded_by_id.is_(None)
+    ).order_by(CCAResult.id.desc()).first()
+
+    if result and result.report_status == "Finalized":
+        amendment_reason = (body.get("amendment_reason") or "").strip()
+        if not amendment_reason:
+            raise HTTPException(409, "This lab result is already verified and locked. Provide amendment_reason to create a linked correction.")
+        amendment = CCAResult(
+            order_id=order.id, patient_id=order.patient_id, result_type="LAB", title=order.item_name,
+            supersedes_id=result.id, amendment_reason=amendment_reason, amended_by=actor, amended_at=datetime.utcnow(),
+        )
+        db.add(amendment)
+        db.flush()
+        result.superseded_by_id = amendment.id
+        result.report_status = "Superseded"
+        result = amendment
+    elif not result:
+        result = CCAResult(order_id=order.id, patient_id=order.patient_id, result_type="LAB", title=order.item_name)
+        db.add(result)
+
+    result.findings_text = findings
+    result.extracted_values = body.get("extracted_values")
+    result.is_critical = bool(body.get("is_critical", False))
+    result.status = "PENDING_REVIEW" if result.is_critical else "NEW"
+    result.report_status = "Draft"
+    result.entered_by = actor
+    result.entered_at = datetime.utcnow()
+    order.workflow_state = "ResultEntered"
+    db.commit()
+    db.refresh(result)
+    return {"status": "success", "result": _result_out(result)}
+
+
+@router.post("/lab/results/{result_id}/verify")
+def verify_lab_result(result_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Verification & release -- the "Authorized verifier" step (gap review section 15's
+    permission table). Reuses the same Lab/Phlebotomy-or-Admin gate as entry for now (this
+    codebase has no separate "lab verifier" role yet); a stricter "must not be the same person
+    who entered it" rule would need that role to exist first, so it isn't enforced here. Locks
+    the result against ordinary editing -- see record_lab_result's amendment path for what
+    happens to a post-verification correction."""
+    if not (is_cca_lab_phlebotomy(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only Lab/Phlebotomy staff or Admin may verify and release a lab result")
+    org_id = _org_id(current_user)
+    result = _get_org_result(db, result_id, org_id)
+    if result.result_type != "LAB":
+        raise HTTPException(404, "Not a lab result")
+    if result.report_status == "Finalized":
+        raise HTTPException(409, "This result is already verified and released")
+    actor = _actor(current_user)
+    result.report_status = "Finalized"
+    result.finalized_by = actor
+    result.finalized_at = datetime.utcnow()
+
+    order = db.query(CCAOrder).filter(CCAOrder.id == result.order_id).first()
+    if order:
+        order.status = "RESULTED"
+        order.workflow_state = "ResultAvailable"
+
     publish(
-        db, "LAB_RESULT_FINALIZED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
-        title=f"Lab Result Finalized: {result.title}", category="INVESTIGATION",
-        description=f"{actor} recorded the lab result.",
-        result_id=result.id, order_id=order.id, is_critical=result.is_critical,
+        db, "LAB_RESULT_VERIFIED", patient_id=result.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Lab Result Verified: {result.title}", category="INVESTIGATION",
+        description=f"{actor} verified and released the lab result (entered by {result.entered_by or 'unknown'}).",
+        result_id=result.id, order_id=result.order_id, is_critical=result.is_critical,
     )
     db.commit()
     db.refresh(result)

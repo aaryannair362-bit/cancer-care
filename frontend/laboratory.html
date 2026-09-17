@@ -138,6 +138,44 @@
             } catch (err) { listEl.innerHTML = `<p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p>`; }
         }
 
+        // Structured rejection reasons (backend/app/routers/cca_diagnostics.py's
+        // LAB_REJECTION_REASONS) -- code -> human label for the dropdown.
+        const LAB_REJECTION_REASON_LABELS = {
+            HEMOLYSED: 'Hemolysed', CLOTTED: 'Clotted', INSUFFICIENT_QUANTITY: 'Insufficient quantity',
+            WRONG_CONTAINER: 'Wrong container', WRONG_SPECIMEN: 'Wrong specimen',
+            LEAKED_DAMAGED: 'Leaked / damaged', MISLABELED: 'Mislabeled',
+            EXPIRED_TRANSPORT_ISSUE: 'Expired / transport issue', OTHER: 'Other',
+        };
+
+        // Order lifecycle -> the one action this row's button should offer next. Mirrors the
+        // backend state machine exactly (collect -> receive -> enter result -> verify), plus
+        // the rejection/recollection branch -- see cca_diagnostics.py's Lab/Phlebotomy section
+        // docstring for the full state diagram.
+        function labOrderActionHtml(o) {
+            if (o.workflow_state === 'RecollectionRequired') {
+                return `<span class="badge badge-rose">Recollection Required</span> <button class="btn-navy" onclick="submitLabRecollect(${Number(o.id)})">Start Recollection</button>`;
+            }
+            if (o.workflow_state === 'RecollectionInitiated') {
+                return '<span class="badge badge-amber">Recollection Initiated</span>';
+            }
+            if (!o.collected_at) {
+                return `<button class="btn-outline" onclick="openLabCollectInline(${Number(o.id)})">Collect</button><button class="btn-outline" onclick="openLabRejectInline(${Number(o.id)})">Reject</button>`;
+            }
+            if (!o.received_at) {
+                return `<button class="btn-navy" onclick="submitLabReceive(${Number(o.id)})">Receive in Lab</button><button class="btn-outline" onclick="openLabRejectInline(${Number(o.id)})">Reject</button>`;
+            }
+            if (!o.latest_result || o.latest_result.report_status !== 'Finalized') {
+                if (!o.latest_result) {
+                    return `<button class="btn-navy" onclick="openLabResultInline(${Number(o.id)})">Enter Result</button><button class="btn-outline" onclick="openLabRejectInline(${Number(o.id)})">Reject</button>`;
+                }
+                // A Draft result already exists (entered, not yet verified) -- a distinct person/
+                // action must verify it before it's released (gap review: Result Verification &
+                // Release -- Critical).
+                return `<span class="badge badge-amber">Entered -- Pending Verification</span> <button class="btn-navy" onclick="submitLabVerify(${Number(o.id)}, ${Number(o.latest_result.id)})">Verify &amp; Release</button>`;
+            }
+            return '<span class="badge badge-green">Resulted</span>';
+        }
+
         async function loadLabWorklist() {
             const container = document.getElementById('lab-content');
             try {
@@ -146,41 +184,73 @@
                     (data.worklist.length ? data.worklist.map(o => `
                         <div class="worklist-row">
                             <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(o.patient_name)}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(o.patient_mrn)}</div></div>
-                            <div><div class="wl-label">Test</div><div class="wl-value" style="font-size:13px;">${escapeHtml(o.item_name)}</div></div>
+                            <div><div class="wl-label">Test</div><div class="wl-value" style="font-size:13px;">${escapeHtml(o.item_name)}</div>${o.specimen_accession_id ? `<div style="font-size:11px;color:var(--ink-500);">Accession: ${escapeHtml(o.specimen_accession_id)}</div>` : ''}</div>
                             <div><div class="wl-label">Priority</div><div class="wl-value" style="font-size:13px;">${escapeHtml(o.priority)}</div></div>
                             <div><span class="badge badge-blue">${escapeHtml(o.status)}</span></div>
-                            <div style="display:flex; gap:6px;">
-                                ${!o.collected_at ? `<button class="btn-outline" onclick="submitLabCollect(${Number(o.id)})">Collect</button><button class="btn-outline" onclick="openLabRejectInline(${Number(o.id)})">Reject</button>` :
-                                (o.status !== 'RESULTED' ? `<button class="btn-navy" onclick="openLabResultInline(${Number(o.id)})">Enter Result</button>` : '<span class="badge badge-green">Resulted</span>')}
-                            </div>
+                            <div style="display:flex; gap:6px; flex-wrap:wrap;">${labOrderActionHtml(o)}</div>
                         </div>
                         <div id="lab-inline-${o.id}"></div>
                     `).join('') : '<p style="color:var(--ink-500); font-size:13px;">No lab orders.</p>') + `</div>`;
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
         }
 
+        function openLabCollectInline(orderId) {
+            document.getElementById(`lab-inline-${orderId}`).innerHTML = `
+                <div class="section-card" style="margin-top:8px; margin-bottom:14px;">
+                    <label class="checkbox-row"><input type="checkbox" id="lab-identity-confirmed-${orderId}" /> I have confirmed this patient's identity against the order</label>
+                    <div class="form-group"><label class="form-label">Specimen container</label><input type="text" id="lab-container-${orderId}" class="form-input" placeholder="e.g. EDTA tube" /></div>
+                    <div class="form-group"><label class="form-label">Collection site</label><input type="text" id="lab-site-${orderId}" class="form-input" placeholder="e.g. Left antecubital vein" /></div>
+                    <div class="form-group"><label class="form-label">Number of containers/specimens</label><input type="number" id="lab-count-${orderId}" class="form-input" value="1" min="1" /></div>
+                    <button class="btn-navy" onclick="submitLabCollect(${orderId})">Confirm Collection</button>
+                </div>
+            `;
+        }
         async function submitLabCollect(orderId) {
+            const identityConfirmed = document.getElementById(`lab-identity-confirmed-${orderId}`).checked;
+            if (!identityConfirmed) { toast('You must confirm patient identity before collecting', 'error'); return; }
             try {
-                await Api.post(`${CCA_API}/lab/orders/${orderId}/collect`, {});
+                await Api.post(`${CCA_API}/lab/orders/${orderId}/collect`, {
+                    identity_confirmed: true,
+                    specimen_container: document.getElementById(`lab-container-${orderId}`).value || undefined,
+                    collection_site: document.getElementById(`lab-site-${orderId}`).value || undefined,
+                    specimen_count: parseInt(document.getElementById(`lab-count-${orderId}`).value, 10) || 1,
+                });
                 toast('Specimen collected', 'success');
                 loadLabWorklist();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
+        async function submitLabReceive(orderId) {
+            try {
+                await Api.post(`${CCA_API}/lab/orders/${orderId}/receive`, {});
+                toast('Specimen receipt recorded', 'success');
+                loadLabWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
         function openLabRejectInline(orderId) {
+            const options = Object.entries(LAB_REJECTION_REASON_LABELS).map(([code, label]) => `<option value="${code}">${escapeHtml(label)}</option>`).join('');
             document.getElementById(`lab-inline-${orderId}`).innerHTML = `
                 <div class="section-card" style="margin-top:8px; margin-bottom:14px;">
-                    <div class="form-group"><label class="form-label">Rejection reason</label><input type="text" id="lab-reject-reason-${orderId}" class="form-input" placeholder="e.g. Hemolysed sample" /></div>
+                    <div class="form-group"><label class="form-label">Rejection reason</label><select id="lab-reject-reason-${orderId}" class="form-select"><option value="">Select a reason...</option>${options}</select></div>
                     <button class="btn-navy" onclick="submitLabReject(${orderId})">Mark Recollection Required</button>
                 </div>
             `;
         }
         async function submitLabReject(orderId) {
             const reason = document.getElementById(`lab-reject-reason-${orderId}`).value;
-            if (!reason) { toast('Reason is required', 'error'); return; }
+            if (!reason) { toast('A rejection reason is required', 'error'); return; }
             try {
                 await Api.post(`${CCA_API}/lab/orders/${orderId}/reject`, { reason });
                 toast('Specimen marked for recollection', 'success');
+                loadLabWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitLabRecollect(orderId) {
+            try {
+                const res = await Api.post(`${CCA_API}/lab/orders/${orderId}/recollect`, {});
+                toast(`New collection raised (order #${res.order.id})`, 'success');
                 loadLabWorklist();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
@@ -190,7 +260,7 @@
                 <div class="section-card" style="margin-top:8px; margin-bottom:14px;">
                     <div class="form-group"><label class="form-label">Findings</label><textarea id="lab-findings-${orderId}" class="form-textarea" rows="2"></textarea></div>
                     <label class="checkbox-row"><input type="checkbox" id="lab-critical-${orderId}" /> Critical result</label>
-                    <button class="btn-navy" onclick="submitLabResult(${orderId})">Save Result</button>
+                    <button class="btn-navy" onclick="submitLabResult(${orderId})">Save Result (Draft -- Pending Verification)</button>
                 </div>
             `;
         }
@@ -199,7 +269,15 @@
             if (!findings) { toast('Findings are required', 'error'); return; }
             try {
                 await Api.post(`${CCA_API}/lab/orders/${orderId}/result`, { findings_text: findings, is_critical: document.getElementById(`lab-critical-${orderId}`).checked });
-                toast('Result recorded', 'success');
+                toast('Result entered -- awaiting verification before release', 'success');
+                loadLabWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitLabVerify(orderId, resultId) {
+            try {
+                await Api.post(`${CCA_API}/lab/results/${resultId}/verify`, {});
+                toast('Result verified and released', 'success');
                 loadLabWorklist();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }

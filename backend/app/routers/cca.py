@@ -1246,7 +1246,12 @@ def get_case_summary(
         # tabs -- "results" is kept as-is for any other/older consumer.
         "results_by_period": {
             "past_labs": [
+                # Lab gap review: report_status (Draft/Finalized/Superseded) is included so a
+                # consumer can distinguish an entered-but-not-yet-verified result from a
+                # released one -- "do not treat unverified results as final" -- rather than a
+                # Draft value reading identically to a verified one.
                 {"id": r.id, "title": r.title, "is_critical": r.is_critical, "status": r.status,
+                 "report_status": r.report_status,
                  "excerpt": ((r.impression or r.findings_text or "")[:300] or None),
                  "resulted_at": r.resulted_at.isoformat() if r.resulted_at else None}
                 for r in results if r.result_type == "LAB"

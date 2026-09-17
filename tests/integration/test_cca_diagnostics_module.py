@@ -157,29 +157,119 @@ def test_molecular_diagnostics_order_and_result(client, auth_headers, db_session
     assert any(t["id"] == test_id and t["result_as_reported"] == "Positive (TPS 40%)" for t in listing)
 
 
-def test_lab_collection_rejection_and_result(client, auth_headers, db_session, oncologist, lab_tech):
+def test_lab_collection_requires_positive_identity_confirmation(client, auth_headers, db_session, oncologist, lab_tech):
     patient_id = _patient_id(db_session, oncologist.organization_id)
     order = _make_order(db_session, patient_id, "LAB", item_name="CBC with ANC")
     lab_headers = auth_headers(lab_tech)
 
-    collect = client.post(f"/api/cca/lab/orders/{order.id}/collect", headers=lab_headers, json={"specimen_container": "EDTA tube"})
-    assert collect.status_code == 200
-    assert collect.json()["order"]["collected_by"] == "labtech@diaghosp.com"
-    assert collect.json()["order"]["status"] == "IN_PROGRESS"
+    missing_confirmation = client.post(f"/api/cca/lab/orders/{order.id}/collect", headers=lab_headers, json={"specimen_container": "EDTA tube"})
+    assert missing_confirmation.status_code == 422
 
-    result = client.post(f"/api/cca/lab/orders/{order.id}/result", headers=lab_headers, json={
+    collect = client.post(f"/api/cca/lab/orders/{order.id}/collect", headers=lab_headers, json={
+        "identity_confirmed": True, "specimen_container": "EDTA tube", "collection_site": "Left antecubital vein",
+    })
+    assert collect.status_code == 200
+    body = collect.json()["order"]
+    assert body["collected_by"] == "labtech@diaghosp.com"
+    assert body["status"] == "IN_PROGRESS"
+    assert body["identity_confirmed"] is True
+    assert body["workflow_state"] == "AwaitingLabReceipt"
+    assert body["specimen_accession_id"] and body["specimen_accession_id"].startswith(f"LAB-{order.id}-")
+
+    # Cannot collect the same order twice.
+    twice = client.post(f"/api/cca/lab/orders/{order.id}/collect", headers=lab_headers, json={"identity_confirmed": True})
+    assert twice.status_code == 409
+
+
+def test_lab_result_entry_requires_verification_before_release(client, auth_headers, db_session, oncologist, lab_tech):
+    """Result Verification & Release -- Critical: entering a result must NOT finalize it. A
+    separate verify call is required before it counts as released."""
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    order = _make_order(db_session, patient_id, "LAB", item_name="CBC with ANC")
+    lab_headers = auth_headers(lab_tech)
+
+    # Cannot enter a result before the specimen is even collected/received.
+    too_early = client.post(f"/api/cca/lab/orders/{order.id}/result", headers=lab_headers, json={"findings_text": "x"})
+    assert too_early.status_code == 409
+
+    client.post(f"/api/cca/lab/orders/{order.id}/collect", headers=lab_headers, json={"identity_confirmed": True})
+    still_not_received = client.post(f"/api/cca/lab/orders/{order.id}/result", headers=lab_headers, json={"findings_text": "x"})
+    assert still_not_received.status_code == 409
+
+    receive = client.post(f"/api/cca/lab/orders/{order.id}/receive", headers=lab_headers, json={})
+    assert receive.status_code == 200
+    assert receive.json()["order"]["received_by"] == "labtech@diaghosp.com"
+    assert receive.json()["order"]["workflow_state"] == "Received"
+
+    entered = client.post(f"/api/cca/lab/orders/{order.id}/result", headers=lab_headers, json={
         "findings_text": "Hemoglobin 11.2 g/dL, ANC 4100/uL", "is_critical": False,
     })
-    assert result.status_code == 200
-    assert result.json()["result"]["report_status"] == "Finalized"
+    assert entered.status_code == 200
+    result_body = entered.json()["result"]
+    assert result_body["report_status"] == "Draft"
+    assert result_body["entered_by"] == "labtech@diaghosp.com"
 
-    order2 = _make_order(db_session, patient_id, "LAB", item_name="Renal Function")
-    reject = client.post(f"/api/cca/lab/orders/{order2.id}/reject", headers=lab_headers, json={"reason": "Hemolysed sample"})
+    # The order itself is not yet RESULTED -- only a verified/released result completes it.
+    order_after_entry = client.get(f"/api/cca/lab/worklist", headers=lab_headers).json()["worklist"]
+    this_order = next(o for o in order_after_entry if o["id"] == order.id)
+    assert this_order["status"] != "RESULTED"
+    assert this_order["latest_result"] == {"id": result_body["id"], "report_status": "Draft"}
+
+    verify = client.post(f"/api/cca/lab/results/{result_body['id']}/verify", headers=lab_headers)
+    assert verify.status_code == 200
+    assert verify.json()["result"]["report_status"] == "Finalized"
+    assert verify.json()["result"]["finalized_by"] == "labtech@diaghosp.com"
+
+    # Cannot verify twice.
+    verify_again = client.post(f"/api/cca/lab/results/{result_body['id']}/verify", headers=lab_headers)
+    assert verify_again.status_code == 409
+
+    # A post-verification correction requires amendment_reason and creates a NEW linked result.
+    no_reason = client.post(f"/api/cca/lab/orders/{order.id}/result", headers=lab_headers, json={"findings_text": "corrected value"})
+    assert no_reason.status_code == 409
+    amended = client.post(f"/api/cca/lab/orders/{order.id}/result", headers=lab_headers, json={
+        "findings_text": "corrected value", "amendment_reason": "Transcription error in original entry",
+    })
+    assert amended.status_code == 200
+    amended_body = amended.json()["result"]
+    assert amended_body["id"] != result_body["id"]
+    assert amended_body["report_status"] == "Draft"
+    assert amended_body["supersedes_id"] == result_body["id"]
+
+
+def test_lab_rejection_requires_structured_reason_and_supports_recollection(client, auth_headers, db_session, oncologist, lab_tech):
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    order = _make_order(db_session, patient_id, "LAB", item_name="Renal Function")
+    lab_headers = auth_headers(lab_tech)
+
+    missing_reason = client.post(f"/api/cca/lab/orders/{order.id}/reject", headers=lab_headers, json={})
+    assert missing_reason.status_code == 422
+
+    free_text_reason_rejected = client.post(f"/api/cca/lab/orders/{order.id}/reject", headers=lab_headers, json={"reason": "Hemolysed sample"})
+    assert free_text_reason_rejected.status_code == 422  # not one of the structured codes
+
+    reject = client.post(f"/api/cca/lab/orders/{order.id}/reject", headers=lab_headers, json={"reason": "HEMOLYSED"})
     assert reject.status_code == 200
     assert reject.json()["order"]["workflow_state"] == "RecollectionRequired"
+    assert reject.json()["order"]["rejection_reason"] == "HEMOLYSED"
 
-    missing_reason = client.post(f"/api/cca/lab/orders/{order2.id}/reject", headers=lab_headers, json={})
-    assert missing_reason.status_code == 422
+    # A rejected specimen can never itself be collected or resulted -- must go through recollect.
+    blocked_collect = client.post(f"/api/cca/lab/orders/{order.id}/collect", headers=lab_headers, json={"identity_confirmed": True})
+    assert blocked_collect.status_code == 409
+    blocked_result = client.post(f"/api/cca/lab/orders/{order.id}/result", headers=lab_headers, json={"findings_text": "x"})
+    assert blocked_result.status_code == 409
+
+    recollect = client.post(f"/api/cca/lab/orders/{order.id}/recollect", headers=lab_headers)
+    assert recollect.status_code == 200
+    new_order = recollect.json()["order"]
+    assert new_order["id"] != order.id
+    assert new_order["recollection_of_order_id"] == order.id
+    assert new_order["recollection_number"] == 1
+    assert new_order["item_name"] == "Renal Function"
+
+    # Cannot recollect twice off the same rejection.
+    recollect_again = client.post(f"/api/cca/lab/orders/{order.id}/recollect", headers=lab_headers)
+    assert recollect_again.status_code == 409
 
 
 def test_diagnostics_worklists_are_org_scoped(client, auth_headers, make_user, db_session, oncologist, radiologist):

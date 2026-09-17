@@ -359,6 +359,18 @@ ADDITIVE_COLUMNS = [
     ("cca_documents", "document_date", "DATE"),
     ("cca_clinical_facts", "source_date", "DATE"),
     ("cca_results", "source_date", "DATE"),
+    # Lab/Phlebotomy gap review -- see each column's docstring on CCAOrder/CCAResult
+    # (models_cca.py).
+    ("cca_orders", "identity_confirmed", "BOOLEAN"),
+    ("cca_orders", "specimen_accession_id", "VARCHAR(50)"),
+    ("cca_orders", "collection_site", "VARCHAR(100)"),
+    ("cca_orders", "specimen_count", "INTEGER"),
+    ("cca_orders", "received_by", "VARCHAR(200)"),
+    ("cca_orders", "received_at", "TIMESTAMP"),
+    ("cca_orders", "recollection_of_order_id", "INTEGER"),
+    ("cca_orders", "recollection_number", "INTEGER"),
+    ("cca_results", "entered_by", "VARCHAR(200)"),
+    ("cca_results", "entered_at", "TIMESTAMP"),
 ]
 
 

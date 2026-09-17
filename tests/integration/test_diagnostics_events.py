@@ -52,14 +52,26 @@ def _raise_order(db_session, patient_id, order_type):
     return order.id
 
 
-def test_lab_result_publishes_domain_event(client, auth_headers, db_session, oncologist, lab_tech):
+def test_lab_result_publishes_domain_event_on_verification_not_entry(client, auth_headers, db_session, oncologist, lab_tech):
+    """Result Verification & Release -- Critical: a lab result no longer finalizes (and
+    therefore shouldn't publish a "finalized" domain event) at entry time -- only once a
+    separate verify call releases it, mirroring pathology's own draft/finalize event shape."""
     patient_id = _patient_id(db_session, oncologist.organization_id)
     order_id = _raise_order(db_session, patient_id, "LAB")
+    lab_headers = auth_headers(lab_tech)
 
-    res = client.post(f"/api/cca/lab/orders/{order_id}/result", headers=auth_headers(lab_tech), json={"findings_text": "WBC 6.2"})
-    assert res.status_code == 200
+    client.post(f"/api/cca/lab/orders/{order_id}/collect", headers=lab_headers, json={"identity_confirmed": True})
+    client.post(f"/api/cca/lab/orders/{order_id}/receive", headers=lab_headers, json={})
+    entered = client.post(f"/api/cca/lab/orders/{order_id}/result", headers=lab_headers, json={"findings_text": "WBC 6.2"})
+    assert entered.status_code == 200
+    result_id = entered.json()["result"]["id"]
 
-    event = db_session.query(DomainEvent).filter(DomainEvent.event_type == "LAB_RESULT_FINALIZED").first()
+    assert db_session.query(DomainEvent).filter(DomainEvent.event_type == "LAB_RESULT_VERIFIED").count() == 0
+
+    verify = client.post(f"/api/cca/lab/results/{result_id}/verify", headers=lab_headers)
+    assert verify.status_code == 200
+
+    event = db_session.query(DomainEvent).filter(DomainEvent.event_type == "LAB_RESULT_VERIFIED").first()
     assert event is not None
     assert event.patient_id == patient_id
 

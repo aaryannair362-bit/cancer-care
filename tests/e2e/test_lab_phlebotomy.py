@@ -31,7 +31,10 @@ def lab_orders(make_user, db_session):
     return lab_tech, patient, order1, order2
 
 
-def test_lab_collect_and_enter_result(js_page, live_server_url, lab_orders):
+def test_lab_collect_receive_enter_and_verify_result(js_page, live_server_url, lab_orders):
+    """Covers the full state machine the Lab gap review added: collect (with positive identity
+    confirmation) -> receive -> enter result (Draft) -> verify (Finalized). Entering a result no
+    longer finalizes it on its own -- see cca_diagnostics.py's record_lab_result/verify_lab_result."""
     lab_tech, patient, order1, order2 = lab_orders
     login_as(js_page, live_server_url, lab_tech, landing_path="/laboratory.html")
     js_page.wait_for_timeout(400)
@@ -39,7 +42,13 @@ def test_lab_collect_and_enter_result(js_page, live_server_url, lab_orders):
     js_page.evaluate("showTab('lab')")
     js_page.wait_for_timeout(300)
 
+    js_page.click(f'button[onclick="openLabCollectInline({order1.id})"]')
+    js_page.wait_for_timeout(200)
+    js_page.check(f"#lab-identity-confirmed-{order1.id}")
     js_page.click(f'button[onclick="submitLabCollect({order1.id})"]')
+    js_page.wait_for_timeout(600)
+
+    js_page.click(f'button[onclick="submitLabReceive({order1.id})"]')
     js_page.wait_for_timeout(600)
 
     js_page.click(f'button[onclick="openLabResultInline({order1.id})"]')
@@ -57,15 +66,35 @@ def test_lab_collect_and_enter_result(js_page, live_server_url, lab_orders):
     try:
         saved_order = db.query(CCAOrder).filter(CCAOrder.id == order1.id).first()
         assert saved_order.collected_by is not None
-        assert saved_order.status == "RESULTED"
+        assert saved_order.received_by is not None
+        assert saved_order.identity_confirmed is True
+        assert saved_order.specimen_accession_id
+        # Entered but not yet verified -- the order must NOT read as RESULTED yet.
+        assert saved_order.status != "RESULTED"
         result = db.query(CCAResult).filter(CCAResult.order_id == order1.id).first()
         assert result is not None
         assert "Hb 11.5" in result.findings_text
+        assert result.report_status == "Draft"
+        result_id = result.id
+    finally:
+        db.close()
+
+    js_page.click(f'button[onclick="submitLabVerify({order1.id}, {result_id})"]')
+    js_page.wait_for_timeout(600)
+    assert js_page.js_errors == [], f"unexpected JS errors: {js_page.js_errors}"
+
+    db = SessionLocal()
+    try:
+        saved_order = db.query(CCAOrder).filter(CCAOrder.id == order1.id).first()
+        assert saved_order.status == "RESULTED"
+        result = db.query(CCAResult).filter(CCAResult.id == result_id).first()
+        assert result.report_status == "Finalized"
+        assert result.finalized_by is not None
     finally:
         db.close()
 
 
-def test_lab_reject_specimen(js_page, live_server_url, lab_orders):
+def test_lab_reject_specimen_and_recollect(js_page, live_server_url, lab_orders):
     lab_tech, patient, order1, order2 = lab_orders
     login_as(js_page, live_server_url, lab_tech, landing_path="/laboratory.html")
     js_page.wait_for_timeout(400)
@@ -75,7 +104,7 @@ def test_lab_reject_specimen(js_page, live_server_url, lab_orders):
 
     js_page.click(f'button[onclick="openLabRejectInline({order2.id})"]')
     js_page.wait_for_timeout(200)
-    js_page.fill(f"#lab-reject-reason-{order2.id}", "Hemolysed sample, recollection needed.")
+    js_page.select_option(f"#lab-reject-reason-{order2.id}", "HEMOLYSED")
     js_page.click(f'button[onclick="submitLabReject({order2.id})"]')
     js_page.wait_for_timeout(600)
 
@@ -87,7 +116,21 @@ def test_lab_reject_specimen(js_page, live_server_url, lab_orders):
     db = SessionLocal()
     try:
         saved_order = db.query(CCAOrder).filter(CCAOrder.id == order2.id).first()
-        assert saved_order.rejection_reason == "Hemolysed sample, recollection needed."
+        assert saved_order.rejection_reason == "HEMOLYSED"
         assert saved_order.workflow_state == "RecollectionRequired"
+    finally:
+        db.close()
+
+    js_page.click(f'button[onclick="submitLabRecollect({order2.id})"]')
+    js_page.wait_for_timeout(600)
+    assert js_page.js_errors == [], f"unexpected JS errors: {js_page.js_errors}"
+
+    db = SessionLocal()
+    try:
+        original = db.query(CCAOrder).filter(CCAOrder.id == order2.id).first()
+        assert original.workflow_state == "RecollectionInitiated"
+        recollected = db.query(CCAOrder).filter(CCAOrder.recollection_of_order_id == order2.id).first()
+        assert recollected is not None
+        assert recollected.item_name == original.item_name
     finally:
         db.close()

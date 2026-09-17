@@ -480,6 +480,29 @@ class CCAOrder(Base):
     collected_at = Column(DateTime, nullable=True)
     specimen_container = Column(String(100), nullable=True)
     rejection_reason = Column(String(255), nullable=True)
+    # Lab gap review (Patient & Specimen Identification / Specimen Collection Workflow --
+    # Critical): LAB orders only in practice, same nullable-for-other-order-types pattern as the
+    # acquisition_* fields below. identity_confirmed is a hard gate in collect_specimen (see
+    # that endpoint) -- "prevent accidental collection against the wrong patient or order" --
+    # not just a record of intent. specimen_accession_id is generated server-side at collection
+    # (never client-supplied), the unique identifier a physical label/barcode would carry.
+    identity_confirmed = Column(Boolean, default=False)
+    specimen_accession_id = Column(String(50), nullable=True)
+    collection_site = Column(String(100), nullable=True)
+    specimen_count = Column(Integer, nullable=True)
+    # Sample Routing & Laboratory Receipt -- who/when the lab actually received the specimen,
+    # distinct from collected_by/at (the phlebotomist), same "two different actors, two
+    # different events" shape as this file's acquisition_* (Technologist) vs the Coordinator's
+    # own scheduling fields above.
+    received_by = Column(String(200), nullable=True)
+    received_at = Column(DateTime, nullable=True)
+    # Recollection Workflow -- a rejected specimen's order is never mutated back to "raised
+    # again"; instead a NEW CCAOrder is created (see /lab/orders/{id}/recollect) that points
+    # back here, so the original's own collection/rejection history stays exactly as it
+    # happened. recollection_number is this order's position in that chain (0 = an original
+    # order, never itself a recollection).
+    recollection_of_order_id = Column(Integer, ForeignKey("cca_orders.id"), nullable=True)
+    recollection_number = Column(Integer, default=0)
     # Investigations result-trend/overdue view (gap review item 11) -- optional, clinician-set
     # expectation, never an auto-computed turnaround SLA. overdue is a plain date comparison
     # against this at read time, never a hardcoded day-count threshold.
@@ -534,6 +557,14 @@ class CCAResult(Base):
     report_status = Column(String(30), default="Draft")  # Draft|Finalized|Superseded -- "No autonomous final report"
     finalized_by = Column(String(200), nullable=True)
     finalized_at = Column(DateTime, nullable=True)
+    # Lab gap review (Result Verification & Release -- Critical): the PDF's own ask is "show the
+    # person who entered the result and the person who verified it" -- finalized_by/at above IS
+    # the verifier, but nothing recorded who did the technical entry until now. Populated by
+    # routers/cca_diagnostics.py's record_lab_result (the Draft-creating step); null for
+    # result_type values that don't have a distinct entry step (imaging/pathology draft their
+    # own report directly as the "author").
+    entered_by = Column(String(200), nullable=True)
+    entered_at = Column(DateTime, nullable=True)
     # critical_acknowledged_by/at were declared but never written anywhere in this codebase
     # until now (safety/dataflow-critical follow-up round) -- repurposed as intended by their
     # name: who actively notified someone of a critical result, and when, via
