@@ -34,12 +34,12 @@ from ..models_cca import (
     ClaimRecord, RefundCreditNote,
     CarePlan, StagingRecord, CCAJourneyEvent, TreatmentPlan, CarePlanTask, DomainEvent,
     CCAAppointmentCoordination,
-    CoordinationContactLogEntry, TreatmentEducationDeliveryRecord,
+    CoordinationContactLogEntry, TreatmentEducationDeliveryRecord, CCACoordinationEscalation,
 )
 from ..events import publish
 from ..cca_product_decisions import EXTERNAL_SPECIALIST_CAN_SIGN_RECOMMENDATIONS
 from ..rbac_projection import project_financial_case
-from .cca import get_cca_db, _org_id, _actor, _get_org_patient, _check_patient_in_org
+from .cca import get_cca_db, _org_id, _actor, _get_org_patient, _check_patient_in_org, _care_plan_task_dict
 
 router = APIRouter(prefix="/api/cca", tags=["CCA Coordination & Ops"])
 
@@ -1456,6 +1456,225 @@ async def update_coordination_next_action(case_id: int, request: Request, db: Se
     case.next_action_status = status_val
     db.commit()
     return {"status": "success", "case": _coordination_out(case)}
+
+
+# ---------------------------------------------------------------------------
+# Task Ownership & Closed-Loop Task Lifecycle (gap review -- Critical): next_action above is a
+# single rolling field, one task per case. Real patient navigation routinely needs several
+# concurrent tasks (a transport barrier AND a pending appointment confirmation AND an education
+# follow-up), each with its own owner -- these reuse the existing CarePlanTask table
+# (owner_role="CARE_COORDINATION") that cca_coordination.py's own coordination_tasks/GET
+# already reads from, rather than inventing a parallel task table. Previously nothing could
+# actually WRITE a MANUAL task into that feed -- every existing producer was either a system
+# event subscriber or a clinician's AI-search confirmation (see cca.py's
+# propose_task_from_search), so the Patient Liaison had no way to create their own ad hoc
+# coordination task at all.
+# ---------------------------------------------------------------------------
+
+_COORDINATION_TASK_PRIORITIES = ("Low", "Normal", "High", "Urgent")
+
+
+@router.post("/coordination/cases/{case_id}/tasks", status_code=201)
+async def create_coordination_task(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not (is_cca_patient_liaison(current_user) or is_cca_patient_relations_executive(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Patient Liaison, PRE, or Admin may create a coordination task")
+    case = _get_org_coordination_case(db, case_id, _org_id(current_user))
+    body = await request.json()
+    description = (body.get("description") or "").strip()
+    if not description:
+        raise HTTPException(422, "description is required")
+    priority = body.get("priority") or "Normal"
+    if priority not in _COORDINATION_TASK_PRIORITIES:
+        raise HTTPException(422, f"priority must be one of {_COORDINATION_TASK_PRIORITIES}")
+    actor = _actor(current_user)
+
+    task = CarePlanTask(
+        patient_id=case.patient_id,
+        description=description,
+        owner_id=body.get("owner_id") or "",
+        owner_name=body.get("owner_name") or actor,
+        owner_role="CARE_COORDINATION",
+        category=body.get("category") or "COORDINATION",
+        priority=priority,
+        due_date=datetime.fromisoformat(body["due_date"]) if body.get("due_date") else datetime.utcnow() + timedelta(days=3),
+        status="OPEN",
+        source="MANUAL",
+    )
+    db.add(task)
+    db.flush()
+    publish(
+        db, "COORDINATION_TASK_CREATED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title="Coordination task created", category="COORDINATION",
+        description=f"{actor} created a coordination task: {description}",
+        coordination_case_id=case.id, task_id=task.id,
+    )
+    db.commit()
+    db.refresh(task)
+    return {"status": "success", "task": _care_plan_task_dict(task)}
+
+
+@router.get("/coordination/cases/{case_id}/tasks")
+def list_coordination_case_tasks(case_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    case = _get_org_coordination_case(db, case_id, _org_id(current_user))
+    tasks = db.query(CarePlanTask).filter(
+        CarePlanTask.patient_id == case.patient_id, CarePlanTask.owner_role == "CARE_COORDINATION"
+    ).order_by(CarePlanTask.due_date.asc()).all()
+    return {"tasks": [_care_plan_task_dict(t) for t in tasks]}
+
+
+@router.patch("/coordination/tasks/{task_id}/reassign")
+async def reassign_coordination_task(task_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Gap review: "Allow reassignment with reason and audit history" -- previously a task's
+    owner could only ever be set once, at creation."""
+    if not (is_cca_patient_liaison(current_user) or is_cca_patient_relations_executive(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Patient Liaison, PRE, or Admin may reassign a coordination task")
+    task = db.query(CarePlanTask).filter(CarePlanTask.id == task_id).first()
+    if not task or task.owner_role != "CARE_COORDINATION":
+        raise HTTPException(404, "Coordination task not found")
+    _check_patient_in_org(db, task.patient_id, _org_id(current_user))
+    body = await request.json()
+    new_owner_name = (body.get("owner_name") or "").strip()
+    reason = (body.get("reason") or "").strip()
+    if not new_owner_name or not reason:
+        raise HTTPException(422, "owner_name and reason are required to reassign a task")
+    actor = _actor(current_user)
+    previous_owner = task.owner_name
+    task.owner_name = new_owner_name
+    task.owner_id = body.get("owner_id") or ""
+    publish(
+        db, "COORDINATION_TASK_REASSIGNED", patient_id=task.patient_id, actor=actor, role=current_user.get("role"),
+        title="Coordination task reassigned", category="COORDINATION",
+        description=f"{actor} reassigned task #{task.id} from {previous_owner} to {new_owner_name}: {reason}",
+        task_id=task.id,
+    )
+    db.commit()
+    db.refresh(task)
+    return {"status": "success", "task": _care_plan_task_dict(task)}
+
+
+# ---------------------------------------------------------------------------
+# Escalation Workflow (gap review -- Critical): previously the only escalation mechanism was
+# flipping a barrier's status to "Escalated" (see update_barrier_status above), with no
+# destination role, urgency, or acknowledgement/resolution tracking of its own. This is a
+# first-class, independently-trackable escalation record -- see CCACoordinationEscalation's
+# docstring (models_cca.py).
+# ---------------------------------------------------------------------------
+
+_ESCALATION_URGENCIES = ("Routine", "Urgent", "Critical")
+
+
+def _escalation_out(e: CCACoordinationEscalation) -> dict:
+    return {
+        "id": e.id, "coordination_case_id": e.coordination_case_id, "reason": e.reason,
+        "destination_role": e.destination_role, "urgency": e.urgency, "status": e.status,
+        "created_by": e.created_by, "created_at": e.created_at.isoformat() if e.created_at else None,
+        "acknowledged_by": e.acknowledged_by,
+        "acknowledged_at": e.acknowledged_at.isoformat() if e.acknowledged_at else None,
+        "resolved_by": e.resolved_by, "resolved_at": e.resolved_at.isoformat() if e.resolved_at else None,
+        "resolution_notes": e.resolution_notes,
+    }
+
+
+@router.post("/coordination/cases/{case_id}/escalate", status_code=201)
+async def escalate_coordination_case(case_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    if not (is_cca_patient_liaison(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Patient Liaison or Admin may escalate a coordination case")
+    case = _get_org_coordination_case(db, case_id, _org_id(current_user))
+    body = await request.json()
+    reason = (body.get("reason") or "").strip()
+    destination_role = (body.get("destination_role") or "").strip()
+    if not reason or not destination_role:
+        raise HTTPException(422, "reason and destination_role are required")
+    urgency = body.get("urgency") or "Routine"
+    if urgency not in _ESCALATION_URGENCIES:
+        raise HTTPException(422, f"urgency must be one of {_ESCALATION_URGENCIES}")
+    actor = _actor(current_user)
+    escalation = CCACoordinationEscalation(
+        coordination_case_id=case.id, reason=reason, destination_role=destination_role,
+        urgency=urgency, created_by=actor,
+    )
+    db.add(escalation)
+    db.flush()
+    publish(
+        db, "COORDINATION_CASE_ESCALATED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Coordination case escalated to {destination_role}", category="COORDINATION",
+        description=f"{actor} escalated to {destination_role} ({urgency}): {reason}",
+        coordination_case_id=case.id, escalation_id=escalation.id,
+    )
+    db.commit()
+    db.refresh(escalation)
+    return {"status": "success", "escalation": _escalation_out(escalation)}
+
+
+@router.get("/coordination/escalations")
+def list_coordination_escalations(
+    status: Optional[str] = None, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user),
+):
+    if not (is_cca_patient_liaison(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Patient Liaison or Admin may view the escalation queue")
+    org_id = _org_id(current_user)
+    query = db.query(CCACoordinationEscalation, CCAPatient).join(
+        CCACoordinationCase, CCACoordinationEscalation.coordination_case_id == CCACoordinationCase.id
+    ).join(CCAPatient, CCACoordinationCase.patient_id == CCAPatient.id).filter(
+        CCAPatient.organization_id == org_id
+    )
+    if status:
+        query = query.filter(CCACoordinationEscalation.status == status)
+    rows = query.order_by(CCACoordinationEscalation.created_at.desc()).all()
+    return {"escalations": [{**_escalation_out(e), "patient_name": p.name, "patient_mrn": p.mrn} for e, p in rows]}
+
+
+@router.post("/coordination/escalations/{escalation_id}/acknowledge")
+def acknowledge_coordination_escalation(escalation_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    escalation = db.query(CCACoordinationEscalation).filter(CCACoordinationEscalation.id == escalation_id).first()
+    if not escalation:
+        raise HTTPException(404, "Escalation not found")
+    case = db.query(CCACoordinationCase).filter(CCACoordinationCase.id == escalation.coordination_case_id).first()
+    _check_patient_in_org(db, case.patient_id, _org_id(current_user))
+    if escalation.status != "Open":
+        raise HTTPException(409, f"Escalation is already {escalation.status}")
+    actor = _actor(current_user)
+    escalation.status = "Acknowledged"
+    escalation.acknowledged_by = actor
+    escalation.acknowledged_at = datetime.utcnow()
+    publish(
+        db, "COORDINATION_ESCALATION_ACKNOWLEDGED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title="Escalation acknowledged", category="COORDINATION",
+        description=f"{actor} acknowledged the escalation to {escalation.destination_role}.",
+        escalation_id=escalation.id,
+    )
+    db.commit()
+    db.refresh(escalation)
+    return {"status": "success", "escalation": _escalation_out(escalation)}
+
+
+@router.post("/coordination/escalations/{escalation_id}/resolve")
+async def resolve_coordination_escalation(escalation_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    escalation = db.query(CCACoordinationEscalation).filter(CCACoordinationEscalation.id == escalation_id).first()
+    if not escalation:
+        raise HTTPException(404, "Escalation not found")
+    case = db.query(CCACoordinationCase).filter(CCACoordinationCase.id == escalation.coordination_case_id).first()
+    _check_patient_in_org(db, case.patient_id, _org_id(current_user))
+    if escalation.status == "Resolved":
+        raise HTTPException(409, "Escalation is already resolved")
+    body = await request.json()
+    resolution_notes = (body.get("resolution_notes") or "").strip()
+    if not resolution_notes:
+        raise HTTPException(422, "resolution_notes is required to resolve an escalation")
+    actor = _actor(current_user)
+    escalation.status = "Resolved"
+    escalation.resolved_by = actor
+    escalation.resolved_at = datetime.utcnow()
+    escalation.resolution_notes = resolution_notes
+    publish(
+        db, "COORDINATION_ESCALATION_RESOLVED", patient_id=case.patient_id, actor=actor, role=current_user.get("role"),
+        title="Escalation resolved", category="COORDINATION",
+        description=f"{actor} resolved the escalation to {escalation.destination_role}: {resolution_notes}",
+        escalation_id=escalation.id,
+    )
+    db.commit()
+    db.refresh(escalation)
+    return {"status": "success", "escalation": _escalation_out(escalation)}
 
 
 # ---------------------------------------------------------------------------

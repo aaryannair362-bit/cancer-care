@@ -241,6 +241,104 @@ def test_care_coordination_milestones_and_barriers(client, auth_headers, db_sess
     assert next_action.json()["case"]["next_action_status"] == "InProgress"
 
 
+def test_coordination_task_ownership_and_reassignment(client, auth_headers, db_session, oncologist, patient_liaison):
+    """Gap review ("Task Ownership & Closed-Loop Task Lifecycle" -- Critical): the Patient
+    Liaison can now create their own ad hoc coordination tasks (previously only system events
+    or a clinician's AI-search confirmation could ever create a CarePlanTask), and reassign one
+    with a documented reason."""
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    liaison_headers = auth_headers(patient_liaison)
+    case_id = client.post("/api/cca/coordination/cases", headers=liaison_headers, json={"patient_id": patient_id}).json()["case"]["id"]
+
+    missing_description = client.post(f"/api/cca/coordination/cases/{case_id}/tasks", headers=liaison_headers, json={})
+    assert missing_description.status_code == 422
+
+    created = client.post(f"/api/cca/coordination/cases/{case_id}/tasks", headers=liaison_headers, json={
+        "description": "Confirm transport for Thursday's appointment", "priority": "High",
+        "owner_name": "liaison@coordhosp.com", "due_date": "2026-09-10T09:00:00",
+    })
+    assert created.status_code == 201, created.text
+    task = created.json()["task"]
+    assert task["owner_role"] == "CARE_COORDINATION"
+    assert task["priority"] == "High"
+    assert task["source"] == "MANUAL"
+    task_id = task["id"]
+
+    listed = client.get(f"/api/cca/coordination/cases/{case_id}/tasks", headers=liaison_headers)
+    assert listed.status_code == 200
+    assert any(t["id"] == task_id for t in listed.json()["tasks"])
+
+    missing_reason = client.patch(f"/api/cca/coordination/tasks/{task_id}/reassign", headers=liaison_headers, json={"owner_name": "someone.else@coordhosp.com"})
+    assert missing_reason.status_code == 422
+
+    reassigned = client.patch(f"/api/cca/coordination/tasks/{task_id}/reassign", headers=liaison_headers, json={
+        "owner_name": "someone.else@coordhosp.com", "reason": "Original owner is on leave.",
+    })
+    assert reassigned.status_code == 200
+    assert reassigned.json()["task"]["owner_name"] == "someone.else@coordhosp.com"
+
+    journey = client.get(f"/api/cca/patients/{patient_id}/journey", headers=liaison_headers).json()["journey_events"]
+    assert any(e["event_type"] == "COORDINATION_TASK_REASSIGNED" for e in journey)
+
+    # A task created by Patient Liaison is still resolvable by that role (CARE_COORDINATION
+    # tasks are the one non-clinical exception -- see cca.py's resolve_patient_task).
+    resolved = client.post(f"/api/cca/tasks/{task_id}/resolve", headers=liaison_headers)
+    assert resolved.status_code == 200
+    assert resolved.json()["task"]["status"] == "RESOLVED"
+
+
+def test_coordination_escalation_workflow(client, auth_headers, db_session, oncologist, patient_liaison, mdt_coordinator):
+    """Gap review ("Escalation Workflow" -- Critical): a dedicated escalation record with
+    destination role/urgency and separate acknowledge/resolve tracking, distinct from a
+    barrier's own Escalated status flip."""
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    liaison_headers = auth_headers(patient_liaison)
+    other_headers = auth_headers(mdt_coordinator)
+    case_id = client.post("/api/cca/coordination/cases", headers=liaison_headers, json={"patient_id": patient_id}).json()["case"]["id"]
+
+    denied = client.post(f"/api/cca/coordination/cases/{case_id}/escalate", headers=other_headers, json={
+        "reason": "x", "destination_role": "NursingStation",
+    })
+    assert denied.status_code == 403
+
+    missing_fields = client.post(f"/api/cca/coordination/cases/{case_id}/escalate", headers=liaison_headers, json={"reason": "x"})
+    assert missing_fields.status_code == 422
+
+    escalated = client.post(f"/api/cca/coordination/cases/{case_id}/escalate", headers=liaison_headers, json={
+        "reason": "Patient reports worsening pain and cannot be reached for two days.",
+        "destination_role": "TreatingOncologist", "urgency": "Urgent",
+    })
+    assert escalated.status_code == 201, escalated.text
+    escalation = escalated.json()["escalation"]
+    assert escalation["status"] == "Open"
+    escalation_id = escalation["id"]
+
+    queue = client.get("/api/cca/coordination/escalations?status=Open", headers=liaison_headers)
+    assert queue.status_code == 200
+    assert any(e["id"] == escalation_id for e in queue.json()["escalations"])
+
+    ack = client.post(f"/api/cca/coordination/escalations/{escalation_id}/acknowledge", headers=liaison_headers)
+    assert ack.status_code == 200
+    assert ack.json()["escalation"]["status"] == "Acknowledged"
+    assert ack.json()["escalation"]["acknowledged_by"] == "liaison@coordhosp.com"
+
+    double_ack = client.post(f"/api/cca/coordination/escalations/{escalation_id}/acknowledge", headers=liaison_headers)
+    assert double_ack.status_code == 409
+
+    missing_notes = client.post(f"/api/cca/coordination/escalations/{escalation_id}/resolve", headers=liaison_headers, json={})
+    assert missing_notes.status_code == 422
+
+    resolved = client.post(f"/api/cca/coordination/escalations/{escalation_id}/resolve", headers=liaison_headers, json={
+        "resolution_notes": "Oncologist reviewed and adjusted the pain management plan.",
+    })
+    assert resolved.status_code == 200
+    assert resolved.json()["escalation"]["status"] == "Resolved"
+
+    journey = client.get(f"/api/cca/patients/{patient_id}/journey", headers=liaison_headers).json()["journey_events"]
+    assert any(e["event_type"] == "COORDINATION_CASE_ESCALATED" for e in journey)
+    assert any(e["event_type"] == "COORDINATION_ESCALATION_RESOLVED" for e in journey)
+
+
 def test_admin_operations_dashboard_and_audit(client, auth_headers, db_session, oncologist, admin):
     patient_id = _patient_id(db_session, oncologist.organization_id)
     onc_headers = auth_headers(oncologist)

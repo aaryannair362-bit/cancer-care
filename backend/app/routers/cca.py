@@ -4823,9 +4823,13 @@ def _care_plan_task_dict(task: CarePlanTask) -> dict:
         "description": task.description,
         "owner_id": task.owner_id,
         "owner_name": task.owner_name,
+        "owner_role": task.owner_role,
+        "category": task.category,
+        "priority": task.priority,
         "due_date": task.due_date.isoformat() if task.due_date else None,
         "status": task.status,
         "source": task.source,
+        "blocker_reason": task.blocker_reason,
         "patient_visible_note": task.patient_visible_note,
         "created_at": task.created_at.isoformat() if task.created_at else None,
     }

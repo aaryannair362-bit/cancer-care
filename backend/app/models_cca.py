@@ -1149,6 +1149,35 @@ class CarePlanTask(Base):
     linked_result_id = Column(Integer, ForeignKey("cca_results.id"), nullable=True)
     blocker_reason = Column(Text, nullable=True)  # required when status is set to BLOCKED
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Patient Liaison gap review ("Task Ownership & Closed-Loop Task Lifecycle" -- Critical):
+    # the spec's own task field list explicitly asks for priority, which this table never had.
+    # Optional/free-vocabulary on purpose -- every other producer of this table (event
+    # subscribers, AI-search-proposed tasks) leaves it unset rather than guessing an urgency
+    # they have no basis to assign.
+    priority = Column(String(20), nullable=True)  # Low|Normal|High|Urgent
+
+class CCACoordinationEscalation(Base):
+    """Patient Liaison gap review ("Escalation Workflow" -- Critical): previously the only
+    escalation mechanism was flipping a barrier's own status to "Escalated" (see
+    routers/cca_coordination.py's update_barrier_status), which has no destination role,
+    urgency, or acknowledgement/resolution tracking of its own -- once flipped, there was no
+    way to know whether anyone had actually seen or acted on it. This is a first-class,
+    append-only record of the escalation event itself, independent of whatever
+    barrier/no-show/appointment situation triggered it."""
+    __tablename__ = "cca_coordination_escalations"
+    id = Column(Integer, primary_key=True)
+    coordination_case_id = Column(Integer, ForeignKey("cca_coordination_cases.id"), nullable=False)
+    reason = Column(Text, nullable=False)
+    destination_role = Column(String(50), nullable=False)
+    urgency = Column(String(20), default="Routine")  # Routine|Urgent|Critical
+    status = Column(String(20), default="Open")  # Open|Acknowledged|Resolved
+    created_by = Column(String(200), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    acknowledged_by = Column(String(200), nullable=True)
+    acknowledged_at = Column(DateTime, nullable=True)
+    resolved_by = Column(String(200), nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    resolution_notes = Column(Text, nullable=True)
 
 class TreatmentPlan(Base):
     """The clinician-owned cancer treatment strategy -- distinct from CarePlan (the

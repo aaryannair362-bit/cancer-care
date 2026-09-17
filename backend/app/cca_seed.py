@@ -35,6 +35,7 @@ from .models_cca import (
     CancerEpisode, LineOfTherapy,
     MDTActionItem, MDTMeetingMinutes,
     CCACoordinationCase, CoordinationContactLogEntry, TreatmentEducationDeliveryRecord,
+    CCACoordinationEscalation,
     FinancialPreauthorization, BillableEventRecord, HighCostDrugApproval,
     ClaimRecord, RefundCreditNote, CCAFinancialCase,
 )
@@ -239,6 +240,9 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
                 ).delete(synchronize_session=False)
                 db.query(TreatmentEducationDeliveryRecord).filter(
                     TreatmentEducationDeliveryRecord.coordination_case_id.in_(coordination_case_ids)
+                ).delete(synchronize_session=False)
+                db.query(CCACoordinationEscalation).filter(
+                    CCACoordinationEscalation.coordination_case_id.in_(coordination_case_ids)
                 ).delete(synchronize_session=False)
             db.query(CCACoordinationCase).filter(
                 CCACoordinationCase.patient_id.in_(org_patient_ids)

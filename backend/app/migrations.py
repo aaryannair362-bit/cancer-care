@@ -378,6 +378,8 @@ ADDITIVE_COLUMNS = [
     ("cca_orders", "cancelled_at", "TIMESTAMP"),
     ("cca_orders", "cancelled_by", "VARCHAR(200)"),
     ("cca_orders", "cancellation_reason", "VARCHAR(255)"),
+    # Patient Liaison gap review -- see CarePlanTask.priority's docstring (models_cca.py).
+    ("cca_care_plan_tasks", "priority", "VARCHAR(20)"),
 ]
 
 
