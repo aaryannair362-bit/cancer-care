@@ -23,7 +23,8 @@ from ..auth import (
     is_cca_radiologist, is_cca_financial_counsellor, is_cca_external_mdt_specialist,
     is_cca_pharmacist, is_nursing_station, can_sign_treatment_plan,
     can_approve_mdt_recommendation, log_audit,
-    is_cca_biller, is_cca_patient_relations_executive,
+    is_cca_biller, is_cca_patient_relations_executive, is_cca_surgical_nurse,
+    is_cca_palliative_care_specialist,
 )
 from ..config import settings
 from ..ocr_service import extract_document, strip_markup_for_display
@@ -4861,16 +4862,26 @@ def resolve_patient_task(
 ):
     """Resolving a review/reassessment task is treated as a clinical act requiring a
     clinician (or Admin) -- deliberately coarse-grained rather than guessing at a
-    per-task-category permission scheme (see list_patient_tasks's docstring). The one
-    exception: a CARE_COORDINATION-owned task (PRE's/Patient Liaison's own appointment/
-    navigation follow-ups) may be resolved by those roles too -- it was never a clinical
-    judgment to begin with."""
+    per-task-category permission scheme (see list_patient_tasks's docstring). Two
+    exceptions: a CARE_COORDINATION-owned task (PRE's/Patient Liaison's own appointment/
+    navigation follow-ups) may be resolved by those roles too, and a NURSING-owned task
+    (e.g. Surgical Nurse's own OR_TASK rows, see cca_oncology_ext.py's
+    create_surgical_nursing_task) may be resolved by a nursing role -- neither was ever a
+    clinical judgment to begin with."""
     task = db.query(CarePlanTask).filter(CarePlanTask.id == id).first()
     if not task:
         raise HTTPException(404, "Task not found")
     _check_patient_in_org(db, task.patient_id, _org_id(current_user))
     if task.owner_role == "CARE_COORDINATION" and (
         is_cca_patient_relations_executive(current_user) or is_cca_patient_liaison(current_user) or is_admin(current_user)
+    ):
+        pass
+    elif task.owner_role == "NURSING" and (
+        is_cca_surgical_nurse(current_user) or is_admin(current_user)
+    ):
+        pass
+    elif task.owner_role == "PALLIATIVE_CARE" and (
+        is_cca_palliative_care_specialist(current_user) or is_admin(current_user)
     ):
         pass
     else:

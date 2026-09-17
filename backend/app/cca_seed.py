@@ -50,10 +50,14 @@ from .models_cca_oncology_ext import (
     RadiationInVivoDosimetry, RadiationOncologyConsultation,
     SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
     SurgicalStomaRecord, SurgicalComplicationRecord, SurgicalIntraOpNote, SurgicalProcedureNote,
+    SurgicalPreOpNursingVerification, SurgicalORCount, SurgicalPostOpNursingHandoff,
     AnaesthesiaPreOpEvaluation, AnaesthesiaPreOpEvaluationVersion,
     AnaesthesiaIntraOpRecord, AnaesthesiaRecoveryRecord,
     SurgicalPlan, SurgicalPlanVersion, SurgicalOperativeNote, SurgicalOperativeNoteVersion,
     SurgicalPostOpPlan,
+    PalliativeTreatmentOrder, PalliativeAssessment, PalliativePainAssessment,
+    PalliativeSymptomAssessment, PalliativeGoalsOfCare, PalliativeAdvanceCarePlan,
+    PalliativeReferral,
 )
 from .models_cca_inpatient import (
     InpatientAdmission, InpatientHistoryAndPhysical, InpatientProblemListItem,
@@ -152,6 +156,9 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # itself is a pre-existing omission from this reset (not introduced here).
             SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
             SurgicalStomaRecord, SurgicalComplicationRecord, SurgicalIntraOpNote, SurgicalProcedureNote,
+            # Surgical Nurse missing-development round -- has its own patient_id, matching the
+            # convention above.
+            SurgicalPreOpNursingVerification, SurgicalORCount, SurgicalPostOpNursingHandoff,
             # Surgical Oncologist missing-development round -- has its own patient_id, matching
             # the convention above. SurgicalPlanVersion/SurgicalOperativeNoteVersion (no
             # patient_id of their own) are deleted below via surgical_plan_ids/operative_note_ids
@@ -162,6 +169,13 @@ def seed_cca_database(db: Session, force_reset: bool = False, organization_id: i
             # AnaesthesiaPreOpEvaluationVersion (no patient_id of its own) is deleted above via
             # evaluation_ids lookup, before AnaesthesiaPreOpEvaluation itself here.
             AnaesthesiaIntraOpRecord, AnaesthesiaRecoveryRecord, AnaesthesiaPreOpEvaluation,
+            # Palliative Care missing-development round -- all have their own patient_id.
+            # PalliativeTreatmentOrder was itself a pre-existing omission from this reset
+            # (like SurgicalPlan/CCAFinancialCase noted elsewhere in this list) -- included here
+            # rather than left stale, since it shares this same patient-keyed shape.
+            PalliativeTreatmentOrder, PalliativeAssessment, PalliativePainAssessment,
+            PalliativeSymptomAssessment, PalliativeGoalsOfCare, PalliativeAdvanceCarePlan,
+            PalliativeReferral,
             # All have their own patient_id (matching CCAFinancialCase, its parent, just below
             # -- previously CCAFinancialCase itself was a pre-existing omission from this
             # reset, leaving stale cases to re-attach to freshly recreated patients).

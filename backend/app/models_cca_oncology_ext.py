@@ -873,6 +873,96 @@ class SurgicalComplicationRecord(Base):
 
 
 # ---------------------------------------------------------------------------
+# Surgical Nurse missing-development round (Surgical_Nurse_Missing_Development_Only.pdf) --
+# the peri-operative NURSING layer that sits alongside the surgeon-owned SurgicalPlan/
+# SurgicalOperativeNote/SurgicalSafetyChecklist above, none of which this role previously had
+# its own verification, counts, or post-op handoff surface for. All three tables below are
+# pure structured attestation -- no clinical scoring, threshold, or safety-decision logic is
+# computed anywhere here (standing repo rule); every status is the nurse's own typed record.
+# ---------------------------------------------------------------------------
+
+class SurgicalPreOpNursingVerification(Base):
+    """Pre-operative Nursing Assessment (PDF item 1) -- one row per SurgicalPlan, created and
+    updated by the circulating/pre-op nurse before the patient enters OR documentation
+    (SurgicalIntraOpMonitoring etc.) below. Deliberately separate from
+    SurgicalPlan.readiness_checklist (the surgical TEAM's investigations/fitness-clearance/
+    consultation checklist owned jointly with the surgeon) -- this is the nurse's own bedside
+    identity/safety verification immediately pre-op. `verified_at` is set once, by
+    finalize_preop_nursing_verification, and the row becomes read-only afterward; an amendment
+    after that point requires a new SurgicalPlan (a fresh case), matching this table's
+    one-row-per-plan shape."""
+    __tablename__ = "cca_surgical_preop_nursing_verifications"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    identity_verified = Column(Boolean, default=False)
+    procedure_site_laterality_confirmed = Column(Boolean, default=False)
+    allergy_status = Column(Text, nullable=True)
+    consent_status = Column(String(30), nullable=True)  # Documented, Pending, Not Applicable
+    site_marking_status = Column(String(30), nullable=True)  # Confirmed, Not Applicable
+    npo_status = Column(Text, nullable=True)
+    last_oral_intake_at = Column(DateTime, nullable=True)
+    baseline_vitals = Column(JSON, nullable=True)
+    iv_access = Column(Text, nullable=True)
+    implants_equipment_required = Column(Text, nullable=True)
+    implants_equipment_confirmed = Column(Boolean, default=False)
+    blockers = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    verified_by = Column(String(200), nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+    created_by = Column(String(200))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_by = Column(String(200), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+
+
+class SurgicalORCount(Base):
+    """Instrument/sponge/needle counts (PDF item 2, "Counts") -- one row per count event
+    (Initial/Interim/Final), append-only like SurgicalDrainRecord.output_log's convention, so
+    a full count history survives even when a discrepancy is later found and resolved.
+    `count_value` and `discrepancy` are the nurses' own recorded tally/attestation, never
+    computed or reconciled by the system."""
+    __tablename__ = "cca_surgical_or_counts"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    phase = Column(String(20), nullable=False)  # Initial, Interim, Final
+    count_type = Column(String(30), nullable=False)  # Instrument, Sponge, Needle, Other
+    count_value = Column(String(100), nullable=False)
+    discrepancy = Column(Boolean, default=False)
+    discrepancy_notes = Column(Text, nullable=True)
+    discrepancy_resolved = Column(Boolean, default=False)
+    resolution_notes = Column(Text, nullable=True)
+    recorded_by = Column(String(200))
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SurgicalPostOpNursingHandoff(Base):
+    """Post-operative Nursing Handoff (PDF item 5) -- the nurse's own structured, accountable
+    handoff to the receiving unit (PACU/ward/ICU), distinct from SurgicalOperativeNote (the
+    surgeon's formal operative record) and from SurgicalPlan.performed_procedure/status. Kept
+    as an append-only list (like SurgicalWoundAssessment) rather than a single row, since a
+    case may hand off more than once (e.g. PACU, then ward) -- the most recent entry is the
+    current handoff."""
+    __tablename__ = "cca_surgical_postop_nursing_handoffs"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    surgical_plan_id = Column(Integer, ForeignKey("cca_surgical_plans.id"), nullable=False)
+    vitals = Column(JSON, nullable=True)
+    wound_status = Column(Text, nullable=True)
+    drain_status = Column(Text, nullable=True)
+    stoma_status = Column(Text, nullable=True)
+    pain_assessment = Column(Text, nullable=True)
+    lines_devices = Column(Text, nullable=True)
+    immediate_complications = Column(Text, nullable=True)
+    disposition = Column(String(30), nullable=True)  # PACU, Ward, ICU, Other
+    handoff_receiver = Column(String(200), nullable=True)
+    handoff_receiver_role = Column(String(100), nullable=True)
+    handed_off_by = Column(String(200))
+    handed_off_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
 # R10 Anaesthetist module (11 Additional Modules Detailed Developer Handoff, page 11 + the
 # Cross-Module Requirements on page 13, applied to R10 only). Every table below keys off the
 # existing SurgicalPlan/CCAPatient -- no new patient table, matching the cross-module
@@ -1007,6 +1097,158 @@ class PalliativeTreatmentOrder(Base):
     discontinued_reason = Column(Text, nullable=True)
     created_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Palliative Care missing-development round (Palliative_Care_Missing_Development_Only.pdf) --
+# comprehensive assessment, pain/symptom management, goals of care, advance care planning,
+# and multidisciplinary referrals, on top of the existing Patient History / Palliative Orders
+# / Procedures & Notes shell above. Every severity/score field is the clinician's own typed
+# assessment (e.g. a spoken/observed 0-10 pain score), never computed, aggregated, or used to
+# drive an automated safety decision here (standing repo rule) -- this is documentation and
+# workflow structure, not a clinical decision engine.
+# ---------------------------------------------------------------------------
+
+class PalliativeAssessment(Base):
+    """Comprehensive Palliative Care Assessment (PDF item 1) -- one row per patient,
+    get-or-create-then-update like SurgicalPreOpNursingVerification, since a patient's
+    palliative assessment is a living document revisited over the course of care rather than
+    a one-time OR-episode record. Disease context (diagnosis/stage/active treatment) is
+    deliberately NOT duplicated here -- the UI reads it from the patient's existing oncology
+    record (CCACancerDiagnosis/TreatmentPlan) exactly as Patient History already does."""
+    __tablename__ = "cca_palliative_assessments"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False, unique=True)
+    referral_reason = Column(Text, nullable=True)
+    performance_status_scale = Column(String(20), nullable=True)  # ECOG, Karnofsky
+    performance_status_value = Column(String(10), nullable=True)
+    functional_status = Column(Text, nullable=True)  # ADL / mobility / dependence
+    nutrition_status = Column(Text, nullable=True)  # intake, weight loss, cachexia risk
+    psychosocial_needs = Column(Text, nullable=True)
+    spiritual_cultural_needs = Column(Text, nullable=True)
+    caregiver_name = Column(String(200), nullable=True)
+    caregiver_relationship = Column(String(100), nullable=True)
+    caregiver_needs = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    assessed_by = Column(String(200))
+    assessed_at = Column(DateTime, default=datetime.utcnow)
+    updated_by = Column(String(200), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+
+
+class PalliativePainAssessment(Base):
+    """Pain Management Workspace (PDF item 2) -- append-only, one row per assessment/
+    reassessment (matching SurgicalWoundAssessment's convention), so a pain trend over time is
+    preserved rather than overwritten. current_analgesia/breakthrough_use/adverse_effects are
+    the clinician's own recorded medication-reconciliation text -- no dose or MME computation
+    or safety-threshold logic here (standing repo rule); that remains clinical judgment."""
+    __tablename__ = "cca_palliative_pain_assessments"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    site = Column(String(200), nullable=True)
+    laterality = Column(String(20), nullable=True)
+    character = Column(String(200), nullable=True)
+    pain_type = Column(String(30), nullable=True)  # Nociceptive, Neuropathic, Mixed, Other
+    severity = Column(String(10), nullable=True)  # clinician-recorded 0-10
+    timing = Column(String(200), nullable=True)
+    triggers = Column(Text, nullable=True)
+    relieving_factors = Column(Text, nullable=True)
+    functional_impact = Column(Text, nullable=True)
+    current_analgesia = Column(Text, nullable=True)
+    breakthrough_use = Column(Text, nullable=True)
+    adverse_effects = Column(Text, nullable=True)
+    non_pharm_measures = Column(Text, nullable=True)
+    plan = Column(Text, nullable=True)
+    follow_up_interval = Column(String(100), nullable=True)
+    is_reassessment = Column(Boolean, default=False)
+    assessed_by = Column(String(200))
+    assessed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PalliativeSymptomAssessment(Base):
+    """Symptom Management (PDF item 3) -- flexible, one row per symptom entry
+    (Dyspnoea/Nausea-Vomiting/Constipation/Delirium/Fatigue/Anorexia-Cachexia/Insomnia/
+    Anxiety-Depression/Secretions/Other), append-only so severity trend over the course of
+    treatment survives (PDF's own "Symptom trend -- track change" requirement). A single
+    flexible table rather than nine near-identical ones, matching this file's
+    ClinicalProcedureNote precedent for the same kind of "one shared shape across many
+    named variants" choice."""
+    __tablename__ = "cca_palliative_symptom_assessments"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    symptom_type = Column(String(50), nullable=False)
+    severity = Column(String(10), nullable=True)  # clinician-recorded 0-10 or category
+    description = Column(Text, nullable=True)
+    intervention = Column(Text, nullable=True)
+    assessed_by = Column(String(200))
+    assessed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PalliativeGoalsOfCare(Base):
+    """Goals of Care & Shared Decision-Making (PDF item 4) -- one row per patient,
+    get-or-create-then-update. Deliberately kept distinct from PalliativeAdvanceCarePlan
+    below (a goals-of-care conversation can happen well before, or without, formal ACP
+    documentation) and from any clinician-authored treatment order -- patient preference is
+    never itself a treatment instruction."""
+    __tablename__ = "cca_palliative_goals_of_care"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False, unique=True)
+    patient_goals = Column(Text, nullable=True)
+    treatment_goals = Column(String(50), nullable=True)  # Curative, DiseaseControl, ComfortFocused
+    illness_understanding = Column(Text, nullable=True)
+    care_preferences = Column(Text, nullable=True)
+    decision_maker_name = Column(String(200), nullable=True)
+    decision_maker_relationship = Column(String(100), nullable=True)
+    participants = Column(Text, nullable=True)
+    decision_summary = Column(Text, nullable=True)
+    unresolved_questions = Column(Text, nullable=True)
+    next_review_date = Column(Date, nullable=True)
+    recorded_by = Column(String(200))
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+    updated_by = Column(String(200), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+
+
+class PalliativeAdvanceCarePlan(Base):
+    """Advance Care Planning (PDF item 5) -- one row per patient, get-or-create-then-update.
+    code_status/advance_directive_status are the clinician's own documented record of a
+    legally/institutionally governed decision, never inferred or defaulted by this system."""
+    __tablename__ = "cca_palliative_advance_care_plans"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False, unique=True)
+    acp_status = Column(String(30), default="NotDiscussed")  # NotDiscussed, Discussed, InProgress, Documented
+    advance_directive_status = Column(Text, nullable=True)
+    healthcare_decision_maker = Column(String(200), nullable=True)
+    code_status = Column(String(50), nullable=True)
+    preferred_place_of_care = Column(String(100), nullable=True)
+    preferred_place_of_death = Column(String(100), nullable=True)
+    escalation_hospitalisation_preferences = Column(Text, nullable=True)
+    participants = Column(Text, nullable=True)
+    discussion_date = Column(Date, nullable=True)
+    review_date = Column(Date, nullable=True)
+    recorded_by = Column(String(200))
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+    updated_by = Column(String(200), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+
+
+class PalliativeReferral(Base):
+    """Coordination & Referrals (PDF item 10) -- append-only, one row per referral. Distinct
+    from CarePlanTask (models_cca.py), which this module reuses separately for follow-up/
+    red-flag task ownership (see cca_oncology_ext.py's create_palliative_followup_task) -- a
+    referral is a request to another SERVICE with its own accept/schedule/complete lifecycle,
+    not an individual's task."""
+    __tablename__ = "cca_palliative_referrals"
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("cca_patients.id"), nullable=False)
+    service = Column(String(50), nullable=False)  # Pain, Psychology, SocialWork, Nutrition, Physiotherapy, Spiritual, HomePalliative, Other
+    reason = Column(Text, nullable=True)
+    status = Column(String(30), default="Requested")  # Requested, Accepted, Scheduled, Completed, Declined, Cancelled
+    notes = Column(Text, nullable=True)
+    requested_by = Column(String(200))
+    requested_at = Column(DateTime, default=datetime.utcnow)
+    updated_by = Column(String(200), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
 
 
 class Regimen(Base):

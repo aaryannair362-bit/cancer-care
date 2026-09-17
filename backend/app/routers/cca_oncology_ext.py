@@ -25,7 +25,7 @@ from ..auth import (
     is_cca_radiation_technologist,
 )
 from ..models_cca import CCAConsent, CCAPatient, CCAResult, DomainEvent, MDTCase, MDTDecision
-from ..models_cca import ResponseAssessment, ToxicityEvent, TreatmentPlan
+from ..models_cca import ResponseAssessment, ToxicityEvent, TreatmentPlan, CarePlanTask
 from ..models_cca_oncology_ext import (
     CCARadiationPhase, OncologyRecordExtension, RadiationFraction, RadiationPrescription,
     RadiationPrescriptionVersion, RadiationSimulationRecord, RadiationStructureSet,
@@ -41,7 +41,10 @@ from ..models_cca_oncology_ext import (
     SurgicalSpecimen, SurgicalBloodTransfusion,
     SurgicalSafetyChecklist, SurgicalWoundAssessment, SurgicalDrainRecord,
     SurgicalStomaRecord, SurgicalComplicationRecord,
+    SurgicalPreOpNursingVerification, SurgicalORCount, SurgicalPostOpNursingHandoff,
     ClinicalProcedureNote, PalliativeTreatmentOrder,
+    PalliativeAssessment, PalliativePainAssessment, PalliativeSymptomAssessment,
+    PalliativeGoalsOfCare, PalliativeAdvanceCarePlan, PalliativeReferral,
     AnaesthesiaPreOpEvaluation, AnaesthesiaIntraOpRecord,
 )
 from ..events import publish
@@ -2988,6 +2991,231 @@ async def sign_off_post_op_plan(plan_id: int, request: Request, db: Session = De
 
 
 # ---------------------------------------------------------------------------
+# Surgical Nurse missing-development round (Surgical_Nurse_Missing_Development_Only.pdf) --
+# pre-op nursing verification, OR counts, post-op nursing handoff, and a nursing-owned task
+# surface. All gated by _require_surgical_team (Surgical Oncologist or Surgical Nurse), same
+# as the specimen/checklist/wound/drain/stoma endpoints above. See the three models' own
+# docstrings in models_cca_oncology_ext.py.
+# ---------------------------------------------------------------------------
+
+def _preop_nursing_out(v: SurgicalPreOpNursingVerification) -> dict:
+    return {
+        "id": v.id, "surgical_plan_id": v.surgical_plan_id,
+        "identity_verified": bool(v.identity_verified),
+        "procedure_site_laterality_confirmed": bool(v.procedure_site_laterality_confirmed),
+        "allergy_status": v.allergy_status, "consent_status": v.consent_status,
+        "site_marking_status": v.site_marking_status, "npo_status": v.npo_status,
+        "last_oral_intake_at": v.last_oral_intake_at.isoformat() if v.last_oral_intake_at else None,
+        "baseline_vitals": v.baseline_vitals or {}, "iv_access": v.iv_access,
+        "implants_equipment_required": v.implants_equipment_required,
+        "implants_equipment_confirmed": bool(v.implants_equipment_confirmed),
+        "blockers": v.blockers, "notes": v.notes,
+        "verified_by": v.verified_by, "verified_at": v.verified_at.isoformat() if v.verified_at else None,
+    }
+
+
+_PREOP_NURSING_FIELDS = (
+    "identity_verified", "procedure_site_laterality_confirmed", "allergy_status", "consent_status",
+    "site_marking_status", "npo_status", "baseline_vitals", "iv_access",
+    "implants_equipment_required", "implants_equipment_confirmed", "blockers", "notes",
+)
+
+
+@router.get("/surgical-plans/{plan_id}/preop-nursing-verification")
+def get_preop_nursing_verification(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    v = db.query(SurgicalPreOpNursingVerification).filter(SurgicalPreOpNursingVerification.surgical_plan_id == plan.id).first()
+    return {"preop_nursing_verification": _preop_nursing_out(v) if v else None}
+
+
+@router.post("/surgical-plans/{plan_id}/preop-nursing-verification")
+async def upsert_preop_nursing_verification(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Get-or-create-then-update, same idiom as post-op-plan -- once verified_at is set the
+    row is finalized and no longer editable through this endpoint (see
+    finalize_preop_nursing_verification for the terminal action)."""
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    v = db.query(SurgicalPreOpNursingVerification).filter(SurgicalPreOpNursingVerification.surgical_plan_id == plan.id).first()
+    if v and v.verified_at:
+        raise HTTPException(409, "This pre-op nursing verification is already finalized")
+    if not v:
+        v = SurgicalPreOpNursingVerification(
+            patient_id=plan.patient_id, surgical_plan_id=plan.id, created_by=_actor(current_user),
+        )
+        db.add(v)
+    for field in _PREOP_NURSING_FIELDS:
+        if field in body:
+            setattr(v, field, body[field])
+    if "last_oral_intake_at" in body and body["last_oral_intake_at"]:
+        v.last_oral_intake_at = datetime.fromisoformat(body["last_oral_intake_at"])
+    v.updated_by = _actor(current_user)
+    v.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(v)
+    return {"status": "success", "preop_nursing_verification": _preop_nursing_out(v)}
+
+
+@router.post("/surgical-plans/{plan_id}/preop-nursing-verification/finalize")
+def finalize_preop_nursing_verification(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    v = db.query(SurgicalPreOpNursingVerification).filter(SurgicalPreOpNursingVerification.surgical_plan_id == plan.id).first()
+    if not v:
+        raise HTTPException(404, "No pre-op nursing verification exists yet for this surgical plan")
+    if v.verified_at:
+        raise HTTPException(409, "Already finalized")
+    v.verified_by = _actor(current_user)
+    v.verified_at = datetime.utcnow()
+    db.commit()
+    db.refresh(v)
+    return {"status": "success", "preop_nursing_verification": _preop_nursing_out(v)}
+
+
+def _or_count_out(c: SurgicalORCount) -> dict:
+    return {
+        "id": c.id, "surgical_plan_id": c.surgical_plan_id, "phase": c.phase, "count_type": c.count_type,
+        "count_value": c.count_value, "discrepancy": bool(c.discrepancy), "discrepancy_notes": c.discrepancy_notes,
+        "discrepancy_resolved": bool(c.discrepancy_resolved), "resolution_notes": c.resolution_notes,
+        "recorded_by": c.recorded_by, "recorded_at": c.recorded_at.isoformat() if c.recorded_at else None,
+    }
+
+
+@router.post("/surgical-plans/{plan_id}/or-counts", status_code=201)
+async def add_or_count(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    if body.get("phase") not in ("Initial", "Interim", "Final"):
+        raise HTTPException(422, "phase must be one of Initial, Interim, Final")
+    if not body.get("count_type"):
+        raise HTTPException(422, "count_type is required")
+    if not body.get("count_value"):
+        raise HTTPException(422, "count_value is required")
+    record = SurgicalORCount(
+        patient_id=plan.patient_id, surgical_plan_id=plan.id,
+        phase=body["phase"], count_type=body["count_type"], count_value=str(body["count_value"]),
+        discrepancy=bool(body.get("discrepancy", False)), discrepancy_notes=body.get("discrepancy_notes"),
+        recorded_by=_actor(current_user),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "or_count": _or_count_out(record)}
+
+
+@router.get("/surgical-plans/{plan_id}/or-counts")
+def list_or_counts(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    rows = db.query(SurgicalORCount).filter(SurgicalORCount.surgical_plan_id == plan.id).order_by(SurgicalORCount.id.asc()).all()
+    return {"or_counts": [_or_count_out(c) for c in rows]}
+
+
+@router.post("/or-counts/{id}/resolve-discrepancy")
+async def resolve_or_count_discrepancy(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_surgical_team(current_user)
+    record = db.query(SurgicalORCount).filter(SurgicalORCount.id == id).first()
+    if not record:
+        raise HTTPException(404, "Count record not found")
+    _check_patient_in_org(db, record.patient_id, _org_id(current_user))
+    if not record.discrepancy:
+        raise HTTPException(409, "This count has no discrepancy to resolve")
+    if record.discrepancy_resolved:
+        raise HTTPException(409, "This discrepancy is already resolved")
+    body = await request.json()
+    if not body.get("resolution_notes"):
+        raise HTTPException(422, "resolution_notes is required")
+    record.discrepancy_resolved = True
+    record.resolution_notes = body["resolution_notes"]
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "or_count": _or_count_out(record)}
+
+
+def _postop_nursing_handoff_out(h: SurgicalPostOpNursingHandoff) -> dict:
+    return {
+        "id": h.id, "surgical_plan_id": h.surgical_plan_id, "vitals": h.vitals or {},
+        "wound_status": h.wound_status, "drain_status": h.drain_status, "stoma_status": h.stoma_status,
+        "pain_assessment": h.pain_assessment, "lines_devices": h.lines_devices,
+        "immediate_complications": h.immediate_complications, "disposition": h.disposition,
+        "handoff_receiver": h.handoff_receiver, "handoff_receiver_role": h.handoff_receiver_role,
+        "handed_off_by": h.handed_off_by, "handed_off_at": h.handed_off_at.isoformat() if h.handed_off_at else None,
+    }
+
+
+@router.post("/surgical-plans/{plan_id}/postop-nursing-handoff", status_code=201)
+async def add_postop_nursing_handoff(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    if not body.get("handoff_receiver"):
+        raise HTTPException(422, "handoff_receiver (named recipient) is required")
+    if not body.get("disposition"):
+        raise HTTPException(422, "disposition is required")
+    record = SurgicalPostOpNursingHandoff(
+        patient_id=plan.patient_id, surgical_plan_id=plan.id,
+        vitals=body.get("vitals"), wound_status=body.get("wound_status"), drain_status=body.get("drain_status"),
+        stoma_status=body.get("stoma_status"), pain_assessment=body.get("pain_assessment"),
+        lines_devices=body.get("lines_devices"), immediate_complications=body.get("immediate_complications"),
+        disposition=body["disposition"], handoff_receiver=body["handoff_receiver"],
+        handoff_receiver_role=body.get("handoff_receiver_role"), handed_off_by=_actor(current_user),
+    )
+    db.add(record)
+    publish(
+        db, "SURGICAL_POSTOP_NURSING_HANDOFF", patient_id=plan.patient_id, actor=_actor(current_user),
+        role=current_user.get("role"), title="Post-operative nursing handoff recorded", category="TREATMENT",
+        description=f"{_actor(current_user)} handed off to {body['handoff_receiver']} ({body['disposition']}).",
+        plan_id=plan.id,
+    )
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "postop_nursing_handoff": _postop_nursing_handoff_out(record)}
+
+
+@router.get("/surgical-plans/{plan_id}/postop-nursing-handoff")
+def list_postop_nursing_handoffs(plan_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    rows = db.query(SurgicalPostOpNursingHandoff).filter(SurgicalPostOpNursingHandoff.surgical_plan_id == plan.id).order_by(SurgicalPostOpNursingHandoff.id.desc()).all()
+    return {"postop_nursing_handoffs": [_postop_nursing_handoff_out(h) for h in rows]}
+
+
+@router.post("/surgical-plans/{plan_id}/nursing-tasks", status_code=201)
+async def create_surgical_nursing_task(plan_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Closed-loop Nursing Task Management (PDF item 6) -- reuses the existing patient-scoped
+    CarePlanTask (models_cca.py), the same table Patient Liaison's own task-creation endpoint
+    (cca_coordination.py's create_coordination_task) writes to, with owner_role="NURSING" so
+    it surfaces on GET /patients/{id}/tasks?owner_role=NURSING alongside every other nursing
+    task for this patient. Deliberately no new task-status state machine here -- OPEN/RESOLVED
+    (via the existing POST /tasks/{id}/resolve, extended below to accept a NURSING owner) is
+    the full lifecycle this role needs; a full Assigned/In-Progress/Blocked machine is not
+    built out for a single role's worklist."""
+    _require_surgical_team(current_user)
+    plan = _get_org_surgical_plan(db, plan_id, _org_id(current_user))
+    body = await request.json()
+    description = (body.get("description") or "").strip()
+    if not description:
+        raise HTTPException(422, "description is required")
+    if not body.get("due_date"):
+        raise HTTPException(422, "due_date is required")
+    task = CarePlanTask(
+        patient_id=plan.patient_id, description=f"[OR: {plan.procedure}] {description}",
+        owner_id=body.get("owner_id") or current_user.get("email") or _actor(current_user),
+        owner_name=body.get("owner_name") or _actor(current_user),
+        owner_role="NURSING", category="OR_TASK", source="MANUAL",
+        due_date=datetime.fromisoformat(body["due_date"]),
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return {"status": "success", "task": {
+        "id": task.id, "patient_id": task.patient_id, "description": task.description,
+        "owner_name": task.owner_name, "owner_role": task.owner_role, "category": task.category,
+        "status": task.status, "due_date": task.due_date.isoformat() if task.due_date else None,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+    }}
+
+
+# ---------------------------------------------------------------------------
 # Procedures & Notes (Gap Analysis PDF items 31-33: Palliative, Medical Oncology, Radiation
 # Oncology) and Palliative Treatment Orders (item 30). See ClinicalProcedureNote and
 # PalliativeTreatmentOrder's docstrings for why these are separate from SurgicalOperativeNote
@@ -3145,6 +3373,343 @@ async def transition_palliative_order(order_id: int, request: Request, db: Sessi
     db.commit()
     db.refresh(order)
     return {"status": "success", "palliative_order": _palliative_order_out(order)}
+
+
+# ---------------------------------------------------------------------------
+# Palliative Care missing-development round (Palliative_Care_Missing_Development_Only.pdf) --
+# comprehensive assessment, pain/symptom management, goals of care, advance care planning,
+# and referrals. See the models' own docstrings in models_cca_oncology_ext.py. All writes
+# gated by is_cca_palliative_care_specialist (or Admin), same convention as the existing
+# palliative-orders endpoints above.
+# ---------------------------------------------------------------------------
+
+def _require_palliative(current_user: dict):
+    if not (is_cca_palliative_care_specialist(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Palliative Care Specialist may perform this action")
+
+
+def _palliative_assessment_out(a: PalliativeAssessment) -> dict:
+    return {
+        "id": a.id, "patient_id": a.patient_id, "referral_reason": a.referral_reason,
+        "performance_status_scale": a.performance_status_scale, "performance_status_value": a.performance_status_value,
+        "functional_status": a.functional_status, "nutrition_status": a.nutrition_status,
+        "psychosocial_needs": a.psychosocial_needs, "spiritual_cultural_needs": a.spiritual_cultural_needs,
+        "caregiver_name": a.caregiver_name, "caregiver_relationship": a.caregiver_relationship,
+        "caregiver_needs": a.caregiver_needs, "notes": a.notes,
+        "assessed_by": a.assessed_by, "assessed_at": a.assessed_at.isoformat() if a.assessed_at else None,
+        "updated_by": a.updated_by, "updated_at": a.updated_at.isoformat() if a.updated_at else None,
+    }
+
+
+_PALLIATIVE_ASSESSMENT_FIELDS = (
+    "referral_reason", "performance_status_scale", "performance_status_value", "functional_status",
+    "nutrition_status", "psychosocial_needs", "spiritual_cultural_needs",
+    "caregiver_name", "caregiver_relationship", "caregiver_needs", "notes",
+)
+
+
+@router.get("/patients/{patient_id}/palliative-assessment")
+def get_palliative_assessment(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    a = db.query(PalliativeAssessment).filter(PalliativeAssessment.patient_id == patient_id).first()
+    return {"palliative_assessment": _palliative_assessment_out(a) if a else None}
+
+
+@router.post("/patients/{patient_id}/palliative-assessment")
+async def upsert_palliative_assessment(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_palliative(current_user)
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    a = db.query(PalliativeAssessment).filter(PalliativeAssessment.patient_id == patient_id).first()
+    if not a:
+        a = PalliativeAssessment(patient_id=patient_id, assessed_by=_actor(current_user))
+        db.add(a)
+    for field in _PALLIATIVE_ASSESSMENT_FIELDS:
+        if field in body:
+            setattr(a, field, body[field])
+    a.updated_by = _actor(current_user)
+    a.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(a)
+    return {"status": "success", "palliative_assessment": _palliative_assessment_out(a)}
+
+
+def _pain_assessment_out(p: PalliativePainAssessment) -> dict:
+    return {
+        "id": p.id, "patient_id": p.patient_id, "site": p.site, "laterality": p.laterality,
+        "character": p.character, "pain_type": p.pain_type, "severity": p.severity, "timing": p.timing,
+        "triggers": p.triggers, "relieving_factors": p.relieving_factors, "functional_impact": p.functional_impact,
+        "current_analgesia": p.current_analgesia, "breakthrough_use": p.breakthrough_use,
+        "adverse_effects": p.adverse_effects, "non_pharm_measures": p.non_pharm_measures,
+        "plan": p.plan, "follow_up_interval": p.follow_up_interval, "is_reassessment": bool(p.is_reassessment),
+        "assessed_by": p.assessed_by, "assessed_at": p.assessed_at.isoformat() if p.assessed_at else None,
+    }
+
+
+@router.get("/patients/{patient_id}/palliative-pain-assessments")
+def list_pain_assessments(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(PalliativePainAssessment).filter(PalliativePainAssessment.patient_id == patient_id).order_by(PalliativePainAssessment.id.desc()).all()
+    return {"pain_assessments": [_pain_assessment_out(p) for p in rows]}
+
+
+@router.post("/patients/{patient_id}/palliative-pain-assessments", status_code=201)
+async def add_pain_assessment(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_palliative(current_user)
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    record = PalliativePainAssessment(
+        patient_id=patient_id, site=body.get("site"), laterality=body.get("laterality"),
+        character=body.get("character"), pain_type=body.get("pain_type"), severity=body.get("severity"),
+        timing=body.get("timing"), triggers=body.get("triggers"), relieving_factors=body.get("relieving_factors"),
+        functional_impact=body.get("functional_impact"), current_analgesia=body.get("current_analgesia"),
+        breakthrough_use=body.get("breakthrough_use"), adverse_effects=body.get("adverse_effects"),
+        non_pharm_measures=body.get("non_pharm_measures"), plan=body.get("plan"),
+        follow_up_interval=body.get("follow_up_interval"), is_reassessment=bool(body.get("is_reassessment", False)),
+        assessed_by=_actor(current_user),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "pain_assessment": _pain_assessment_out(record)}
+
+
+_PALLIATIVE_SYMPTOM_TYPES = (
+    "Pain", "Dyspnoea", "Nausea/Vomiting", "Constipation", "Delirium", "Fatigue",
+    "Anorexia/Cachexia", "Insomnia", "Anxiety/Depression", "Secretions", "Other",
+)
+
+
+def _symptom_assessment_out(s: PalliativeSymptomAssessment) -> dict:
+    return {
+        "id": s.id, "patient_id": s.patient_id, "symptom_type": s.symptom_type, "severity": s.severity,
+        "description": s.description, "intervention": s.intervention,
+        "assessed_by": s.assessed_by, "assessed_at": s.assessed_at.isoformat() if s.assessed_at else None,
+    }
+
+
+@router.get("/patients/{patient_id}/palliative-symptom-assessments")
+def list_symptom_assessments(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(PalliativeSymptomAssessment).filter(PalliativeSymptomAssessment.patient_id == patient_id).order_by(PalliativeSymptomAssessment.id.desc()).all()
+    return {"symptom_assessments": [_symptom_assessment_out(s) for s in rows]}
+
+
+@router.post("/patients/{patient_id}/palliative-symptom-assessments", status_code=201)
+async def add_symptom_assessment(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_palliative(current_user)
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    symptom_type = body.get("symptom_type")
+    if not symptom_type:
+        raise HTTPException(422, "symptom_type is required")
+    if symptom_type not in _PALLIATIVE_SYMPTOM_TYPES:
+        raise HTTPException(422, f"symptom_type must be one of {_PALLIATIVE_SYMPTOM_TYPES}")
+    record = PalliativeSymptomAssessment(
+        patient_id=patient_id, symptom_type=symptom_type, severity=body.get("severity"),
+        description=body.get("description"), intervention=body.get("intervention"),
+        assessed_by=_actor(current_user),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "symptom_assessment": _symptom_assessment_out(record)}
+
+
+def _goals_of_care_out(g: PalliativeGoalsOfCare) -> dict:
+    return {
+        "id": g.id, "patient_id": g.patient_id, "patient_goals": g.patient_goals,
+        "treatment_goals": g.treatment_goals, "illness_understanding": g.illness_understanding,
+        "care_preferences": g.care_preferences, "decision_maker_name": g.decision_maker_name,
+        "decision_maker_relationship": g.decision_maker_relationship, "participants": g.participants,
+        "decision_summary": g.decision_summary, "unresolved_questions": g.unresolved_questions,
+        "next_review_date": g.next_review_date.isoformat() if g.next_review_date else None,
+        "recorded_by": g.recorded_by, "recorded_at": g.recorded_at.isoformat() if g.recorded_at else None,
+        "updated_by": g.updated_by, "updated_at": g.updated_at.isoformat() if g.updated_at else None,
+    }
+
+
+_GOALS_OF_CARE_FIELDS = (
+    "patient_goals", "treatment_goals", "illness_understanding", "care_preferences",
+    "decision_maker_name", "decision_maker_relationship", "participants",
+    "decision_summary", "unresolved_questions",
+)
+
+
+@router.get("/patients/{patient_id}/palliative-goals-of-care")
+def get_goals_of_care(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    g = db.query(PalliativeGoalsOfCare).filter(PalliativeGoalsOfCare.patient_id == patient_id).first()
+    return {"goals_of_care": _goals_of_care_out(g) if g else None}
+
+
+@router.post("/patients/{patient_id}/palliative-goals-of-care")
+async def upsert_goals_of_care(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_palliative(current_user)
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    g = db.query(PalliativeGoalsOfCare).filter(PalliativeGoalsOfCare.patient_id == patient_id).first()
+    if not g:
+        g = PalliativeGoalsOfCare(patient_id=patient_id, recorded_by=_actor(current_user))
+        db.add(g)
+    for field in _GOALS_OF_CARE_FIELDS:
+        if field in body:
+            setattr(g, field, body[field])
+    if "next_review_date" in body and body["next_review_date"]:
+        g.next_review_date = datetime.fromisoformat(body["next_review_date"]).date()
+    g.updated_by = _actor(current_user)
+    g.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(g)
+    return {"status": "success", "goals_of_care": _goals_of_care_out(g)}
+
+
+def _acp_out(a: PalliativeAdvanceCarePlan) -> dict:
+    return {
+        "id": a.id, "patient_id": a.patient_id, "acp_status": a.acp_status,
+        "advance_directive_status": a.advance_directive_status, "healthcare_decision_maker": a.healthcare_decision_maker,
+        "code_status": a.code_status, "preferred_place_of_care": a.preferred_place_of_care,
+        "preferred_place_of_death": a.preferred_place_of_death,
+        "escalation_hospitalisation_preferences": a.escalation_hospitalisation_preferences,
+        "participants": a.participants,
+        "discussion_date": a.discussion_date.isoformat() if a.discussion_date else None,
+        "review_date": a.review_date.isoformat() if a.review_date else None,
+        "recorded_by": a.recorded_by, "recorded_at": a.recorded_at.isoformat() if a.recorded_at else None,
+        "updated_by": a.updated_by, "updated_at": a.updated_at.isoformat() if a.updated_at else None,
+    }
+
+
+_ACP_FIELDS = (
+    "acp_status", "advance_directive_status", "healthcare_decision_maker", "code_status",
+    "preferred_place_of_care", "preferred_place_of_death", "escalation_hospitalisation_preferences",
+    "participants",
+)
+_ACP_STATUSES = ("NotDiscussed", "Discussed", "InProgress", "Documented")
+
+
+@router.get("/patients/{patient_id}/palliative-advance-care-plan")
+def get_advance_care_plan(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    a = db.query(PalliativeAdvanceCarePlan).filter(PalliativeAdvanceCarePlan.patient_id == patient_id).first()
+    return {"advance_care_plan": _acp_out(a) if a else None}
+
+
+@router.post("/patients/{patient_id}/palliative-advance-care-plan")
+async def upsert_advance_care_plan(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_palliative(current_user)
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    if "acp_status" in body and body["acp_status"] not in _ACP_STATUSES:
+        raise HTTPException(422, f"acp_status must be one of {_ACP_STATUSES}")
+    a = db.query(PalliativeAdvanceCarePlan).filter(PalliativeAdvanceCarePlan.patient_id == patient_id).first()
+    if not a:
+        a = PalliativeAdvanceCarePlan(patient_id=patient_id, recorded_by=_actor(current_user))
+        db.add(a)
+    for field in _ACP_FIELDS:
+        if field in body:
+            setattr(a, field, body[field])
+    if "discussion_date" in body and body["discussion_date"]:
+        a.discussion_date = datetime.fromisoformat(body["discussion_date"]).date()
+    if "review_date" in body and body["review_date"]:
+        a.review_date = datetime.fromisoformat(body["review_date"]).date()
+    a.updated_by = _actor(current_user)
+    a.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(a)
+    return {"status": "success", "advance_care_plan": _acp_out(a)}
+
+
+_PALLIATIVE_REFERRAL_SERVICES = (
+    "Pain", "Psychology", "SocialWork", "Nutrition", "Physiotherapy", "Spiritual", "HomePalliative", "Other",
+)
+_PALLIATIVE_REFERRAL_STATUSES = ("Requested", "Accepted", "Scheduled", "Completed", "Declined", "Cancelled")
+
+
+def _referral_out(r: PalliativeReferral) -> dict:
+    return {
+        "id": r.id, "patient_id": r.patient_id, "service": r.service, "reason": r.reason,
+        "status": r.status, "notes": r.notes, "requested_by": r.requested_by,
+        "requested_at": r.requested_at.isoformat() if r.requested_at else None,
+        "updated_by": r.updated_by, "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+    }
+
+
+@router.get("/patients/{patient_id}/palliative-referrals")
+def list_referrals(patient_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    rows = db.query(PalliativeReferral).filter(PalliativeReferral.patient_id == patient_id).order_by(PalliativeReferral.id.desc()).all()
+    return {"referrals": [_referral_out(r) for r in rows]}
+
+
+@router.post("/patients/{patient_id}/palliative-referrals", status_code=201)
+async def create_referral(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_palliative(current_user)
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    if body.get("service") not in _PALLIATIVE_REFERRAL_SERVICES:
+        raise HTTPException(422, f"service must be one of {_PALLIATIVE_REFERRAL_SERVICES}")
+    record = PalliativeReferral(
+        patient_id=patient_id, service=body["service"], reason=body.get("reason"),
+        requested_by=_actor(current_user),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "referral": _referral_out(record)}
+
+
+@router.patch("/palliative-referrals/{id}")
+async def update_referral_status(id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    _require_palliative(current_user)
+    record = db.query(PalliativeReferral).filter(PalliativeReferral.id == id).first()
+    if not record:
+        raise HTTPException(404, "Referral not found")
+    _check_patient_in_org(db, record.patient_id, _org_id(current_user))
+    body = await request.json()
+    target = body.get("status")
+    if target not in _PALLIATIVE_REFERRAL_STATUSES:
+        raise HTTPException(422, f"status must be one of {_PALLIATIVE_REFERRAL_STATUSES}")
+    record.status = target
+    if body.get("notes"):
+        record.notes = body["notes"]
+    record.updated_by = _actor(current_user)
+    record.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(record)
+    return {"status": "success", "referral": _referral_out(record)}
+
+
+@router.post("/patients/{patient_id}/palliative-followup-tasks", status_code=201)
+async def create_palliative_followup_task(patient_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Follow-up, Monitoring & Escalation (PDF item 9) -- reuses the shared patient-scoped
+    CarePlanTask (models_cca.py) with owner_role="PALLIATIVE_CARE", the same reuse pattern as
+    Surgical Nurse's create_surgical_nursing_task. Deliberately no separate red-flag/escalation
+    state machine -- an urgent concern is just a task with an earlier due_date and a
+    description the clinician writes themselves; this module does not compute urgency."""
+    _require_palliative(current_user)
+    _get_org_patient(db, patient_id, _org_id(current_user))
+    body = await request.json()
+    description = (body.get("description") or "").strip()
+    if not description:
+        raise HTTPException(422, "description is required")
+    if not body.get("due_date"):
+        raise HTTPException(422, "due_date is required")
+    task = CarePlanTask(
+        patient_id=patient_id, description=description,
+        owner_id=body.get("owner_id") or current_user.get("email") or _actor(current_user),
+        owner_name=body.get("owner_name") or _actor(current_user),
+        owner_role="PALLIATIVE_CARE", category="PALLIATIVE_FOLLOWUP", source="MANUAL",
+        due_date=datetime.fromisoformat(body["due_date"]),
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return {"status": "success", "task": {
+        "id": task.id, "patient_id": task.patient_id, "description": task.description,
+        "owner_name": task.owner_name, "owner_role": task.owner_role, "category": task.category,
+        "status": task.status, "due_date": task.due_date.isoformat() if task.due_date else None,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+    }}
 
 
 # ---------------------------------------------------------------------------

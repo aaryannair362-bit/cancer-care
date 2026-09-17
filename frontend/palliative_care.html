@@ -88,8 +88,12 @@
             <div class="sidebar-section-title">CLINICAL</div>
             <a class="sidebar-nav-item active" id="nav-patients" onclick="showTab('patients')"><div class="nav-item-left"><span>👤</span><span>Patients</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-history" onclick="showTab('history')"><div class="nav-item-left"><span>🗂️</span><span>Patient History</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-assessment" onclick="showTab('assessment')"><div class="nav-item-left"><span>📋</span><span>Assessment</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-painsymptoms" onclick="showTab('painsymptoms')"><div class="nav-item-left"><span>🩹</span><span>Pain &amp; Symptoms</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-goalsacp" onclick="showTab('goalsacp')"><div class="nav-item-left"><span>🧭</span><span>Goals &amp; ACP</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-palliativeorders" onclick="showTab('palliativeorders')"><div class="nav-item-left"><span>💊</span><span>Palliative Orders</span></div><span class="nav-chevron">›</span></a>
             <a class="sidebar-nav-item" id="nav-procedurenotes" onclick="showTab('procedurenotes')"><div class="nav-item-left"><span>🩻</span><span>Procedures &amp; Notes</span></div><span class="nav-chevron">›</span></a>
+            <a class="sidebar-nav-item" id="nav-followup" onclick="showTab('followup')"><div class="nav-item-left"><span>📅</span><span>Follow-up &amp; Referrals</span></div><span class="nav-chevron">›</span></a>
         </aside>
         <main class="canvas">
             <div id="view-patients" class="view-panel active">
@@ -107,6 +111,24 @@
                 <div id="history-content"><!-- Populated via JS: renderCaseSummaryPanel() --></div>
             </div>
 
+            <div id="view-assessment" class="view-panel">
+                <h1 class="page-title">Palliative Care Assessment</h1>
+                <p class="page-subtitle">Referral reason, performance status, functional/nutrition status, psychosocial and spiritual needs, and caregiver assessment.</p>
+                <div id="assessment-content"><!-- Populated via JS: loadAssessmentView() --></div>
+            </div>
+
+            <div id="view-painsymptoms" class="view-panel">
+                <h1 class="page-title">Pain &amp; Symptom Management</h1>
+                <p class="page-subtitle">Structured pain assessments and reassessments, plus the broader symptom-management log (dyspnoea, nausea, constipation, delirium, and other configured symptoms).</p>
+                <div id="painsymptoms-content"><!-- Populated via JS: loadPainSymptomsView() --></div>
+            </div>
+
+            <div id="view-goalsacp" class="view-panel">
+                <h1 class="page-title">Goals of Care &amp; Advance Care Planning</h1>
+                <p class="page-subtitle">Patient priorities, shared decision-making, and advance-care-planning status — kept distinct from clinician treatment orders.</p>
+                <div id="goalsacp-content"><!-- Populated via JS: loadGoalsAcpView() --></div>
+            </div>
+
             <div id="view-palliativeorders" class="view-panel">
                 <h1 class="page-title">Palliative Orders</h1>
                 <p class="page-subtitle">Supportive/comfort-care orders (pain management, symptom control, ...) — distinct from the chemotherapy Treatment Order pipeline.</p>
@@ -117,6 +139,12 @@
                 <h1 class="page-title">Procedures &amp; Notes</h1>
                 <p class="page-subtitle">Bedside/outpatient palliative procedures (e.g. nerve block, paracentesis) — distinct from the surgical operative note.</p>
                 <div id="procedurenotes-content"><!-- Populated via JS: loadProcedureNotesView() --></div>
+            </div>
+
+            <div id="view-followup" class="view-panel">
+                <h1 class="page-title">Follow-up &amp; Referrals</h1>
+                <p class="page-subtitle">Multidisciplinary referrals and closed-loop follow-up tasks owned by Palliative Care.</p>
+                <div id="followup-content"><!-- Populated via JS: loadFollowupView() --></div>
             </div>
         </main>
     </div>
@@ -135,8 +163,12 @@
             document.getElementById(`nav-${tab}`).classList.add('active');
             if (tab === 'patients') loadPatientList();
             if (tab === 'history') renderCaseSummaryPanel('history-content', currentPatientId);
+            if (tab === 'assessment') loadAssessmentView();
+            if (tab === 'painsymptoms') loadPainSymptomsView();
+            if (tab === 'goalsacp') loadGoalsAcpView();
             if (tab === 'palliativeorders') loadPalliativeOrdersView();
             if (tab === 'procedurenotes') loadProcedureNotesView();
+            if (tab === 'followup') loadFollowupView();
         }
 
         function openPatient(id) { currentPatientId = id; showTab('history'); }
@@ -275,6 +307,337 @@
                 });
                 toast('Procedure note recorded', 'success');
                 loadProcedureNotesView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        const NO_PATIENT_HTML = '<div class="section-card"><p class="empty-hint">Select a patient first.</p><button class="btn-navy" style="margin-top:10px;" onclick="showTab(\'patients\')">Go to Patients</button></div>';
+
+        // ---------------------------------------------------------------
+        // Palliative Care Assessment (Palliative_Care_Missing_Development_Only.pdf item 1)
+        // ---------------------------------------------------------------
+        async function loadAssessmentView() {
+            const container = document.getElementById('assessment-content');
+            if (!currentPatientId) { container.innerHTML = NO_PATIENT_HTML; return; }
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${currentPatientId}/palliative-assessment`);
+                const a = data.palliative_assessment || {};
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Assessment</div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Reason for referral</label><textarea id="pa-referral" class="form-textarea" rows="2">${escapeHtml(a.referral_reason || '')}</textarea></div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Performance status scale</label>
+                                <select id="pa-pss-scale" class="form-select">
+                                    ${['ECOG', 'Karnofsky'].map(o => `<option ${a.performance_status_scale === o ? 'selected' : ''}>${o}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div class="form-group"><label class="form-label">Performance status value</label><input type="text" id="pa-pss-value" class="form-input" value="${escapeHtml(a.performance_status_value || '')}"/></div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Functional status (ADL / mobility / dependence)</label><textarea id="pa-functional" class="form-textarea" rows="2">${escapeHtml(a.functional_status || '')}</textarea></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Nutrition status</label><textarea id="pa-nutrition" class="form-textarea" rows="2">${escapeHtml(a.nutrition_status || '')}</textarea></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Psychosocial needs</label><textarea id="pa-psychosocial" class="form-textarea" rows="2">${escapeHtml(a.psychosocial_needs || '')}</textarea></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Spiritual / cultural needs</label><textarea id="pa-spiritual" class="form-textarea" rows="2">${escapeHtml(a.spiritual_cultural_needs || '')}</textarea></div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Primary caregiver name</label><input type="text" id="pa-caregiver-name" class="form-input" value="${escapeHtml(a.caregiver_name || '')}"/></div>
+                            <div class="form-group"><label class="form-label">Relationship</label><input type="text" id="pa-caregiver-rel" class="form-input" value="${escapeHtml(a.caregiver_relationship || '')}"/></div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Caregiver needs / burden</label><textarea id="pa-caregiver-needs" class="form-textarea" rows="2">${escapeHtml(a.caregiver_needs || '')}</textarea></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Notes</label><textarea id="pa-notes" class="form-textarea" rows="2">${escapeHtml(a.notes || '')}</textarea></div>
+                        <button class="btn-navy" onclick="submitAssessment()">Save Assessment</button>
+                        ${a.updated_at ? `<div class="empty-hint" style="margin-top:8px;">Last updated by ${escapeHtml(a.updated_by || '')} at ${new Date(a.updated_at).toLocaleString()}</div>` : ''}
+                    </div>`;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitAssessment() {
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/palliative-assessment`, {
+                    referral_reason: document.getElementById('pa-referral').value || null,
+                    performance_status_scale: document.getElementById('pa-pss-scale').value,
+                    performance_status_value: document.getElementById('pa-pss-value').value || null,
+                    functional_status: document.getElementById('pa-functional').value || null,
+                    nutrition_status: document.getElementById('pa-nutrition').value || null,
+                    psychosocial_needs: document.getElementById('pa-psychosocial').value || null,
+                    spiritual_cultural_needs: document.getElementById('pa-spiritual').value || null,
+                    caregiver_name: document.getElementById('pa-caregiver-name').value || null,
+                    caregiver_relationship: document.getElementById('pa-caregiver-rel').value || null,
+                    caregiver_needs: document.getElementById('pa-caregiver-needs').value || null,
+                    notes: document.getElementById('pa-notes').value || null,
+                });
+                toast('Assessment saved', 'success');
+                loadAssessmentView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---------------------------------------------------------------
+        // Pain & Symptom Management (PDF items 2-3)
+        // ---------------------------------------------------------------
+        const SYMPTOM_TYPES = ['Pain', 'Dyspnoea', 'Nausea/Vomiting', 'Constipation', 'Delirium', 'Fatigue', 'Anorexia/Cachexia', 'Insomnia', 'Anxiety/Depression', 'Secretions', 'Other'];
+        const PAIN_TYPES = ['Nociceptive', 'Neuropathic', 'Mixed', 'Other'];
+
+        async function loadPainSymptomsView() {
+            const container = document.getElementById('painsymptoms-content');
+            if (!currentPatientId) { container.innerHTML = NO_PATIENT_HTML; return; }
+            try {
+                const [painData, symptomData] = await Promise.all([
+                    Api.get(`${CCA_API}/patients/${currentPatientId}/palliative-pain-assessments`),
+                    Api.get(`${CCA_API}/patients/${currentPatientId}/palliative-symptom-assessments`),
+                ]);
+                const pains = painData.pain_assessments || [];
+                const symptoms = symptomData.symptom_assessments || [];
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Pain Assessment History</div>
+                        ${pains.map(p => `
+                            <div class="med-card">
+                                <div class="med-card-head"><div class="med-card-title">${escapeHtml(p.site || 'Pain')}${p.laterality ? ' (' + escapeHtml(p.laterality) + ')' : ''}</div><span class="badge badge-amber">Severity ${escapeHtml(p.severity || '—')}</span></div>
+                                <div class="med-card-meta">${p.pain_type ? escapeHtml(p.pain_type) + ' · ' : ''}${p.current_analgesia ? 'Analgesia: ' + escapeHtml(p.current_analgesia) : ''}</div>
+                                ${p.plan ? `<div class="med-card-meta">Plan: ${escapeHtml(p.plan)}</div>` : ''}
+                                <div class="med-card-meta" style="font-size:11px;">${p.is_reassessment ? 'Reassessment' : 'Initial'} · ${escapeHtml(p.assessed_by || '')} · ${new Date(p.assessed_at).toLocaleString()}</div>
+                            </div>
+                        `).join('') || '<p class="empty-hint">No pain assessments recorded yet.</p>'}
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Record Pain Assessment</div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Site</label><input type="text" id="pn-pain-site" class="form-input"/></div>
+                            <div class="form-group"><label class="form-label">Laterality</label><input type="text" id="pn-pain-lat" class="form-input" placeholder="Right / Left / Bilateral"/></div>
+                            <div class="form-group"><label class="form-label">Type</label><select id="pn-pain-type" class="form-select">${PAIN_TYPES.map(t => `<option>${t}</option>`).join('')}</select></div>
+                            <div class="form-group"><label class="form-label">Severity (0-10)</label><input type="text" id="pn-pain-severity" class="form-input"/></div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Current analgesia</label><input type="text" id="pn-pain-analgesia" class="form-input" placeholder="Medication, dose, route, frequency"/></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Breakthrough / PRN use</label><input type="text" id="pn-pain-breakthrough" class="form-input"/></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Adverse effects</label><input type="text" id="pn-pain-adverse" class="form-input"/></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Plan</label><textarea id="pn-pain-plan" class="form-textarea" rows="2"></textarea></div>
+                        <div class="form-checkbox-row" style="display:flex; align-items:center; gap:8px; margin-bottom:12px;"><input type="checkbox" id="pn-pain-reassessment"/> <label for="pn-pain-reassessment">This is a reassessment</label></div>
+                        <button class="btn-navy" onclick="submitPainAssessment()">Record Pain Assessment</button>
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Symptom Log</div>
+                        ${symptoms.map(s => `
+                            <div class="med-card">
+                                <div class="med-card-head"><div class="med-card-title">${escapeHtml(s.symptom_type)}</div>${s.severity ? `<span class="badge badge-amber">${escapeHtml(s.severity)}</span>` : ''}</div>
+                                ${s.description ? `<div class="med-card-meta">${escapeHtml(s.description)}</div>` : ''}
+                                ${s.intervention ? `<div class="med-card-meta">Intervention: ${escapeHtml(s.intervention)}</div>` : ''}
+                                <div class="med-card-meta" style="font-size:11px;">${escapeHtml(s.assessed_by || '')} · ${new Date(s.assessed_at).toLocaleString()}</div>
+                            </div>
+                        `).join('') || '<p class="empty-hint">No symptoms recorded yet.</p>'}
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Record Symptom</div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Symptom</label><select id="pn-symptom-type" class="form-select">${SYMPTOM_TYPES.map(t => `<option>${t}</option>`).join('')}</select></div>
+                            <div class="form-group"><label class="form-label">Severity</label><input type="text" id="pn-symptom-severity" class="form-input"/></div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Description</label><textarea id="pn-symptom-desc" class="form-textarea" rows="2"></textarea></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Intervention</label><textarea id="pn-symptom-intervention" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-navy" onclick="submitSymptomAssessment()">Record Symptom</button>
+                    </div>`;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitPainAssessment() {
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/palliative-pain-assessments`, {
+                    site: document.getElementById('pn-pain-site').value || null,
+                    laterality: document.getElementById('pn-pain-lat').value || null,
+                    pain_type: document.getElementById('pn-pain-type').value,
+                    severity: document.getElementById('pn-pain-severity').value || null,
+                    current_analgesia: document.getElementById('pn-pain-analgesia').value || null,
+                    breakthrough_use: document.getElementById('pn-pain-breakthrough').value || null,
+                    adverse_effects: document.getElementById('pn-pain-adverse').value || null,
+                    plan: document.getElementById('pn-pain-plan').value || null,
+                    is_reassessment: document.getElementById('pn-pain-reassessment').checked,
+                });
+                toast('Pain assessment recorded', 'success');
+                loadPainSymptomsView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitSymptomAssessment() {
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/palliative-symptom-assessments`, {
+                    symptom_type: document.getElementById('pn-symptom-type').value,
+                    severity: document.getElementById('pn-symptom-severity').value || null,
+                    description: document.getElementById('pn-symptom-desc').value || null,
+                    intervention: document.getElementById('pn-symptom-intervention').value || null,
+                });
+                toast('Symptom recorded', 'success');
+                loadPainSymptomsView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---------------------------------------------------------------
+        // Goals of Care & Advance Care Planning (PDF items 4-5)
+        // ---------------------------------------------------------------
+        async function loadGoalsAcpView() {
+            const container = document.getElementById('goalsacp-content');
+            if (!currentPatientId) { container.innerHTML = NO_PATIENT_HTML; return; }
+            try {
+                const [goalsData, acpData] = await Promise.all([
+                    Api.get(`${CCA_API}/patients/${currentPatientId}/palliative-goals-of-care`),
+                    Api.get(`${CCA_API}/patients/${currentPatientId}/palliative-advance-care-plan`),
+                ]);
+                const g = goalsData.goals_of_care || {};
+                const a = acpData.advance_care_plan || {};
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Goals of Care</div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">What matters to the patient</label><textarea id="gc-patient-goals" class="form-textarea" rows="2">${escapeHtml(g.patient_goals || '')}</textarea></div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">Treatment goals</label>
+                                <select id="gc-treatment-goals" class="form-select">
+                                    ${['Curative', 'DiseaseControl', 'ComfortFocused'].map(o => `<option ${g.treatment_goals === o ? 'selected' : ''}>${o}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div class="form-group"><label class="form-label">Decision-maker</label><input type="text" id="gc-decision-maker" class="form-input" value="${escapeHtml(g.decision_maker_name || '')}"/></div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Illness understanding</label><textarea id="gc-understanding" class="form-textarea" rows="2">${escapeHtml(g.illness_understanding || '')}</textarea></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Care preferences</label><textarea id="gc-preferences" class="form-textarea" rows="2">${escapeHtml(g.care_preferences || '')}</textarea></div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Decision summary</label><textarea id="gc-summary" class="form-textarea" rows="2">${escapeHtml(g.decision_summary || '')}</textarea></div>
+                        <button class="btn-navy" onclick="submitGoalsOfCare()">Save Goals of Care</button>
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Advance Care Planning</div>
+                        <div class="form-grid-2">
+                            <div class="form-group"><label class="form-label">ACP status</label>
+                                <select id="acp-status" class="form-select">
+                                    ${['NotDiscussed', 'Discussed', 'InProgress', 'Documented'].map(o => `<option ${a.acp_status === o ? 'selected' : ''}>${o}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div class="form-group"><label class="form-label">Code status</label><input type="text" id="acp-code-status" class="form-input" value="${escapeHtml(a.code_status || '')}"/></div>
+                            <div class="form-group"><label class="form-label">Healthcare decision-maker</label><input type="text" id="acp-decision-maker" class="form-input" value="${escapeHtml(a.healthcare_decision_maker || '')}"/></div>
+                            <div class="form-group"><label class="form-label">Preferred place of care</label><input type="text" id="acp-place-care" class="form-input" value="${escapeHtml(a.preferred_place_of_care || '')}"/></div>
+                            <div class="form-group"><label class="form-label">Preferred place of death</label><input type="text" id="acp-place-death" class="form-input" value="${escapeHtml(a.preferred_place_of_death || '')}"/></div>
+                            <div class="form-group"><label class="form-label">Discussion date</label><input type="date" id="acp-discussion-date" class="form-input" value="${a.discussion_date || ''}"/></div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Escalation / hospitalisation preferences</label><textarea id="acp-escalation" class="form-textarea" rows="2">${escapeHtml(a.escalation_hospitalisation_preferences || '')}</textarea></div>
+                        <button class="btn-navy" onclick="submitAdvanceCarePlan()">Save Advance Care Plan</button>
+                    </div>`;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitGoalsOfCare() {
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/palliative-goals-of-care`, {
+                    patient_goals: document.getElementById('gc-patient-goals').value || null,
+                    treatment_goals: document.getElementById('gc-treatment-goals').value,
+                    decision_maker_name: document.getElementById('gc-decision-maker').value || null,
+                    illness_understanding: document.getElementById('gc-understanding').value || null,
+                    care_preferences: document.getElementById('gc-preferences').value || null,
+                    decision_summary: document.getElementById('gc-summary').value || null,
+                });
+                toast('Goals of care saved', 'success');
+                loadGoalsAcpView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitAdvanceCarePlan() {
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/palliative-advance-care-plan`, {
+                    acp_status: document.getElementById('acp-status').value,
+                    code_status: document.getElementById('acp-code-status').value || null,
+                    healthcare_decision_maker: document.getElementById('acp-decision-maker').value || null,
+                    preferred_place_of_care: document.getElementById('acp-place-care').value || null,
+                    preferred_place_of_death: document.getElementById('acp-place-death').value || null,
+                    discussion_date: document.getElementById('acp-discussion-date').value || null,
+                    escalation_hospitalisation_preferences: document.getElementById('acp-escalation').value || null,
+                });
+                toast('Advance care plan saved', 'success');
+                loadGoalsAcpView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // ---------------------------------------------------------------
+        // Follow-up & Referrals (PDF items 9-10)
+        // ---------------------------------------------------------------
+        const REFERRAL_SERVICES = ['Pain', 'Psychology', 'SocialWork', 'Nutrition', 'Physiotherapy', 'Spiritual', 'HomePalliative', 'Other'];
+        const REFERRAL_NEXT_STATUS = { Requested: 'Accepted', Accepted: 'Scheduled', Scheduled: 'Completed' };
+
+        async function loadFollowupView() {
+            const container = document.getElementById('followup-content');
+            if (!currentPatientId) { container.innerHTML = NO_PATIENT_HTML; return; }
+            try {
+                const [referralData, taskData] = await Promise.all([
+                    Api.get(`${CCA_API}/patients/${currentPatientId}/palliative-referrals`),
+                    Api.get(`${CCA_API}/patients/${currentPatientId}/tasks?owner_role=PALLIATIVE_CARE`),
+                ]);
+                const referrals = referralData.referrals || [];
+                const tasks = taskData.tasks || [];
+                container.innerHTML = `
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Referrals</div>
+                        ${referrals.map(r => `
+                            <div class="med-card">
+                                <div class="med-card-head"><div class="med-card-title">${escapeHtml(r.service)}</div><span class="badge ${r.status === 'Completed' ? 'badge-green' : (r.status === 'Declined' || r.status === 'Cancelled' ? 'badge-rose' : 'badge-amber')}">${escapeHtml(r.status)}</span></div>
+                                ${r.reason ? `<div class="med-card-meta">${escapeHtml(r.reason)}</div>` : ''}
+                                <div class="med-card-actions">
+                                    ${REFERRAL_NEXT_STATUS[r.status] ? `<button class="btn-navy btn-sm" onclick="transitionReferral(${r.id}, '${REFERRAL_NEXT_STATUS[r.status]}')">Mark ${REFERRAL_NEXT_STATUS[r.status]}</button>` : ''}
+                                    ${['Requested', 'Accepted'].includes(r.status) ? `<button class="btn-outline btn-sm" onclick="transitionReferral(${r.id}, 'Declined')">Decline</button>` : ''}
+                                </div>
+                            </div>
+                        `).join('') || '<p class="empty-hint">No referrals yet.</p>'}
+                        <div class="form-grid-2" style="margin-top:12px;">
+                            <div class="form-group"><label class="form-label">Service</label><select id="ref-service" class="form-select">${REFERRAL_SERVICES.map(s => `<option>${s}</option>`).join('')}</select></div>
+                            <div class="form-group"><label class="form-label">Reason</label><input type="text" id="ref-reason" class="form-input"/></div>
+                        </div>
+                        <button class="btn-outline btn-sm" onclick="submitReferral()">+ Create Referral</button>
+                    </div>
+                    <div class="section-card">
+                        <div class="section-title" style="margin-bottom:10px;">Follow-up Tasks</div>
+                        ${tasks.map(t => `
+                            <div class="med-card">
+                                <div class="med-card-head"><div class="med-card-title">${escapeHtml(t.description)}</div><span class="badge ${t.status === 'RESOLVED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(t.status)}</span></div>
+                                <div class="med-card-meta">Due ${t.due_date ? new Date(t.due_date).toLocaleString() : '—'}</div>
+                                ${t.status !== 'RESOLVED' ? `<div class="med-card-actions"><button class="btn-outline btn-sm" onclick="resolveFollowupTask(${t.id})">Mark Completed</button></div>` : ''}
+                            </div>
+                        `).join('') || '<p class="empty-hint">No follow-up tasks yet.</p>'}
+                        <div class="form-grid-2" style="margin-top:12px;">
+                            <div class="form-group" style="grid-column: span 2;"><label class="form-label">Task description</label><input type="text" id="fu-desc" class="form-input" placeholder="e.g. Reassess pain control after titration"/></div>
+                            <div class="form-group"><label class="form-label">Due</label><input type="datetime-local" id="fu-due" class="form-input"/></div>
+                        </div>
+                        <button class="btn-outline btn-sm" onclick="submitFollowupTask()">+ Add Follow-up Task</button>
+                    </div>`;
+            } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
+        }
+
+        async function submitReferral() {
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/palliative-referrals`, {
+                    service: document.getElementById('ref-service').value,
+                    reason: document.getElementById('ref-reason').value || null,
+                });
+                toast('Referral created', 'success');
+                loadFollowupView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function transitionReferral(id, status) {
+            try {
+                await Api.patch(`${CCA_API}/palliative-referrals/${id}`, { status });
+                toast('Referral updated', 'success');
+                loadFollowupView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function submitFollowupTask() {
+            const desc = document.getElementById('fu-desc').value;
+            const due = document.getElementById('fu-due').value;
+            if (!desc || !due) { toast('Description and due date/time are required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/patients/${currentPatientId}/palliative-followup-tasks`, {
+                    description: desc, due_date: new Date(due).toISOString(),
+                });
+                toast('Follow-up task added', 'success');
+                loadFollowupView();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function resolveFollowupTask(taskId) {
+            try {
+                await Api.post(`${CCA_API}/tasks/${taskId}/resolve`, {});
+                toast('Task completed', 'success');
+                loadFollowupView();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 

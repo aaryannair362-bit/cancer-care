@@ -120,6 +120,9 @@
         // own framing ("information may already be written higher in the workflow ... needs to
         // be surfaced down"), without offering intra-op forms for a case that hasn't happened yet.
         const OR_DOCUMENTATION_STATUSES = ['scheduled', 'performed', 'post_op'];
+        // Post-op nursing handoff only makes sense once the procedure has actually happened.
+        const POSTOP_STATUSES = ['performed', 'post_op'];
+        const CHECKLIST_PHASES = [['sign_in', 'Sign-In (before anaesthesia)'], ['time_out', 'Time-Out (before incision)'], ['sign_out', 'Sign-Out (before leaving OR)']];
 
         async function loadOrWorklist() {
             const container = document.getElementById('worklist-content');
@@ -151,6 +154,21 @@
                         <div class="wl-label" style="margin-top:4px;">Procedure Notes</div>
                         <div id="or-procedure-notes-${plan.id}"></div>
 
+                        <div class="section-card" style="margin-top:16px;">
+                            <div class="section-title" style="font-size:14px;">Pre-Operative Nursing Verification</div>
+                            <div id="preop-verify-${plan.id}"></div>
+                        </div>
+
+                        <div class="section-card" style="margin-top:16px;">
+                            <div class="section-title" style="font-size:14px;">Nursing Tasks</div>
+                            <div id="nursing-tasks-${plan.id}"></div>
+                            <div class="form-grid-3" style="margin-top:10px;">
+                                <div class="form-group" style="grid-column: span 2;"><label class="form-label">Task description</label><input type="text" id="nt-desc-${plan.id}" class="form-input" placeholder="e.g. Confirm blood availability before transfer" /></div>
+                                <div class="form-group"><label class="form-label">Due</label><input type="datetime-local" id="nt-due-${plan.id}" class="form-input" /></div>
+                            </div>
+                            <button class="btn-outline btn-sm" onclick="submitNursingTask(${plan.id})">+ Add Task</button>
+                        </div>
+
                         ${showOrForms ? `
                         <div id="or-monitoring-${plan.id}"></div>
                         <div class="form-grid-3">
@@ -179,14 +197,52 @@
                         </div>
                         <div class="form-checkbox-row"><input type="checkbox" id="or-blood-crossmatch-${plan.id}"/> <label for="or-blood-crossmatch-${plan.id}">Crossmatch/compatibility confirmed</label></div>
                         <button class="btn-outline btn-sm" onclick="submitOrBloodTransfusion(${plan.id})">+ Record Unit</button>
+
+                        <div style="margin-top:16px;"><div class="wl-label">WHO Surgical Safety Checklist</div><div id="or-safety-checklist-${plan.id}"></div></div>
+
+                        <div style="margin-top:16px;"><div class="wl-label">OR Counts (Instrument / Sponge / Needle)</div><div id="or-counts-${plan.id}"></div></div>
+                        <div class="form-grid-3" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Phase</label>
+                                <select id="or-count-phase-${plan.id}" class="form-select"><option>Initial</option><option>Interim</option><option>Final</option></select>
+                            </div>
+                            <div class="form-group"><label class="form-label">Type</label>
+                                <select id="or-count-type-${plan.id}" class="form-select"><option>Instrument</option><option>Sponge</option><option>Needle</option><option>Other</option></select>
+                            </div>
+                            <div class="form-group"><label class="form-label">Count</label><input type="text" id="or-count-value-${plan.id}" class="form-input" /></div>
+                        </div>
+                        <div class="form-checkbox-row"><input type="checkbox" id="or-count-discrepancy-${plan.id}" onchange="document.getElementById('or-count-disc-notes-${plan.id}').style.display = this.checked ? 'block' : 'none'"/> <label for="or-count-discrepancy-${plan.id}">Discrepancy found</label></div>
+                        <div class="form-group" id="or-count-disc-notes-${plan.id}" style="display:none; margin-bottom:10px;"><textarea id="or-count-disc-text-${plan.id}" class="form-textarea" rows="2" placeholder="Describe the discrepancy"></textarea></div>
+                        <button class="btn-outline btn-sm" onclick="submitOrCount(${plan.id})">+ Record Count</button>
                         ` : '<p class="empty-hint">Intra-operative documentation becomes available once this plan is scheduled.</p>'}
+
+                        ${POSTOP_STATUSES.includes(plan.status) ? `
+                        <div style="margin-top:16px;"><div class="wl-label">Post-Operative Nursing Handoff</div><div id="postop-handoff-${plan.id}"></div></div>
+                        <div class="form-grid-2" style="margin-top:10px;">
+                            <div class="form-group"><label class="form-label">Disposition</label>
+                                <select id="poh-disposition-${plan.id}" class="form-select"><option>PACU</option><option>Ward</option><option>ICU</option><option>Other</option></select>
+                            </div>
+                            <div class="form-group"><label class="form-label">Handoff receiver (name)</label><input type="text" id="poh-receiver-${plan.id}" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Receiver role</label><input type="text" id="poh-receiver-role-${plan.id}" class="form-input" placeholder="e.g. PACU Nurse" /></div>
+                            <div class="form-group"><label class="form-label">Pain assessment</label><input type="text" id="poh-pain-${plan.id}" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Wound status</label><input type="text" id="poh-wound-${plan.id}" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Drain status</label><input type="text" id="poh-drain-${plan.id}" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Stoma status</label><input type="text" id="poh-stoma-${plan.id}" class="form-input" /></div>
+                            <div class="form-group"><label class="form-label">Lines / devices</label><input type="text" id="poh-lines-${plan.id}" class="form-input" /></div>
+                        </div>
+                        <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Immediate complications / concerns</label><textarea id="poh-complications-${plan.id}" class="form-textarea" rows="2"></textarea></div>
+                        <button class="btn-navy btn-sm" onclick="submitPostOpHandoff(${plan.id})">Record Handoff</button>
+                        ` : ''}
                     </div>
                 `; }).join('');
                 rows.forEach(plan => {
                     loadOrProcedureNotes(plan.id);
+                    loadPreOpVerification(plan.id);
+                    loadNursingTasks(plan.id, plan.patient_id);
                     if (OR_DOCUMENTATION_STATUSES.includes(plan.status)) {
                         loadOrMonitoring(plan.id); loadOrIntraOpNotes(plan.id); loadOrSpecimens(plan.id); loadOrBlood(plan.id);
+                        loadOrSafetyChecklist(plan.id); loadOrCounts(plan.id);
                     }
+                    if (POSTOP_STATUSES.includes(plan.status)) { loadPostOpHandoffs(plan.id); }
                 });
             } catch (err) { container.innerHTML = `<div class="section-card"><p style="color:var(--rose-badge-text); font-size:13px;">${escapeHtml(apiErrorMessage(err))}</p></div>`; }
         }
@@ -261,9 +317,11 @@
                 el.innerHTML = (data.results || []).map(s => `
                     <div class="med-card">
                         <div class="med-card-head"><div class="med-card-title">${escapeHtml(s.specimen_label)}</div><span class="badge ${s.status === 'ReceivedByLab' ? 'badge-green' : 'badge-amber'}">${escapeHtml(s.status)}</span></div>
+                        ${s.exception_reason ? `<div class="med-card-meta" style="color:var(--rose-badge-text);">Exception: ${escapeHtml(s.exception_reason)}</div>` : ''}
                         <div class="med-card-actions">
                             ${s.status === 'Collected' ? `<button class="btn-navy btn-sm" onclick="submitOrSpecimenEvent(${s.id}, 'HandedOff', ${planId})">Hand Off</button>` : ''}
                             ${s.status === 'HandedOff' ? `<button class="btn-navy btn-sm" onclick="submitOrSpecimenEvent(${s.id}, 'ReceivedByLab', ${planId})">Mark Received by Lab</button>` : ''}
+                            ${s.status === 'ReceivedByLab' ? `<button class="btn-navy btn-sm" onclick="submitOrSpecimenEvent(${s.id}, 'Accepted', ${planId})">Accept</button><button class="btn-outline btn-sm" onclick="submitOrSpecimenEvent(${s.id}, 'Exception', ${planId})">Flag Exception</button>` : ''}
                         </div>
                     </div>
                 `).join('') || '<p class="empty-hint">No specimens recorded yet.</p>';
@@ -293,6 +351,10 @@
                     const receiver = prompt('Received by lab (name):');
                     if (!receiver) { toast('A recipient name is required', 'error'); return; }
                     payload.received_by_lab = receiver;
+                } else if (status === 'Exception') {
+                    const reason = prompt('Exception reason (e.g. label/count mismatch):');
+                    if (!reason) { toast('An exception reason is required', 'error'); return; }
+                    payload.exception_reason = reason;
                 }
                 await Api.post(`${CCA_API}/specimens/${specimenId}/event`, payload);
                 toast('Specimen status updated', 'success');
@@ -321,6 +383,223 @@
                 });
                 toast('Blood transfusion recorded', 'success');
                 loadOrBlood(planId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // Pre-Operative Nursing Verification (Surgical Nurse missing-development round).
+        async function loadPreOpVerification(planId) {
+            const el = document.getElementById(`preop-verify-${planId}`);
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${planId}/preop-nursing-verification`);
+                const v = data.preop_nursing_verification;
+                if (v && v.verified_at) {
+                    el.innerHTML = `
+                        <div class="med-card">
+                            <div class="med-card-head"><div class="med-card-title">Verified</div><span class="badge badge-green">Finalized</span></div>
+                            <div class="med-card-meta">Identity: ${v.identity_verified ? '✔' : '✘'} · Procedure/site/laterality: ${v.procedure_site_laterality_confirmed ? '✔' : '✘'} · Consent: ${escapeHtml(v.consent_status || '—')}</div>
+                            <div class="med-card-meta">Allergies: ${escapeHtml(v.allergy_status || '—')} · NPO: ${escapeHtml(v.npo_status || '—')} · IV access: ${escapeHtml(v.iv_access || '—')}</div>
+                            <div class="med-card-meta">Verified by ${escapeHtml(v.verified_by || '')} at ${new Date(v.verified_at).toLocaleString()}</div>
+                        </div>`;
+                    return;
+                }
+                el.innerHTML = `
+                    <div class="form-checkbox-row"><input type="checkbox" id="pv-identity-${planId}" ${v && v.identity_verified ? 'checked' : ''}/> <label for="pv-identity-${planId}">Patient identity verified (two identifiers)</label></div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="pv-site-${planId}" ${v && v.procedure_site_laterality_confirmed ? 'checked' : ''}/> <label for="pv-site-${planId}">Procedure, site and laterality confirmed against surgical plan</label></div>
+                    <div class="form-grid-3">
+                        <div class="form-group"><label class="form-label">Allergy status</label><input type="text" id="pv-allergy-${planId}" class="form-input" value="${escapeHtml(v?.allergy_status || '')}"/></div>
+                        <div class="form-group"><label class="form-label">Consent</label>
+                            <select id="pv-consent-${planId}" class="form-select">
+                                ${['Documented', 'Pending', 'Not Applicable'].map(o => `<option ${v?.consent_status === o ? 'selected' : ''}>${o}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="form-group"><label class="form-label">Site marking</label>
+                            <select id="pv-marking-${planId}" class="form-select">
+                                ${['Confirmed', 'Not Applicable'].map(o => `<option ${v?.site_marking_status === o ? 'selected' : ''}>${o}</option>`).join('')}
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-grid-3">
+                        <div class="form-group"><label class="form-label">NPO / fasting status</label><input type="text" id="pv-npo-${planId}" class="form-input" value="${escapeHtml(v?.npo_status || '')}"/></div>
+                        <div class="form-group"><label class="form-label">IV access</label><input type="text" id="pv-iv-${planId}" class="form-input" value="${escapeHtml(v?.iv_access || '')}"/></div>
+                        <div class="form-group"><label class="form-label">Implants / equipment required</label><input type="text" id="pv-implants-${planId}" class="form-input" value="${escapeHtml(v?.implants_equipment_required || '')}"/></div>
+                    </div>
+                    <div class="form-checkbox-row"><input type="checkbox" id="pv-implants-confirmed-${planId}" ${v && v.implants_equipment_confirmed ? 'checked' : ''}/> <label for="pv-implants-confirmed-${planId}">Required implants/equipment confirmed available</label></div>
+                    <div class="form-group"><label class="form-label">Blockers</label><input type="text" id="pv-blockers-${planId}" class="form-input" value="${escapeHtml(v?.blockers || '')}"/></div>
+                    <div class="med-card-actions">
+                        <button class="btn-outline btn-sm" onclick="submitPreOpVerification(${planId})">Save Draft</button>
+                        <button class="btn-navy btn-sm" onclick="finalizePreOpVerification(${planId})">Finalize Verification</button>
+                    </div>`;
+            } catch (err) { el.innerHTML = `<p class="empty-hint">${escapeHtml(apiErrorMessage(err))}</p>`; }
+        }
+
+        function preOpVerificationPayload(planId) {
+            return {
+                identity_verified: document.getElementById(`pv-identity-${planId}`).checked,
+                procedure_site_laterality_confirmed: document.getElementById(`pv-site-${planId}`).checked,
+                allergy_status: document.getElementById(`pv-allergy-${planId}`).value || null,
+                consent_status: document.getElementById(`pv-consent-${planId}`).value,
+                site_marking_status: document.getElementById(`pv-marking-${planId}`).value,
+                npo_status: document.getElementById(`pv-npo-${planId}`).value || null,
+                iv_access: document.getElementById(`pv-iv-${planId}`).value || null,
+                implants_equipment_required: document.getElementById(`pv-implants-${planId}`).value || null,
+                implants_equipment_confirmed: document.getElementById(`pv-implants-confirmed-${planId}`).checked,
+                blockers: document.getElementById(`pv-blockers-${planId}`).value || null,
+            };
+        }
+
+        async function submitPreOpVerification(planId) {
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${planId}/preop-nursing-verification`, preOpVerificationPayload(planId));
+                toast('Pre-op verification saved', 'success');
+                loadPreOpVerification(planId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function finalizePreOpVerification(planId) {
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${planId}/preop-nursing-verification`, preOpVerificationPayload(planId));
+                await Api.post(`${CCA_API}/surgical-plans/${planId}/preop-nursing-verification/finalize`, {});
+                toast('Pre-op verification finalized', 'success');
+                loadPreOpVerification(planId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // WHO Surgical Safety Checklist -- shared endpoint with surgical_oncologist.html.
+        async function loadOrSafetyChecklist(planId) {
+            const el = document.getElementById(`or-safety-checklist-${planId}`);
+            if (!el) return;
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${planId}/safety-checklist`);
+                const c = data.safety_checklist;
+                el.innerHTML = CHECKLIST_PHASES.map(([phase, label]) => {
+                    const at = c ? c[`${phase}_at`] : null;
+                    return `<div class="med-card-meta">${label}: ${at ? `✔ confirmed by ${escapeHtml(c[`${phase}_confirmed_by`] || '')} at ${new Date(at).toLocaleTimeString()}` : `<button class="btn-outline btn-sm" onclick="confirmChecklistPhase(${planId}, '${phase}')">Confirm</button>`}</div>`;
+                }).join('');
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function confirmChecklistPhase(planId, phase) {
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${planId}/safety-checklist/${phase}`, { items: {} });
+                toast(`${phase.replace('_', '-')} confirmed`, 'success');
+                loadOrSafetyChecklist(planId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // OR Counts.
+        async function loadOrCounts(planId) {
+            const el = document.getElementById(`or-counts-${planId}`);
+            if (!el) return;
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${planId}/or-counts`);
+                el.innerHTML = (data.or_counts || []).map(c => `
+                    <div class="med-card">
+                        <div class="med-card-head"><div class="med-card-title">${escapeHtml(c.phase)} — ${escapeHtml(c.count_type)}: ${escapeHtml(c.count_value)}</div>${c.discrepancy ? `<span class="badge ${c.discrepancy_resolved ? 'badge-green' : 'badge-rose'}">${c.discrepancy_resolved ? 'Resolved' : 'Discrepancy'}</span>` : '<span class="badge badge-green">Correct</span>'}</div>
+                        ${c.discrepancy_notes ? `<div class="med-card-meta">${escapeHtml(c.discrepancy_notes)}</div>` : ''}
+                        ${c.discrepancy && !c.discrepancy_resolved ? `<div class="med-card-actions"><button class="btn-outline btn-sm" onclick="resolveOrCountDiscrepancy(${c.id}, ${planId})">Resolve Discrepancy</button></div>` : ''}
+                    </div>
+                `).join('') || '<p class="empty-hint">No counts recorded yet.</p>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitOrCount(planId) {
+            const value = document.getElementById(`or-count-value-${planId}`).value;
+            if (!value) { toast('Count is required', 'error'); return; }
+            const discrepancy = document.getElementById(`or-count-discrepancy-${planId}`).checked;
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${planId}/or-counts`, {
+                    phase: document.getElementById(`or-count-phase-${planId}`).value,
+                    count_type: document.getElementById(`or-count-type-${planId}`).value,
+                    count_value: value, discrepancy,
+                    discrepancy_notes: discrepancy ? document.getElementById(`or-count-disc-text-${planId}`).value || null : null,
+                });
+                toast('Count recorded', 'success');
+                loadOrCounts(planId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function resolveOrCountDiscrepancy(countId, planId) {
+            const notes = prompt('Resolution notes:');
+            if (!notes) { toast('Resolution notes are required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/or-counts/${countId}/resolve-discrepancy`, { resolution_notes: notes });
+                toast('Discrepancy resolved', 'success');
+                loadOrCounts(planId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // Post-Operative Nursing Handoff.
+        async function loadPostOpHandoffs(planId) {
+            const el = document.getElementById(`postop-handoff-${planId}`);
+            if (!el) return;
+            try {
+                const data = await Api.get(`${CCA_API}/surgical-plans/${planId}/postop-nursing-handoff`);
+                el.innerHTML = (data.postop_nursing_handoffs || []).map(h => `
+                    <div class="med-card">
+                        <div class="med-card-title">${escapeHtml(h.disposition)} — handed off to ${escapeHtml(h.handoff_receiver)}${h.handoff_receiver_role ? ' (' + escapeHtml(h.handoff_receiver_role) + ')' : ''}</div>
+                        <div class="med-card-meta">${h.pain_assessment ? 'Pain: ' + escapeHtml(h.pain_assessment) + ' · ' : ''}${h.wound_status ? 'Wound: ' + escapeHtml(h.wound_status) + ' · ' : ''}${h.immediate_complications ? 'Concerns: ' + escapeHtml(h.immediate_complications) : ''}</div>
+                        <div class="med-card-meta">By ${escapeHtml(h.handed_off_by || '')} at ${new Date(h.handed_off_at).toLocaleString()}</div>
+                    </div>
+                `).join('') || '<p class="empty-hint">No post-operative handoff recorded yet.</p>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitPostOpHandoff(planId) {
+            const receiver = document.getElementById(`poh-receiver-${planId}`).value;
+            if (!receiver) { toast('Handoff receiver name is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/surgical-plans/${planId}/postop-nursing-handoff`, {
+                    disposition: document.getElementById(`poh-disposition-${planId}`).value,
+                    handoff_receiver: receiver,
+                    handoff_receiver_role: document.getElementById(`poh-receiver-role-${planId}`).value || null,
+                    pain_assessment: document.getElementById(`poh-pain-${planId}`).value || null,
+                    wound_status: document.getElementById(`poh-wound-${planId}`).value || null,
+                    drain_status: document.getElementById(`poh-drain-${planId}`).value || null,
+                    stoma_status: document.getElementById(`poh-stoma-${planId}`).value || null,
+                    lines_devices: document.getElementById(`poh-lines-${planId}`).value || null,
+                    immediate_complications: document.getElementById(`poh-complications-${planId}`).value || null,
+                });
+                toast('Post-operative handoff recorded', 'success');
+                loadPostOpHandoffs(planId);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        // Closed-loop Nursing Tasks (reuses the shared patient task queue, owner_role=NURSING).
+        async function loadNursingTasks(planId, patientId) {
+            const el = document.getElementById(`nursing-tasks-${planId}`);
+            if (!el || !patientId) return;
+            try {
+                const data = await Api.get(`${CCA_API}/patients/${patientId}/tasks?owner_role=NURSING`);
+                el.innerHTML = (data.tasks || []).map(t => `
+                    <div class="med-card">
+                        <div class="med-card-head"><div class="med-card-title">${escapeHtml(t.description)}</div><span class="badge ${t.status === 'RESOLVED' ? 'badge-green' : 'badge-amber'}">${escapeHtml(t.status)}</span></div>
+                        <div class="med-card-meta">Owner: ${escapeHtml(t.owner_name || '')} · Due ${t.due_date ? new Date(t.due_date).toLocaleString() : '—'}</div>
+                        ${t.status !== 'RESOLVED' ? `<div class="med-card-actions"><button class="btn-outline btn-sm" onclick="resolveNursingTask(${t.id}, ${planId}, ${patientId})">Mark Completed</button></div>` : ''}
+                    </div>
+                `).join('') || '<p class="empty-hint">No nursing tasks yet.</p>';
+            } catch (err) { el.innerHTML = ''; }
+        }
+
+        async function submitNursingTask(planId) {
+            const desc = document.getElementById(`nt-desc-${planId}`).value;
+            const due = document.getElementById(`nt-due-${planId}`).value;
+            if (!desc) { toast('Task description is required', 'error'); return; }
+            if (!due) { toast('Due date/time is required', 'error'); return; }
+            try {
+                const result = await Api.post(`${CCA_API}/surgical-plans/${planId}/nursing-tasks`, {
+                    description: desc, due_date: new Date(due).toISOString(),
+                });
+                document.getElementById(`nt-desc-${planId}`).value = '';
+                toast('Task added', 'success');
+                loadNursingTasks(planId, result.task.patient_id);
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+
+        async function resolveNursingTask(taskId, planId, patientId) {
+            try {
+                await Api.post(`${CCA_API}/tasks/${taskId}/resolve`, {});
+                toast('Task completed', 'success');
+                loadNursingTasks(planId, patientId);
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
 
