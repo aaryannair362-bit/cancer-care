@@ -5382,6 +5382,32 @@ def get_treatment_day_assessment(
         TreatmentOrder.patient_id == patient_id, TreatmentOrder.status.in_(["DRAFT", "SIGNED"])
     ).order_by(TreatmentOrder.id.desc()).first()
 
+    # Day Care/Infusion gap review ("Laboratory Integration"): this used to always return an
+    # empty array plus a "not yet connected" placeholder string, even after the Lab/Phlebotomy
+    # gap-review round gave this app real, verified (Finalized, not superseded) lab results to
+    # read from -- see cca_diagnostics.py's verify_lab_result. Reads only Finalized results,
+    # never a Draft (unverified) one, matching "do not treat unverified results as final".
+    # Deliberately does NOT filter to "parameters relevant to this regimen" -- this app has no
+    # test catalog/regimen-required-panel mapping yet (a separate, not-yet-built Lab/Phlebotomy
+    # follow-up item), and guessing which analytes matter for which regimen would be inventing
+    # clinical judgment this module has no basis for; the nurse reviews the full recent verified
+    # list instead.
+    verified_labs = db.query(CCAResult).join(CCAOrder, CCAResult.order_id == CCAOrder.id).filter(
+        CCAResult.patient_id == patient_id, CCAResult.result_type == "LAB",
+        CCAResult.report_status == "Finalized", CCAResult.superseded_by_id.is_(None),
+    ).order_by(CCAResult.finalized_at.desc()).limit(20).all()
+    lab_parameters = [
+        {
+            "result_id": r.id, "order_id": r.order_id, "test_name": r.title,
+            "findings_text": r.findings_text, "extracted_values": r.extracted_values,
+            "is_critical": bool(r.is_critical),
+            "resulted_at": r.resulted_at.isoformat() if r.resulted_at else None,
+            "verified_at": r.finalized_at.isoformat() if r.finalized_at else None,
+            "verified_by": r.finalized_by,
+        }
+        for r in verified_labs
+    ]
+
     return {
         "patient": {"name": patient.name, "mrn": patient.mrn, "bsa": intake.bsa if intake else None},
         "protocol": plan.protocol_name if plan else "[NOT_RECORDED] No active treatment plan on record.",
@@ -5396,8 +5422,11 @@ def get_treatment_day_assessment(
         # Item 3.10 -- informational only; the doctor can still choose any clearance_exit
         # below regardless of what this shows.
         "pharmacy_readiness": _pharmacy_readiness_for_order(db, order),
-        "lab_parameters": [],
-        "lab_parameters_note": "Live laboratory integration is not yet connected -- treatment-day lab values must be reviewed directly in the lab system before clearance.",
+        "lab_parameters": lab_parameters,
+        "lab_parameters_note": (
+            None if lab_parameters
+            else "No verified laboratory results are on file for this patient yet -- check with the laboratory if results are expected before clearance."
+        ),
         "toxicity_history": [
             {
                 "id": t.id,

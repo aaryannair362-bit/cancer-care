@@ -1758,7 +1758,11 @@
                 </div>
                 <div class="section-card">
                     <div class="section-title">Decide Treatment Clearance</div>
-                    <div class="section-sub" style="margin-bottom:10px;">${escapeHtml(assessment.lab_parameters_note || '')}</div>
+                    <div class="section-sub" style="margin-bottom:10px;">
+                        ${(assessment.lab_parameters || []).length
+                            ? assessment.lab_parameters.map(l => `${escapeHtml(l.test_name)}: ${escapeHtml(l.findings_text || '')}${l.is_critical ? ' <span class="badge badge-rose">Critical</span>' : ''}`).join('<br/>')
+                            : escapeHtml(assessment.lab_parameters_note || '')}
+                    </div>
                     ${(assessment.pharmacy_readiness || []).length ? `
                         <div style="margin-bottom:12px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg-card-subtle);">
                             <div style="font-size:11px; color:var(--ink-500); text-transform:uppercase; letter-spacing:0.3px; margin-bottom:6px;">Pharmacy Readiness (informational only — does not gate this decision)</div>

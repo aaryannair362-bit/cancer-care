@@ -9,7 +9,7 @@ clinician-typed strings, stored verbatim (standing repo rule).
 import pytest
 
 from app.cca_seed import seed_cca_database
-from app.models_cca import CCAPatient
+from app.models_cca import CCAPatient, CCAOrder, CCAResult
 
 
 @pytest.fixture
@@ -154,3 +154,36 @@ def test_pharmacy_readiness_indicator_is_informational_only(client, headers, db_
         "patient_id": patient_id, "decision": "CLEARED", "reason": "Labs within range.",
     })
     assert clearance.status_code == 200, clearance.text
+
+
+def test_day_assessment_lab_parameters_reflects_real_verified_lab_results(client, headers, db_session, oncologist):
+    """Day Care/Infusion gap review (Laboratory Integration): this used to always return an
+    empty lab_parameters array plus a hardcoded 'not yet connected' placeholder, regardless of
+    whether real verified lab results existed. Only a Finalized (verified), non-superseded LAB
+    result should appear -- a Draft one must not."""
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+
+    no_labs_yet = client.get(f"/api/cca/treatment/day-assessment?patient_id={patient_id}", headers=headers)
+    assert no_labs_yet.status_code == 200
+    assert no_labs_yet.json()["lab_parameters"] == []
+    assert "no verified laboratory results" in no_labs_yet.json()["lab_parameters_note"].lower()
+
+    order = CCAOrder(patient_id=patient_id, order_type="LAB", item_name="CBC", clinical_indication="Pre-treatment workup.")
+    db_session.add(order)
+    db_session.flush()
+    draft_result = CCAResult(order_id=order.id, patient_id=patient_id, result_type="LAB", title="CBC", findings_text="Draft, not yet verified.", report_status="Draft")
+    finalized_result = CCAResult(
+        order_id=order.id, patient_id=patient_id, result_type="LAB", title="Hemoglobin",
+        findings_text="Hb 11.2 g/dL - within acceptable range.", report_status="Finalized",
+        finalized_by="labtech@x.com", is_critical=False,
+    )
+    db_session.add_all([draft_result, finalized_result])
+    db_session.commit()
+
+    with_labs = client.get(f"/api/cca/treatment/day-assessment?patient_id={patient_id}", headers=headers)
+    assert with_labs.status_code == 200
+    params = with_labs.json()["lab_parameters"]
+    assert len(params) == 1
+    assert params[0]["test_name"] == "Hemoglobin"
+    assert params[0]["verified_by"] == "labtech@x.com"
+    assert with_labs.json()["lab_parameters_note"] is None

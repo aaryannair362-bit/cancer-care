@@ -1428,7 +1428,11 @@
                 </div>
                 <div class="section-card">
                     <div class="section-title">Decide Treatment Clearance</div>
-                    <div class="section-sub" style="margin-bottom:10px;">${escapeHtml(assessment.lab_parameters_note || '')}</div>
+                    <div class="section-sub" style="margin-bottom:10px;">
+                        ${(assessment.lab_parameters || []).length
+                            ? assessment.lab_parameters.map(l => `${escapeHtml(l.test_name)}: ${escapeHtml(l.findings_text || '')}${l.is_critical ? ' <span class="badge badge-rose">Critical</span>' : ''}`).join('<br/>')
+                            : escapeHtml(assessment.lab_parameters_note || '')}
+                    </div>
                     <div class="form-group"><label class="form-label">Decision</label>
                         <select id="clearance-decision-onc" class="form-select">${(assessment.clearance_exits || []).map(c => `<option value="${escapeHtml(c.code)}">${escapeHtml(c.label)}</option>`).join('')}</select>
                     </div>

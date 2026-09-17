@@ -1571,10 +1571,21 @@ async function loadTreatmentDayAssessment() {
             `;
         }
 
-        // lab_parameters is always empty today -- the backend explicitly has no live lab
-        // integration yet (see lab_parameters_note) rather than fabricating structured values.
-        document.getElementById('lab-tolerability-body').innerHTML =
-            `<tr><td colspan="4" style="color:var(--text-muted);">${escapeHtml(data.lab_parameters_note || 'No lab parameters on file.')}</td></tr>`;
+        // Day Care/Infusion gap review: lab_parameters now reflects real verified (Finalized,
+        // never Draft) Lab/Phlebotomy results for this patient -- see the backend's
+        // get_treatment_day_assessment docstring. Deliberately shows the full recent verified
+        // list rather than filtering to "parameters relevant to this regimen", since this app
+        // has no test-catalog/regimen-required-panel mapping to filter by yet.
+        document.getElementById('lab-tolerability-body').innerHTML = (data.lab_parameters || []).length
+            ? data.lab_parameters.map(l => `
+                <tr>
+                    <td>${escapeHtml(l.test_name)}${l.is_critical ? ' <span class="badge-pill badge-warning">Critical</span>' : ''}</td>
+                    <td>${escapeHtml(l.findings_text || '')}</td>
+                    <td>${l.verified_at ? escapeHtml(new Date(l.verified_at).toLocaleString()) : '—'}</td>
+                    <td>${escapeHtml(l.verified_by || '')}</td>
+                </tr>
+            `).join('')
+            : `<tr><td colspan="4" style="color:var(--text-muted);">${escapeHtml(data.lab_parameters_note || 'No lab parameters on file.')}</td></tr>`;
 
         const toxContainer = document.getElementById('toxicity-items-container');
         toxContainer.innerHTML = (data.toxicity_history || []).map(t => `
