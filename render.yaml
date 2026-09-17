@@ -7,7 +7,7 @@
 # (apt-get) or Docker build step to get right. If that ever changes, switch `runtime: python`
 # to `runtime: docker` with a Dockerfile, but don't add one speculatively.
 #
-# Secrets (DATABASE_URL, GROQ_API_KEY, GROQ_API_KEY_OCR, SARVAM_API_KEY, SARVAM_OCR_API_KEY,
+# Secrets (DATABASE_URL, GROQ_API_KEY, GEMINI_API_KEY, SARVAM_API_KEY, SARVAM_OCR_API_KEY,
 # SARVAM_STT_API_KEY, ALLOWED_ORIGINS, ADMIN_EMAIL, ADMIN_PASSWORD) are intentionally left
 # `sync: false` -- Render
 # will prompt for these in the dashboard on first deploy rather than storing them in this
@@ -77,13 +77,24 @@ services:
         value: "7"
       - key: GROQ_API_KEY
         sync: false
-      # Dedicated key for PDF/document OCR AI-extraction (cca_engine.py), kept on a SEPARATE
-      # Groq account from GROQ_API_KEY above -- see config.py's GROQ_API_KEY_OCR and
-      # rate_limiter.py's ocr_extraction_* buckets for why: both features previously shared one
-      # account's 8000-token/minute budget, so a multi-page document upload could starve a live
-      # doctor's consultation of its share (or vice versa). Falls back to GROQ_API_KEY when left
-      # blank, so this is optional, not required, for the app to keep working.
-      - key: GROQ_API_KEY_OCR
+      # Document OCR AI-extraction (extract_clinical_facts / classify_and_extract_page in
+      # cca_engine.py) -- required for a document upload to draft any diagnoses/medications/
+      # findings at all. Previously this slot was GROQ_API_KEY_OCR (a dedicated Groq account
+      # for the same workload); that env var is DEAD CODE now (removed from config.py entirely
+      # once document OCR AI-extraction moved to Gemini, see that file's own GEMINI_API_KEY
+      # comment) -- rotating GROQ_API_KEY_OCR in the Render dashboard has no effect on OCR
+      # extraction. If this key is missing, invalid, or the Gemini project's quota is
+      # exhausted, extraction fails silently per-chunk (by design -- see
+      # extract_clinical_facts_with_identity's docstring) and the document still uploads
+      # successfully with zero drafted facts; check for "Gemini API error" / "RESOURCE_EXHAUSTED"
+      # / "429" in the service logs around the upload time to distinguish a bad key from an
+      # exhausted quota.
+      - key: GEMINI_API_KEY
+        sync: false
+      # Optional override -- see config.py's GEMINI_MODEL comment for why this is env-overridable
+      # (a model retirement should be a dashboard edit, not a code deploy). Leave unset to use
+      # the code default.
+      - key: GEMINI_MODEL
         sync: false
       - key: GROQ_MODEL
         value: openai/gpt-oss-120b
