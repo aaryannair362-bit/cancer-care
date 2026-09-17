@@ -371,6 +371,13 @@ ADDITIVE_COLUMNS = [
     ("cca_orders", "recollection_number", "INTEGER"),
     ("cca_results", "entered_by", "VARCHAR(200)"),
     ("cca_results", "entered_at", "TIMESTAMP"),
+    # Radiology Coordinator gap review -- see each column's docstring on CCAOrder (models_cca.py).
+    ("cca_orders", "scheduled_by", "VARCHAR(200)"),
+    ("cca_orders", "arrived_at", "TIMESTAMP"),
+    ("cca_orders", "arrived_by", "VARCHAR(200)"),
+    ("cca_orders", "cancelled_at", "TIMESTAMP"),
+    ("cca_orders", "cancelled_by", "VARCHAR(200)"),
+    ("cca_orders", "cancellation_reason", "VARCHAR(255)"),
 ]
 
 

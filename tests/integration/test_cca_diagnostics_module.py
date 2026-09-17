@@ -106,6 +106,112 @@ def test_radiology_full_workflow(client, auth_headers, db_session, oncologist, r
     assert any(e["event_type"] == "IMAGING_REPORT_FINALIZED" for e in journey)
 
 
+def test_imaging_reschedule_records_prior_value_and_scheduled_by(client, auth_headers, db_session, oncologist, rad_coordinator):
+    """Gap review: calling /schedule a second time is a RESCHEDULE, not a silent overwrite --
+    the prior scheduled_at is preserved in a distinct journey event, and scheduled_by records
+    who did it (previously untracked)."""
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    order = _make_order(db_session, patient_id, "RADIOLOGY", item_name="MRI Brain")
+    coord_headers = auth_headers(rad_coordinator)
+
+    first = client.post(f"/api/cca/imaging/orders/{order.id}/schedule", headers=coord_headers,
+                         json={"scheduled_at": "2026-09-01T10:00:00", "location": "MRI Suite 1"})
+    assert first.status_code == 200
+    assert first.json()["order"]["scheduled_by"] == "radcoord@diaghosp.com"
+
+    second = client.post(f"/api/cca/imaging/orders/{order.id}/schedule", headers=coord_headers,
+                          json={"scheduled_at": "2026-09-02T14:00:00", "location": "MRI Suite 1"})
+    assert second.status_code == 200
+    assert second.json()["order"]["scheduled_at"].startswith("2026-09-02T14:00:00")
+
+    journey = client.get(f"/api/cca/patients/{patient_id}/journey", headers=coord_headers).json()["journey_events"]
+    assert any(e["event_type"] == "IMAGING_ORDER_RESCHEDULED" and "2026-09-01T10:00:00" in e["description"] for e in journey)
+
+
+def test_imaging_double_booking_same_slot_is_rejected(client, auth_headers, db_session, oncologist, rad_coordinator):
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    order1 = _make_order(db_session, patient_id, "RADIOLOGY", item_name="CT Chest")
+    order2 = _make_order(db_session, patient_id, "RADIOLOGY", item_name="CT Abdomen")
+    coord_headers = auth_headers(rad_coordinator)
+
+    ok = client.post(f"/api/cca/imaging/orders/{order1.id}/schedule", headers=coord_headers,
+                      json={"scheduled_at": "2026-09-01T10:00:00", "location": "CT Suite 1"})
+    assert ok.status_code == 200
+
+    conflict = client.post(f"/api/cca/imaging/orders/{order2.id}/schedule", headers=coord_headers,
+                            json={"scheduled_at": "2026-09-01T10:00:00", "location": "CT Suite 1"})
+    assert conflict.status_code == 409
+
+    # A different location at the same time is not a conflict.
+    different_room = client.post(f"/api/cca/imaging/orders/{order2.id}/schedule", headers=coord_headers,
+                                  json={"scheduled_at": "2026-09-01T10:00:00", "location": "CT Suite 2"})
+    assert different_room.status_code == 200
+
+
+def test_imaging_arrival_and_no_show_require_scheduled_state(client, auth_headers, db_session, oncologist, rad_coordinator):
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    order = _make_order(db_session, patient_id, "RADIOLOGY", item_name="X-Ray Chest")
+    coord_headers = auth_headers(rad_coordinator)
+
+    too_early = client.post(f"/api/cca/imaging/orders/{order.id}/arrive", headers=coord_headers)
+    assert too_early.status_code == 409
+
+    client.post(f"/api/cca/imaging/orders/{order.id}/schedule", headers=coord_headers,
+                json={"scheduled_at": "2026-09-01T10:00:00", "location": "X-Ray Room 1"})
+
+    arrived = client.post(f"/api/cca/imaging/orders/{order.id}/arrive", headers=coord_headers)
+    assert arrived.status_code == 200
+    assert arrived.json()["order"]["workflow_state"] == "Arrived"
+    assert arrived.json()["order"]["arrived_by"] == "radcoord@diaghosp.com"
+
+    # Can't record a no-show once already Arrived.
+    late_no_show = client.post(f"/api/cca/imaging/orders/{order.id}/no-show", headers=coord_headers)
+    assert late_no_show.status_code == 409
+
+
+def test_imaging_no_show_from_scheduled(client, auth_headers, db_session, oncologist, rad_coordinator):
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    order = _make_order(db_session, patient_id, "RADIOLOGY", item_name="Mammography")
+    coord_headers = auth_headers(rad_coordinator)
+    client.post(f"/api/cca/imaging/orders/{order.id}/schedule", headers=coord_headers,
+                json={"scheduled_at": "2026-09-01T10:00:00", "location": "Mammo Suite"})
+
+    no_show = client.post(f"/api/cca/imaging/orders/{order.id}/no-show", headers=coord_headers)
+    assert no_show.status_code == 200
+    assert no_show.json()["order"]["workflow_state"] == "NoShow"
+
+
+def test_imaging_cancel_requires_reason_and_blocks_further_scheduling(client, auth_headers, db_session, oncologist, rad_coordinator, radiologist):
+    patient_id = _patient_id(db_session, oncologist.organization_id)
+    order = _make_order(db_session, patient_id, "RADIOLOGY", item_name="PET-CT")
+    coord_headers = auth_headers(rad_coordinator)
+
+    missing_reason = client.post(f"/api/cca/imaging/orders/{order.id}/cancel", headers=coord_headers, json={})
+    assert missing_reason.status_code == 422
+
+    cancelled = client.post(f"/api/cca/imaging/orders/{order.id}/cancel", headers=coord_headers,
+                             json={"reason": "Patient requested cancellation"})
+    assert cancelled.status_code == 200
+    assert cancelled.json()["order"]["workflow_state"] == "Cancelled"
+    assert cancelled.json()["order"]["cancelled_by"] == "radcoord@diaghosp.com"
+    assert cancelled.json()["order"]["cancellation_reason"] == "Patient requested cancellation"
+
+    # A cancelled order cannot be rescheduled directly -- a new order must be raised.
+    reschedule_attempt = client.post(f"/api/cca/imaging/orders/{order.id}/schedule", headers=coord_headers,
+                                      json={"scheduled_at": "2026-09-05T10:00:00"})
+    assert reschedule_attempt.status_code == 409
+
+    # A radiologist result already finalized blocks cancellation too.
+    order2 = _make_order(db_session, patient_id, "RADIOLOGY", item_name="Bone Scan")
+    rad_headers = auth_headers(radiologist)
+    draft = client.post(f"/api/cca/imaging/orders/{order2.id}/report", headers=rad_headers,
+                         json={"findings_text": "No abnormality.", "impression": "Normal."})
+    client.post(f"/api/cca/imaging/results/{draft.json()['result']['id']}/finalize", headers=rad_headers)
+    already_resulted = client.post(f"/api/cca/imaging/orders/{order2.id}/cancel", headers=coord_headers,
+                                    json={"reason": "test"})
+    assert already_resulted.status_code == 409
+
+
 def test_pathology_report_and_finalize(client, auth_headers, db_session, oncologist, pathologist):
     patient_id = _patient_id(db_session, oncologist.organization_id)
     order = _make_order(db_session, patient_id, "PATHOLOGY", item_name="Core Biopsy")

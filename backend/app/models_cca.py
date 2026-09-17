@@ -522,6 +522,20 @@ class CCAOrder(Base):
     technical_issue = Column(Text, nullable=True)
     acquired_by = Column(String(200), nullable=True)
     acquired_at = Column(DateTime, nullable=True)
+    # Radiology Coordinator gap review (Scheduling Workflow / Patient Arrival & Check-In /
+    # Rescheduling & Cancellation -- all "Critical"): RADIOLOGY orders only in practice, same
+    # nullable-for-other-order-types pattern as the acquisition_* fields above. scheduled_by
+    # didn't exist at all before -- only scheduled_at/location were tracked, so nobody could
+    # answer "who scheduled this". Cancellation is a distinct terminal path from the Lab
+    # module's rejection/recollection shape: an imaging order has no specimen to re-collect, so
+    # there's nothing to link a "new" order back to -- a documented reason is what the spec
+    # actually asks for here, not a recollection chain.
+    scheduled_by = Column(String(200), nullable=True)
+    arrived_at = Column(DateTime, nullable=True)
+    arrived_by = Column(String(200), nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+    cancelled_by = Column(String(200), nullable=True)
+    cancellation_reason = Column(String(255), nullable=True)
 
 class CCAResult(Base):
     __tablename__ = "cca_results"

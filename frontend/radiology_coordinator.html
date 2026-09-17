@@ -148,7 +148,7 @@
                             <div><div class="wl-label">Patient</div><div class="wl-value">${escapeHtml(o.patient_name)}</div><div style="font-size:12px;color:var(--ink-500);">${escapeHtml(o.patient_mrn)}</div></div>
                             <div><div class="wl-label">Study</div><div class="wl-value" style="font-size:13px;">${escapeHtml(o.item_name)}</div></div>
                             <div><div class="wl-label">Preparation</div><div class="wl-value" style="font-size:13px;">${escapeHtml(o.preparation_status || 'Pending')}</div></div>
-                            <div><span class="badge badge-blue">${escapeHtml(o.status)}</span></div>
+                            <div><span class="badge badge-blue">${escapeHtml(o.workflow_state || o.status)}</span></div>
                             <div><button class="btn-navy" onclick="openImagingOrder(${Number(o.id)})">Open</button></div>
                         </div>
                     `).join('') : '<p style="color:var(--ink-500); font-size:13px;">No imaging orders.</p>') + `</div>
@@ -161,22 +161,32 @@
             try {
                 const data = await Api.get(`${CCA_API}/imaging/orders/${orderId}`);
                 const o = data.order;
+                const isCancelled = o.workflow_state === 'Cancelled';
+                const isScheduled = o.workflow_state === 'Scheduled';
                 detail.innerHTML = `
                     <div class="section-title">${escapeHtml(o.item_name)}</div>
                     <div class="section-sub" style="margin-bottom:14px;">Indication: ${escapeHtml(o.clinical_indication || 'Not recorded')}</div>
+                    ${isCancelled ? `<div class="badge badge-rose" style="margin-bottom:14px;">Cancelled by ${escapeHtml(o.cancelled_by || '')}: ${escapeHtml(o.cancellation_reason || '')}</div>` : ''}
+                    ${o.workflow_state === 'NoShow' ? `<div class="badge badge-amber" style="margin-bottom:14px;">Patient No-Show</div>` : ''}
+                    ${o.arrived_at ? `<div class="badge badge-green" style="margin-bottom:14px;">Arrived ${escapeHtml(new Date(o.arrived_at).toLocaleString())} (${escapeHtml(o.arrived_by || '')})</div>` : ''}
                     <div class="form-grid-2">
-                        <div class="form-group"><label class="form-label">Scheduled at</label><input type="datetime-local" id="img-sched-at" class="form-input" value="${o.scheduled_at ? o.scheduled_at.slice(0,16) : ''}" /></div>
-                        <div class="form-group"><label class="form-label">Location</label><input type="text" id="img-location" class="form-input" value="${escapeHtml(o.location || '')}" /></div>
+                        <div class="form-group"><label class="form-label">Scheduled at</label><input type="datetime-local" id="img-sched-at" class="form-input" value="${o.scheduled_at ? o.scheduled_at.slice(0,16) : ''}" ${isCancelled ? 'disabled' : ''} /></div>
+                        <div class="form-group"><label class="form-label">Location</label><input type="text" id="img-location" class="form-input" value="${escapeHtml(o.location || '')}" ${isCancelled ? 'disabled' : ''} /></div>
                     </div>
-                    <button class="btn-outline" onclick="submitImagingSchedule(${orderId})">📅 Schedule</button>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        ${!isCancelled ? `<button class="btn-outline" onclick="submitImagingSchedule(${orderId})">📅 ${o.scheduled_at ? 'Reschedule' : 'Schedule'}</button>` : ''}
+                        ${isScheduled ? `<button class="btn-navy" onclick="submitImagingArrive(${orderId})">✅ Record Arrival</button>` : ''}
+                        ${isScheduled ? `<button class="btn-outline" onclick="submitImagingNoShow(${orderId})">🚫 No-Show</button>` : ''}
+                        ${!isCancelled && o.status !== 'RESULTED' ? `<button class="btn-outline" onclick="submitImagingCancel(${orderId})" style="color:var(--rose-badge-text);">✖ Cancel</button>` : ''}
+                    </div>
                     <hr style="margin:18px 0; border:none; border-top:1px solid var(--line);" />
                     <div class="form-group" style="margin-bottom:14px;">
                         <label class="form-label">Preparation status</label>
-                        <select id="img-prep-status" class="form-select">
+                        <select id="img-prep-status" class="form-select" ${isCancelled ? 'disabled' : ''}>
                             ${['NotRequired', 'Pending', 'Completed', 'NeedsReview'].map(s => `<option ${o.preparation_status === s ? 'selected' : ''}>${s}</option>`).join('')}
                         </select>
                     </div>
-                    <button class="btn-navy" onclick="submitImagingPreparation(${orderId})">✅ Update Preparation</button>
+                    <button class="btn-navy" onclick="submitImagingPreparation(${orderId})" ${isCancelled ? 'disabled' : ''}>✅ Update Preparation</button>
                 `;
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }
@@ -192,6 +202,29 @@
             try {
                 await Api.patch(`${CCA_API}/imaging/orders/${orderId}/preparation`, { preparation_status: document.getElementById('img-prep-status').value });
                 toast('Preparation status updated', 'success');
+                loadImagingWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+        async function submitImagingArrive(orderId) {
+            try {
+                await Api.post(`${CCA_API}/imaging/orders/${orderId}/arrive`, {});
+                toast('Patient arrival recorded', 'success');
+                loadImagingWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+        async function submitImagingNoShow(orderId) {
+            try {
+                await Api.post(`${CCA_API}/imaging/orders/${orderId}/no-show`, {});
+                toast('No-show recorded', 'success');
+                loadImagingWorklist();
+            } catch (err) { toast(apiErrorMessage(err), 'error'); }
+        }
+        async function submitImagingCancel(orderId) {
+            const reason = prompt('Reason for cancelling this imaging order:');
+            if (!reason || !reason.trim()) { toast('A cancellation reason is required', 'error'); return; }
+            try {
+                await Api.post(`${CCA_API}/imaging/orders/${orderId}/cancel`, { reason });
+                toast('Imaging order cancelled', 'success');
                 loadImagingWorklist();
             } catch (err) { toast(apiErrorMessage(err), 'error'); }
         }

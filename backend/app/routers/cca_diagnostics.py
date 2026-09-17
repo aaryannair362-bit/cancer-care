@@ -73,6 +73,10 @@ def _order_out(o: CCAOrder, patient_name: str = None, patient_mrn: str = None) -
         "collection_site": o.collection_site, "specimen_count": o.specimen_count,
         "received_by": o.received_by, "received_at": o.received_at.isoformat() if o.received_at else None,
         "recollection_of_order_id": o.recollection_of_order_id, "recollection_number": o.recollection_number,
+        "scheduled_by": o.scheduled_by,
+        "arrived_at": o.arrived_at.isoformat() if o.arrived_at else None, "arrived_by": o.arrived_by,
+        "cancelled_at": o.cancelled_at.isoformat() if o.cancelled_at else None, "cancelled_by": o.cancelled_by,
+        "cancellation_reason": o.cancellation_reason,
     }
 
 
@@ -144,24 +148,141 @@ def get_imaging_order(order_id: int, db: Session = Depends(get_cca_db), current_
 
 @router.post("/imaging/orders/{order_id}/schedule")
 async def schedule_imaging_order(order_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
-    """Radiology Coordinator scheduling -- appointment date/time and scanner/room location."""
+    """Radiology Coordinator scheduling -- appointment date/time and scanner/room location.
+    Gap review (Scheduling Workflow -- Critical): also serves as the RESCHEDULE path (calling
+    this again on an already-scheduled order updates date/time/location and records a distinct
+    IMAGING_ORDER_RESCHEDULED audit event with the prior value, rather than silently overwriting
+    it with no trace) and blocks a same-location/same-slot double-booking against another
+    non-cancelled RADIOLOGY order."""
     if not (is_cca_radiology_coordinator(current_user) or is_admin(current_user)):
         raise HTTPException(403, "Only the Radiology Coordinator or Admin may schedule imaging")
     order = _get_org_order(db, order_id, _org_id(current_user))
+    if order.workflow_state == "Cancelled":
+        raise HTTPException(409, "This order was cancelled -- a coordinator must raise a new order to reschedule it")
     body = await request.json()
     scheduled_at = body.get("scheduled_at")
     if not scheduled_at:
         raise HTTPException(422, "scheduled_at is required")
-    order.scheduled_at = datetime.fromisoformat(scheduled_at)
-    order.location = body.get("location")
+    new_scheduled_at = datetime.fromisoformat(scheduled_at)
+    location = body.get("location")
+
+    # "Prevent double-booking of the same scanner/time slot" -- an exact-slot collision check
+    # against another live (non-cancelled) RADIOLOGY order at the same location, since this
+    # model has no appointment-duration field to reason about true overlap with.
+    if location:
+        conflict = db.query(CCAOrder).join(CCAPatient, CCAOrder.patient_id == CCAPatient.id).filter(
+            CCAPatient.organization_id == _org_id(current_user), CCAOrder.order_type == "RADIOLOGY",
+            CCAOrder.id != order.id, CCAOrder.location == location, CCAOrder.scheduled_at == new_scheduled_at,
+            CCAOrder.workflow_state != "Cancelled",
+        ).first()
+        if conflict:
+            raise HTTPException(409, f"{location} is already booked for {new_scheduled_at.isoformat()} (order #{conflict.id})")
+
+    previous_scheduled_at = order.scheduled_at
+    is_reschedule = previous_scheduled_at is not None
+    order.scheduled_at = new_scheduled_at
+    order.location = location
     order.workflow_state = "Scheduled"
     if order.status == "RAISED":
         order.status = "SCHEDULED"
     actor = _actor(current_user)
+    order.scheduled_by = actor
+    if is_reschedule:
+        publish(
+            db, "IMAGING_ORDER_RESCHEDULED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+            title=f"Imaging rescheduled: {order.item_name}", category="INVESTIGATION",
+            description=f"{actor} rescheduled {order.item_name} from {previous_scheduled_at.isoformat()} to {new_scheduled_at.isoformat()}.",
+            order_id=order.id,
+        )
+    else:
+        publish(
+            db, "IMAGING_ORDER_SCHEDULED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+            title=f"Imaging scheduled: {order.item_name}", category="INVESTIGATION",
+            description=f"{actor} scheduled {order.item_name} for {order.scheduled_at.isoformat()}.",
+            order_id=order.id,
+        )
+    db.commit()
+    return {"status": "success", "order": _order_out(order)}
+
+
+@router.post("/imaging/orders/{order_id}/cancel")
+async def cancel_imaging_order(order_id: int, request: Request, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Rescheduling / Cancellation (gap review): requires a documented reason -- unlike a
+    rejected lab specimen, there is no physical specimen to re-collect for an imaging order, so
+    this is a terminal state (the coordinator raises a fresh order if the study is still
+    needed), not a recollection chain."""
+    if not (is_cca_radiology_coordinator(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Radiology Coordinator or Admin may cancel an imaging order")
+    order = _get_org_order(db, order_id, _org_id(current_user))
+    if order.order_type != "RADIOLOGY":
+        raise HTTPException(404, "Not an imaging order")
+    if order.status == "RESULTED":
+        raise HTTPException(409, "Cannot cancel an order that already has a result")
+    if order.workflow_state == "Cancelled":
+        raise HTTPException(409, "This order is already cancelled")
+    body = await request.json()
+    reason = (body.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(422, "reason is required to cancel an imaging order")
+    actor = _actor(current_user)
+    order.workflow_state = "Cancelled"
+    order.status = "CANCELLED"
+    order.cancelled_by = actor
+    order.cancelled_at = datetime.utcnow()
+    order.cancellation_reason = reason
     publish(
-        db, "IMAGING_ORDER_SCHEDULED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
-        title=f"Imaging scheduled: {order.item_name}", category="INVESTIGATION",
-        description=f"{actor} scheduled {order.item_name} for {order.scheduled_at.isoformat()}.",
+        db, "IMAGING_ORDER_CANCELLED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Imaging cancelled: {order.item_name}", category="INVESTIGATION",
+        description=f"{actor} cancelled {order.item_name}: {reason}",
+        order_id=order.id,
+    )
+    db.commit()
+    return {"status": "success", "order": _order_out(order)}
+
+
+@router.post("/imaging/orders/{order_id}/arrive")
+async def record_imaging_arrival(order_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Patient Arrival & Check-In (gap review): an operational check-in distinct from the
+    Radiology Technician's own identity/acquisition verification -- "allow coordinator to
+    update operational status without changing the clinical order"."""
+    if not (is_cca_radiology_coordinator(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Radiology Coordinator or Admin may record patient arrival")
+    order = _get_org_order(db, order_id, _org_id(current_user))
+    if order.order_type != "RADIOLOGY":
+        raise HTTPException(404, "Not an imaging order")
+    if order.workflow_state != "Scheduled":
+        raise HTTPException(409, f"Order must be Scheduled before arrival is recorded (workflow_state={order.workflow_state})")
+    actor = _actor(current_user)
+    order.arrived_at = datetime.utcnow()
+    order.arrived_by = actor
+    order.workflow_state = "Arrived"
+    publish(
+        db, "IMAGING_PATIENT_ARRIVED", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Patient arrived: {order.item_name}", category="INVESTIGATION",
+        description=f"{actor} recorded patient arrival/check-in for {order.item_name}.",
+        order_id=order.id,
+    )
+    db.commit()
+    return {"status": "success", "order": _order_out(order)}
+
+
+@router.post("/imaging/orders/{order_id}/no-show")
+async def record_imaging_no_show(order_id: int, db: Session = Depends(get_cca_db), current_user: dict = Depends(get_current_user)):
+    """Study Lifecycle Tracking (gap review): a scheduled patient who never arrived -- distinct
+    from a coordinator-initiated cancellation, so the reason for the empty slot stays traceable."""
+    if not (is_cca_radiology_coordinator(current_user) or is_admin(current_user)):
+        raise HTTPException(403, "Only the Radiology Coordinator or Admin may record a no-show")
+    order = _get_org_order(db, order_id, _org_id(current_user))
+    if order.order_type != "RADIOLOGY":
+        raise HTTPException(404, "Not an imaging order")
+    if order.workflow_state != "Scheduled":
+        raise HTTPException(409, f"Order must be Scheduled to record a no-show (workflow_state={order.workflow_state})")
+    actor = _actor(current_user)
+    order.workflow_state = "NoShow"
+    publish(
+        db, "IMAGING_PATIENT_NO_SHOW", patient_id=order.patient_id, actor=actor, role=current_user.get("role"),
+        title=f"Patient no-show: {order.item_name}", category="INVESTIGATION",
+        description=f"{actor} recorded a no-show for {order.item_name} (was scheduled for {order.scheduled_at.isoformat() if order.scheduled_at else 'unknown'}).",
         order_id=order.id,
     )
     db.commit()
